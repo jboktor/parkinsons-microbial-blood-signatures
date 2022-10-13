@@ -5,10 +5,21 @@ project:
 website:
   title: "parkinsons-blood-signatures"
   navbar:
-    left:
-      - href: index.qmd
-        text: Home
-      - about.qmd
+    logo: images/SarkisMazmanianLabLogo.png
+    href: https://sarkis.caltech.edu/
+    right: 
+      # - href: index.qmd
+      #   text: Home
+      - text: "About"
+      - href: notebooks/_about.qmd
+      - text: "Background"
+      - href: notebooks/_background.qmd
+      - text: "Results"
+      - href: notebooks/_results.qmd
+      - text: "Notes"
+      - href: notebooks/_notes.qmd
+      - icon: github
+        href: https://github.com/jboktor/parkinsons-microbial-blood-signatures
 
 format:
   html:
