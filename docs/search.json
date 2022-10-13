@@ -1,14 +1,35 @@
 [
   {
-    "objectID": "index.html",
-    "href": "index.html",
+    "objectID": "notebooks/00_notes.html",
+    "href": "notebooks/00_notes.html",
+    "title": "notes",
+    "section": "",
+    "text": "2022-10-13\nasdfasdf"
+  },
+  {
+    "objectID": "notebooks/00_index.html",
+    "href": "notebooks/00_index.html",
     "title": "parkinsons-blood-signatures",
     "section": "",
     "text": "To learn more about Quarto websites visit https://quarto.org/docs/websites.\n\n1 + 1\n\n[1] 2"
   },
   {
-    "objectID": "about.html",
-    "href": "about.html",
+    "objectID": "notebooks/00_background.html",
+    "href": "notebooks/00_background.html",
+    "title": "_background",
+    "section": "",
+    "text": "Insert text here to describe the background and inspiration for the project."
+  },
+  {
+    "objectID": "notebooks/00_results.html",
+    "href": "notebooks/00_results.html",
+    "title": "_results",
+    "section": "",
+    "text": "Quality Control\nasdfasd\nfasdfasdf"
+  },
+  {
+    "objectID": "notebooks/00_about.html",
+    "href": "notebooks/00_about.html",
     "title": "About",
     "section": "",
     "text": "1 + 1\n\n[1] 2"

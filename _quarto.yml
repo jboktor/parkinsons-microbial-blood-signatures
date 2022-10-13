@@ -3,21 +3,22 @@ project:
   output-dir: docs
 
 website:
-  title: "parkinsons-blood-signatures"
+  title: "parkinsons-microbial-blood-signatures"
+  site-url: https://jboktor.github.io/parkinsons-microbial-blood-signatures
+  
   navbar:
-    logo: images/SarkisMazmanianLabLogo.png
+    # logo: images/SarkisMazmanianLabLogo.png
     href: https://sarkis.caltech.edu/
     right: 
-      # - href: index.qmd
-      #   text: Home
+      # - href: notebooks/00_index.qmd
       - text: "About"
-      - href: notebooks/_about.qmd
+        href: notebooks/00_about.qmd
       - text: "Background"
-      - href: notebooks/_background.qmd
+        href: notebooks/00_background.qmd
       - text: "Results"
-      - href: notebooks/_results.qmd
+        href: notebooks/00_results.qmd
       - text: "Notes"
-      - href: notebooks/_notes.qmd
+        href: notebooks/00_notes.qmd
       - icon: github
         href: https://github.com/jboktor/parkinsons-microbial-blood-signatures
 
@@ -30,4 +31,3 @@ format:
     toc-location: left
 
 editor: visual
-
