@@ -77,3 +77,6 @@ slim_report_df <- function(report){
               function(x) gsub("clade_counts_", "", x)) %>% 
     pivot_longer(-all_of(report_vars), names_to = "participant_id", values_to = "count")
 }
+
+
+`%nin%` <- Negate( `%in%` )
