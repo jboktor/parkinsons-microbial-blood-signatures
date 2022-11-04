@@ -2,8 +2,8 @@
 # Caltech - Mazmanian Lab
 # Dec 2021
 
-source("src/_load_packages.R")
-source("src/_misc_functions.R")
+source("notebooks/R_scripts/_load_packages.R")
+source("notebooks/R_scripts/_misc_functions.R")
 sample_info <- readRDS("data/Metadata/static_metdata.rds")
 
 #_______________________________________________________________________________
