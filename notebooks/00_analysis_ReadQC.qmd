@@ -1,0 +1,78 @@
+---
+title: "Untitled"
+format: html
+---
+
+# Visulalizing BBduk ReadQC Parameters
+
+```{r}
+library(glue)
+library(purrr)
+library(tibble)
+library(magrittr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+# library(quarto)
+# library(usethis)
+# usethis::use_tidy_style()
+# quarto_render("00_analysis_ReadQC.qmd")
+# QUARTO_R="/home/jboktor/miniconda3/envs/pdmbsR/bin/R"
+
+```
+
+
+```{r}
+pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS/"
+setwd(glue("{pdmbs_dir}parkinsons-microbial-blood-signatures"))
+outputdir <- "data/interim/readqc/"
+readqc_stats <- readRDS(glue("{outputdir}2022-11-15_bbduk-stats-df.rds") )
+
+df_readqc_stats <-
+  readqc_stats %>%
+  column_to_rownames(var = "sample_id") %>%
+  mutate_all(as.numeric) %>%
+  mutate(
+    percent_reads_removed = 100 * ((input_reads - final_reads)/input_reads) ,
+    percent_bases_removed = 100 * ((input_bases - final_bases)/input_bases)
+  )
+
+df_readqc_stats %>% glimpse()
+
+df_readqc_stats %>% 
+separate()
+
+```
+
+
+```{r}
+
+df_readqc_stats %>% 
+  ggplot(aes(input_bases, percent_bases_removed)) +
+  geom_point(shape = 21) +
+  scale_x_log10() +
+  theme_bw()
+0
+df_readqc_stats %>% 
+  ggplot(aes(input_reads, percent_reads_removed)) +
+  geom_point(shape = 21) +
+  scale_x_log10() +
+  theme_bw()
+
+df_readqc_stats %>% 
+  ggplot(aes(final_reads+ 1)) +
+  geom_histogram(bins = 300) +
+  geom_vline(xintercept = 1e6) +
+  scale_x_log10()
+
+
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
