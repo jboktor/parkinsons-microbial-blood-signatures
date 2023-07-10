@@ -3,248 +3,179 @@
 
 source("notebooks/R_scripts/_load_packages.R")
 source("notebooks/R_scripts/_plot-functions.R")
-idvars <- c("participant_id", "visit_name", "visit_month")
+idvars <- c("participant_id", "visit_name", "visit_month", "GUID")
+mdir <- "data/input/metadata/2021_v2-5release_0510"
+cdir <- glue("{mdir}/clinical")
+
+# Utility functions ----
 
 # Define list filtering function
 remove_idvars <- function(l) {
-  l %>% subset(l %nin% c("participant_id", "visit_name", "visit_month"))
+  l %>% subset(l %nin% idvars)
+}
+read_format_csv <- function(path) {
+  read.csv(file = path,
+           stringsAsFactors = F,
+           header = TRUE) %>%
+    as_tibble()
+}
+collect_cols <- function(df) {
+  unique(colnames(df)) %>% subset(. %nin% idvars)
 }
 
 #_______________________________________________________________________________
 #                              longitudinal data                           ####
 #_______________________________________________________________________________
-
 ## Medical History  ----
-
 medical_history <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/PD_Medical_History.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-medical_history_vars <-
-  unique(colnames(medical_history)) %>% remove_idvars()
-
+  read_format_csv(glue("{cdir}/PD_Medical_History.csv")) %>% select(-GUID)
 family_history <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/Family_History_PD.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-family_history_vars <-
-  unique(colnames(family_history)) %>% remove_idvars()
-
-
+  read_format_csv(glue("{cdir}/Family_History_PD.csv"))  %>% select(-GUID)
 genetic_status <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/Clinically_Reported_Genetic_Status.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-c(GUID, visit_name, visit_month)) %>%
-  mutate_all(na_if, "") %>%
-  mutate_all(na_if, "Unknown/Not collected as enrollment criterion")
-
-genetic_status_vars <-
-  unique(colnames(genetic_status)) %>% remove_idvars()
-
+  read_format_csv(glue("{cdir}/Clinically_Reported_Genetic_Status.csv")) %>% 
+  select(-GUID)
 medical_history_metadata <-
   list(
-    "medical_history" = medical_history_vars,
-    "family_history" = family_history_vars,
-    "genetic_status" = genetic_status_vars
+    "medical_history" = collect_cols(medical_history),
+    "family_history" = collect_cols(family_history),
+    "genetic_status" = collect_cols(genetic_status)
   )
 
 ## Clinical Assessments ----
-mds1 <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/MDS_UPDRS_Part_I.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-mds2 <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/MDS_UPDRS_Part_II.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-mds3 <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/MDS_UPDRS_Part_III.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-mds4 <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/MDS_UPDRS_Part_IV.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
+mds1 <- read_format_csv(glue("{cdir}/MDS_UPDRS_Part_I.csv"))
+mds2 <- read_format_csv(glue("{cdir}/MDS_UPDRS_Part_II.csv"))
+mds3 <- read_format_csv(glue("{cdir}/MDS_UPDRS_Part_III.csv"))
+mds4 <- read_format_csv(glue("{cdir}/MDS_UPDRS_Part_IV.csv"))
 mdsupdrs_vars <-
   unique(c(
-    colnames(mds1),
-    colnames(mds2),
-    colnames(mds3),
-    colnames(mds4)
-  )) %>% remove_idvars()
-
-updrs <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/UPDRS.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-updrs_vars <- unique(colnames(updrs)) %>% remove_idvars()
-
-upsit <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/UPSIT.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-upsit_vars <- unique(colnames(upsit)) %>% remove_idvars()
-
-mmse <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/MMSE.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-mmse_vars <- unique(colnames(mmse)) %>% remove_idvars()
-
-moca <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/MOCA.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-c(
-    GUID,
-    code_education_12years_complete,
-    education_12years_complete
+    collect_cols(mds1),
+    collect_cols(mds2),
+    collect_cols(mds3),
+    collect_cols(mds4)
   ))
-moca_vars <- unique(colnames(moca)) %>% remove_idvars()
 
-modswb_adl <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/Modified_Schwab___England_ADL.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-modswb_adl_vars <- unique(colnames(modswb_adl)) %>% remove_idvars()
-
-rem_mayo <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/REM_Sleep_Behavior_Disorder_Questionnaire_Mayo.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-rem_mayo_vars <- unique(colnames(rem_mayo)) %>% remove_idvars()
-
+updrs <- read_format_csv(glue("{cdir}/UPDRS.csv"))
+upsit <- read_format_csv(glue("{cdir}/UPSIT.csv"))
+mmse <- read_format_csv(glue("{cdir}/MMSE.csv"))
 rem_sk <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/REM_Sleep_Behavior_Disorder_Questionnaire_Stiasny_Kolster.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-rem_sk_vars <- unique(colnames(rem_sk)) %>% remove_idvars()
-
+  read_format_csv(glue(
+    "{cdir}/REM_Sleep_Behavior_Disorder_Questionnaire_Stiasny_Kolster.csv"
+  ))
 sleep_scale <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/Epworth_Sleepiness_Scale.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-sleep_scale_vars <-
-  unique(colnames(sleep_scale)) %>% remove_idvars()
-
+  read_format_csv(glue("{cdir}/Epworth_Sleepiness_Scale.csv"))
+# some duplicate rows to clean in these dfs
+rem_mayo <-
+  read_format_csv(glue(
+    "{cdir}/REM_Sleep_Behavior_Disorder_Questionnaire_Mayo.csv"
+  )) %>%
+  dplyr::group_by(participant_id, visit_name) %>%
+  slice_max(order_by = msq01_act_out_dreams,
+            n = 1,
+            with_ties = FALSE) %>%
+  ungroup()
+moca <- read_format_csv(glue("{cdir}/MOCA.csv")) %>%
+  dplyr::group_by(participant_id, visit_name) %>%
+  slice_max(order_by = moca_abstraction_subscore,
+            n = 1,
+            with_ties = FALSE) %>%
+  ungroup()
+modswb_adl <-
+  read_format_csv(glue("{cdir}/Modified_Schwab___England_ADL.csv")) %>%
+  dplyr::group_by(participant_id, visit_name) %>%
+  slice_max(order_by = mod_schwab_england_pct_adl_score,
+            n = 1,
+            with_ties = FALSE) %>%
+  ungroup()
 
 clincal_assessments_metadata <- list(
   "MDS-UPDRS" = mdsupdrs_vars,
-  "UPDRS" = updrs_vars,
-  # "MOCA" = moca_vars,
-  "Modified_Schwab_ADL" = modswb_adl_vars,
-  "REM_Mayo" = rem_mayo_vars,
-  "REM_Stiasny_Kolster" = rem_sk_vars,
-  "Epworth_Sleepiness_Scale" = sleep_scale_vars
+  "UPDRS" = collect_cols(updrs),
+  "UPSIT" = collect_cols(upsit),
+  "MOCA" = collect_cols(moca),
+  "Modified_Schwab_ADL" = collect_cols(modswb_adl),
+  "REM_Mayo" = collect_cols(rem_mayo),
+  "REM_Stiasny_Kolster" = collect_cols(rem_sk),
+  "Epworth_Sleepiness_Scale" = collect_cols(sleep_scale)
 )
 
 ## Brain Imaging ----
-
-mri <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/MRI.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-mri_vars <- unique(colnames(mri)) %>% remove_idvars()
-
+mri <- read_format_csv(glue("{cdir}/MRI.csv")) %>% select(-GUID)
 datscan <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/DaTSCAN_SBR.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-datscan_vars <- unique(colnames(datscan)) %>% remove_idvars()
+  read_format_csv(glue("{cdir}/DaTSCAN_SBR.csv")) %>% select(-GUID)
+# not longitudinal
+dti <- read_format_csv(glue("{cdir}/DTI.csv")) %>%
+  select(-c(GUID, visit_month)) %>%
+  filter(!grepl("#", dti_measure)) %>%
+  pivot_wider(names_from = "dti_measure", values_from = contains(c("roi", "ref")))
 
-dti <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/DTI.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-dti_vars <- unique(colnames(dti)) %>% remove_idvars()
-
-brain_imaging_metadata <- list("MRI" = mri_vars,
-                               # "DTI" = dti_vars,
-                               "DATSCAN" = datscan_vars)
+brain_imaging_metadata <- list(
+  "MRI" = collect_cols(mri),
+  "DTI" = collect_cols(datscan),
+  "DATSCAN" = collect_cols(dti)
+)
 
 ## Dietary/Behavioral questionnaires ----
-
 smoking_alcohol <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/Smoking_and_alcohol_history.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-smoking_alcohol_vars <-
-  unique(colnames(smoking_alcohol)) %>% remove_idvars()
-
+  read_format_csv(glue("{cdir}/Smoking_and_alcohol_history.csv")) %>% select(-GUID)
 caffeine <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/Caffeine_history.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-caffeine_vars <- unique(colnames(caffeine)) %>% remove_idvars()
-
-pdq <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/PDQ_39.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
-  dplyr::select(-GUID)
-pdq_vars <- unique(colnames(pdq)) %>% remove_idvars()
+  read_format_csv(glue("{cdir}/Caffeine_history.csv")) %>% select(-GUID)
+pdq <- read_format_csv(glue("{cdir}/PDQ_39.csv")) %>%
+  dplyr::group_by(participant_id, visit_name) %>%
+  slice_max(order_by = pdq39_stigma_score,
+            n = 1,
+            with_ties = FALSE) %>%
+  ungroup()
 
 dietary_behavioral_metadata <- list(
-  "smoking_and_alcohol" = smoking_alcohol_vars,
-  "caffeine_intake" = caffeine_vars,
-  "PDQ" = pdq_vars
+  "smoking_and_alcohol" = collect_cols(smoking_alcohol),
+  "caffeine_intake" = collect_cols(caffeine),
+  "PDQ" = collect_cols(pdq)
 )
+
+testdupfunc <- function(df) {
+  df %>%
+    get_dupes(participant_id, visit_name, visit_month)
+}
 
 longitudinal_data <-
   ## Clinical Assessments
   mds1 %>%
-  full_join(mds2, by = idvars) %>%
-  full_join(mds3, by = idvars) %>%
-  full_join(mds4, by = idvars) %>%
-  full_join(updrs, by = idvars) %>%
-  full_join(upsit, by = idvars) %>%
-  # full_join(moca, by = idvars) %>%     # needs additional wrangling - some duplicate values at M0
-  full_join(modswb_adl, by = idvars) %>%
-  full_join(rem_mayo, by = idvars) %>%
-  full_join(rem_sk, by = idvars) %>%
-  full_join(sleep_scale, by = idvars) %>%
+  full_join(mds2) %>%
+  full_join(mds3) %>%
+  full_join(mds4) %>%
+  full_join(updrs) %>%
+  full_join(upsit) %>%
+  full_join(moca) %>%
+  full_join(modswb_adl) %>%
+  full_join(rem_mayo) %>%
+  full_join(rem_sk) %>%
+  full_join(sleep_scale) %>%
   ## Brain Imaging
-  full_join(mri, by = idvars) %>%
-  full_join(datscan, by = idvars) %>%
-  # full_join(dti, by = idvars) %>%         # needs additional wrangling to pivot into wide format
+  full_join(mri) %>%
+  full_join(datscan) %>%
+  full_join(dti) %>%
   ## Dietary/Behavioral questionnaires
-  full_join(smoking_alcohol, by = idvars) %>%
-  full_join(caffeine, by = idvars) %>%
-  full_join(pdq, by = idvars) %>%
+  full_join(smoking_alcohol) %>%
+  full_join(caffeine) %>%
+  full_join(pdq) %>%
   ## Medical History
-  full_join(medical_history, by = idvars) %>%
-  full_join(family_history, by = idvars) %>%
-  full_join(genetic_status, by = "participant_id")
+  full_join(medical_history) %>%
+  full_join(family_history) %>%
+  full_join(genetic_status) %>%
+  ## NOTE: removing secondary visit entries for specific visit
+  filter(!grepl("#", visit_name))
+
+# double check that there are no duplicates here
+longitudinal_data %>% get_dupes(participant_id, visit_month)
 
 records_wo_visit <- longitudinal_data %>%
   filter(visit_name == "LOG") %>%
   dplyr::select(-c("visit_name", "visit_month")) %>%
-  mutate_all(na_if, "") %>%
   remove_empty_cols() %>%
   distinct()
-
 static_start_data <- longitudinal_data %>%
   filter(visit_name == "M0") %>%
-  mutate_all(na_if, "") %>% remove_empty_cols() %>%
+  remove_empty_cols() %>%
   dplyr::select(-c("visit_name", "visit_month")) %>%
   distinct()
 static_start_data2repair <- static_start_data %>%
@@ -267,66 +198,49 @@ static_start_data_v2 <- static_start_data %>%
 #_______________________________________________________________________________
 
 sampdat <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/amp_pd_participants.csv",
-           stringsAsFactors = F,
-           header = T) %>%
-  dplyr::select(participant_id, study)
+  read_format_csv(glue("{mdir}/amp_pd_participants.csv")) %>%
+  dplyr::select(participant_id, guid, study)
 case_control <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/amp_pd_case_control.csv",
-           stringsAsFactors = F,
-           header = TRUE)
-
+  read_format_csv(glue("{mdir}/amp_pd_case_control.csv"))
 # Data wrangling Demographics data
-
-dem <-
-  read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/Demographics.csv",
-           stringsAsFactors = F,
-           header = TRUE) %>%
+ed_ranking <- list(
+  "Greater than 16 years" = 5,
+  "12-16 years" = 4,
+  "Less than 12 years" = 3,
+  "0 years" = 2,
+  "Unknown" = 1
+)
+dem <- read_format_csv(glue("{cdir}/Demographics.csv")) %>%
   dplyr::select(-c(visit_name, visit_month, GUID)) %>%
-  mutate_all(na_if, "Unknown") %>%
-  distinct()
-# process rows with varying responses over time
-dem_responded <- dem %>%
-  filter(!is.na(education_level_years))
-dem_dups <- dem_responded %>%
-  get_dupes(participant_id) %>%
-  filter(education_level_years == "Greater than 16 years") %>%
-  dplyr::select(-dupe_count)
-dem_true_na <- dem %>%
-  filter(is.na(education_level_years)) %>%
-  filter(participant_id %nin% dem_responded$participant_id)
-dem_false_na <- dem %>%
-  filter(is.na(education_level_years)) %>%
-  filter(participant_id %in% dem_responded$participant_id)
-
-dem_repaired <- dem_responded %>%
-  filter(participant_id %nin% dem_dups$participant_id) %>%
-  full_join(dem_dups) %>%
-  filter(participant_id %in% dem_false_na$participant_id) %>%
-  coalesce(dem_false_na)
-
-dem_v2 <- dem_responded %>%
-  filter(participant_id %nin% dem_dups$participant_id) %>%
-  full_join(dem_dups) %>%
-  full_join(dem_repaired) %>%
-  full_join(dem_true_na)
+  distinct() %>%
+  mutate(
+    education_level_years = case_when(
+      education_level_years == "" ~ "Unknown",
+      TRUE ~ education_level_years,
+    )
+  ) %>%
+  mutate(ed_rank = education_level_years %>%
+           purrr::map_dbl(~ unlist(ed_ranking[[.]]))) %>%
+  group_by(participant_id) %>%
+  slice_max(order_by = ed_rank, n = 1) %>%
+  select(-ed_rank)
 
 demographic_vars <- list("demographic_vars" =
                            unique(c(
-                             colnames(dem_v2),
+                             colnames(dem),
                              colnames(sampdat),
                              colnames(case_control)
                            )))
 
-saveRDS(dem_v2, file = glue("data/interim/metadata/{Sys.Date()}_demographics.rds"))
+core_meta <- sampdat %>%
+  full_join(case_control) %>%
+  full_join(dem)
+saveRDS(core_meta,
+        file = glue("data/interim/metadata/{Sys.Date()}_core-metadata.rds"))
 
 # Combining data ----
-
-sample_info <- sampdat %>%
-  full_join(case_control, by = "participant_id") %>%
-  left_join(dem_v2, by = "participant_id") %>%
-  full_join(static_start_data_v2, by = "participant_id") %>%
-  mutate_all(na_if, "Unknown")
+sample_info <- core_meta %>%
+  full_join(static_start_data_v2)
 
 metadata_categories <- list(
   "medical_history" = medical_history_metadata,
@@ -336,18 +250,26 @@ metadata_categories <- list(
   "demographics" = demographic_vars
 )
 
-saveRDS(sample_info, file = glue("data/interim/metadata/{Sys.Date()}_static_metdata.rds"))
+# double checking there are no redundant participant IDs
+sample_info$participant_id %>% length ==
+  sample_info$participant_id %>% unique() %>% length
 
+saveRDS(sample_info,
+        file = glue("data/interim/metadata/{Sys.Date()}_static_metdata.rds"))
 
 # Longitudinal Metadata ----
+sample_info_long <- core_meta %>%
+  full_join(longitudinal_data) # %>% mutate_all(na_if, "Unknown")
 
-sample_info_long <- sampdat %>%
-  full_join(case_control, by = "participant_id") %>%
-  left_join(dem_v2, by = "participant_id") %>%
-  full_join(longitudinal_data, by = "participant_id") %>%
-  mutate_all(na_if, "Unknown")
+# # double checking there are no redundant participant ID x timepoints
+sample_info_long %>% get_dupes(participant_id, visit_month) #%>% View
 
-saveRDS(sample_info_long, file = glue("data/interim/metadata/{Sys.Date()}_longitudinal_metadata.rds"))
+saveRDS(
+  sample_info_long,
+  file = glue(
+    "data/interim/metadata/{Sys.Date()}_longitudinal_metadata.rds"
+  )
+)
 
 #_______________________________________________________________________________
 # Metadata Categories ----
@@ -366,6 +288,15 @@ metadata_categories_df <-
   drop_na(metadata) %>%
   distinct()
 
-
-saveRDS(metadata_categories, file = glue("data/interim/metadata/{Sys.Date()}_metadata_categories.rds"))
-saveRDS(metadata_categories_df, file = glue("data/interim/metadata/{Sys.Date()}_metadata_categories_dataframe.rds"))
+saveRDS(
+  metadata_categories,
+  file = glue(
+    "data/interim/metadata/{Sys.Date()}_metadata_categories.rds"
+  )
+)
+saveRDS(
+  metadata_categories_df,
+  file = glue(
+    "data/interim/metadata/{Sys.Date()}_metadata_categories_dataframe.rds"
+  )
+)
