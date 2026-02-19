@@ -1,0 +1,1032 @@
+---
+title: "cdr3-QTL Analysis"
+editor: source
+author: "Joe Boktor"
+date: '2025-08-07'
+eval: false
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    fig-height: 8
+    fig-width: 14
+---
+
+This notebook will be following analysis defined in (Ishigaki et al., 2022) and implemented [here](https://github.com/immunogenomics/cdr3-QTL).
+
+## Analysis Setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor) 
+library(glue)
+library(furrr)
+library(tictoc)
+library(progress)
+library(entropy)
+library(data.table)
+library(seqinr)
+library(progress)
+library(nlme)
+library(broom.mixed)
+library(MVLM)
+# plotting
+library(ggsci)
+library(scico)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/compute_CDR3-risk-score.R"))
+# source(paste0(src_dir, "/R_scripts/analyze_CDR3qtl.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+entropy_dir <- glue("{wkdir}/data/interim/cdr3_entropy")
+entropy_plots_dir <- glue("{wkdir}/figures/AIRR/cdr3_entropy")
+git_dir <- glue("{home_dir}/git/cdr3-QTL")
+hla_plots_dir <- glue("{wkdir}/figures/AIRR/arcasHLA")
+hla_dir <- glue("{wkdir}/data/interim/airr/arcasHLA/analysis_cleaned")
+
+c3_pheno_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_phenotypes")
+gdata_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_hla_genotypes")
+hla_4d_to_aa_dir <- glue("{wkdir}/data/input/cdr3qtl/hla_4d_to_aa")
+tcr_cdr3_riskscore_dir <- glue("{wkdir}/data/interim/cdr3_qtl/scoring_cdr3-risk-scores")
+tcr_cdr3_riskscore_complied <- 
+    glue("{wkdir}/data/interim/cdr3_qtl/scoring_cdr3-risk-scores_complied")
+
+# dir.create(tcr_cdr3_riskscore_dir, showWarnings = FALSE, recursive = TRUE)
+# dir.create(tcr_cdr3_riskscore_complied, showWarnings = FALSE, recursive = TRUE)
+# dir.create(gdata_dir, showWarnings = FALSE, recursive = TRUE)
+# dir.create(c3_pheno_dir, showWarnings = FALSE, recursive = TRUE)
+future::plan(multisession, workers = 16)
+```
+
+
+```{r}
+cdr3_phenotypes <- c(
+  "cdr3_p1_strat_filtered_cv1k", "cdr3_p1_unstrat_filtered_cv1k", 
+  "cdr3_p2_strat_filtered_cv1k", "cdr3_p2_unstrat_filtered_cv1k")
+
+all_imgt_pos <- c(
+    "P104","P105","P106","P107","P108","P109","P110","P111",
+    "P111.1","P112.2","P112.1",
+    "P112","P113","P114","P115","P116","P117","P118")
+imgt_pos_testable <- all_imgt_pos[4:16]
+
+align_imgt <- function(CDR3){
+    AA <- unlist(strsplit(CDR3, ""));
+    N_AA_fow <- nchar(CDR3) %/% 2 + nchar(CDR3) %% 2;
+    N_AA_na <- 18 - nchar(CDR3);
+    AAmod <- c(
+        AA[1:(N_AA_fow)],
+        rep("NA",N_AA_na),
+        AA[(N_AA_fow + 1):nchar(CDR3)]
+    );
+    names(AAmod) <- all_imgt_pos
+    return(t(AAmod))
+}
+
+```
+
+
+Plotting HLA risk score distribution
+
+```{r}
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  mutate(case_control_other_latest = factor(case_control_other_latest, levels = c("Control", "Case"))) %>% 
+  glimpse()
+
+p_hla_risk_score_dist <- metadata %>%
+    dplyr::select(participant_id, case_control_other_latest, pd_hla_risk_score) %>% 
+    distinct() %>% 
+    ggplot(aes(x = case_control_other_latest, y = pd_hla_risk_score)) +
+    # geom_violin() +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(width = 0.3, height = 0, alpha = 0.3) +
+    theme_bw() +
+    # ggpubr::stat_compare_means(method = "wilcox.test", label = "p.signif") +
+    labs(x = NULL, y = "HLA Risk Score") +
+    scale_x_discrete(labels = c("Control", "Case")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+    filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/hla_risk_score_dist.png"),
+    plot = p_hla_risk_score_dist,
+    width = 3,
+    height = 4
+)
+
+```
+
+
+
+Here is a single instance example of calculating CDR3 risk score beta-coefficients using the HLA risk score covariate.
+
+```{r}
+dlist <- generate_model_inputs_cdr3_riskscore(
+    phenotype_type = "cdr3_p1_unstrat_filtered_cv1k",
+    cdr3_pos = "P109",
+    cdr3length = NA_character_
+)
+
+# M <- dlist$M %>% glimpse()
+pdata <- dlist$pdata %>% glimpse()
+covar_df <- dlist$covar_df %>% glimpse()
+
+# running the LM for each CDR3 AA
+mod_list <- unique(pdata$AA) %>%
+    purrr::set_names(glue("PD-CDR3-Risk-Score_CDR3-{.}")) %>% 
+    purrr::map(
+        ~ run_lm_site_pos_pair_riskscore(
+            pdata = pdata,
+            covar_df = covar_df,
+            cdr3_aa = .
+        )
+)
+pdata$participant_id %>% unique() %>% length()
+
+lm_results_df <- mod_list %>% 
+    purrr::map(broom::tidy) %>% 
+    bind_rows(.id = "model_name") %>% 
+    mutate(cdr3_aa = strex::str_after_last(model_name, "CDR3-")) %>% 
+    glimpse()
+
+```
+
+## Executing the HLA-risk score LM calculation for each CDR3 AA phenotype 
+
+```{r}
+# slurm batchtools parallelzed alternative
+batch_params <- expand.grid(
+    "phenotype_type" = cdr3_phenotypes, 
+    "cdr3_pos" = imgt_pos_testable,
+    "cdr3length" = c(12:18)
+    ) %>% 
+    as.data.frame() %>%
+    mutate(
+        phenotype_type = as.character(phenotype_type),
+        cdr3_pos = as.character(cdr3_pos),
+        results_dir = glue("{wkdir}/data/interim/cdr3_qtl/results_cdr3-risk-score/{phenotype_type}"),
+        cdr3length = as.character(cdr3length),
+        wkdir = wkdir,
+        cdr3length = case_when(
+            grepl("_unstrat_", phenotype_type) ~ NA_character_,
+            TRUE ~ cdr3length
+        )
+    ) %>%
+    dplyr::distinct() %>%
+    filter(!file.exists(glue("{results_dir}/lm_model_results__",
+        "{phenotype_type}__CDR3pos-{cdr3_pos}__CDR3len-{cdr3length}.csv"))) %>% 
+    glimpse()
+
+# View(batch_params)
+
+calculate_cdr3_riskscore_betacoefs(
+    results_dir = batch_params$results_dir[1],
+    phenotype_type = batch_params$phenotype_type[1],
+    cdr3_pos = batch_params$cdr3_pos[1],
+    cdr3length = batch_params$cdr3length[1]
+)
+
+safe_calculate_cdr3_riskscore_betacoefs_detailed <- purrr::safely(
+  calculate_cdr3_riskscore_betacoefs,
+  otherwise = NULL,
+  quiet = FALSE
+)
+
+# future::plan(multisession, workers = 8)
+1:nrow(batch_params) %>% 
+    purrr::walk(
+        ~ safe_calculate_cdr3_riskscore_betacoefs_detailed(
+            results_dir = batch_params$results_dir[.],
+            phenotype_type = batch_params$phenotype_type[.],
+            cdr3_pos = batch_params$cdr3_pos[.],
+            cdr3length = batch_params$cdr3length[.]
+        )
+    )
+
+# # Trouble-shooting
+# calculate_cdr3_riskscore_betacoefs(
+#     results_dir = glue("{wkdir}/data/interim/cdr3_qtl/results_cdr3-risk-score/cdr3_p1_strat_filtered_cv1k"),
+#     phenotype_type = "cdr3_p1_strat_filtered_cv1k",
+#     cdr3_pos = "P110",
+#     cdr3length = 12
+# )
+
+# dlist <- generate_model_inputs_cdr3_riskscore(
+#     phenotype_type = "cdr3_p1_strat_filtered_cv1k",
+#     cdr3_pos = "P110",
+#     cdr3length = 12
+# )
+
+# pdata <- dlist$pdata
+# covar_df <- dlist$covar_df
+
+# # running the LM for each combination
+# mod_list <- unique(pdata$AA) %>%
+#     purrr::set_names(glue("PD-CDR3-Risk-Score_CDR3-{.}")) %>% 
+#     purrr::map(
+#         ~ run_lm_site_pos_pair_riskscore(
+#             pdata = pdata, 
+#             covar_df = covar_df,
+#             cdr3_aa = .
+#         )
+#     )
+
+# lm_results_df <- mod_list %>% 
+#     purrr::map(broom::tidy) %>% 
+#     bind_rows(.id = "model_name") %>% 
+#     mutate(cdr3_aa = strex::str_after_last(model_name, "CDR3-")) %>% 
+#     glimpse()
+
+```
+
+
+Loading in the results
+
+```{r}
+resdir <- glue("{wkdir}/data/interim/cdr3_qtl/results_cdr3-risk-score")
+
+cdr3_betacoef <- list.files(resdir, pattern = ".csv", full.names = TRUE, recursive = TRUE) %>% 
+    purrr::set_names(basename(.)) %>% 
+    purrr::map(read_csv) %>% 
+    bind_rows(.id = "file_name") %>% 
+    glimpse()
+
+cdr3_betacoef %<>% 
+    mutate(
+          descriptor = basename(file_name) %>% gsub("lm_model_results__", "", .),
+          pheno = str_before_first(descriptor, "__"),
+          cdr3_pos = descriptor %>% str_after_first("CDR3pos-") %>% str_before_first("__"),
+          cdr3_len = descriptor %>% str_after_first("CDR3len-") %>% str_before_first(".csv")
+    ) %>% 
+    janitor::clean_names() %>% 
+    filter(!is.na(cdr3_aa)) %>% 
+    glimpse()
+
+# # viewing table of top hits across all phenotypes
+# cdr3_betacoef %>% 
+#     filter(term == "pd_hla_risk_score") %>% 
+#     slice_min(p_value, n = 300) %>% 
+#     View()
+
+# Visualizing the distribution of p-values across all phenotypes
+cdr3_betacoef %>% 
+    ggplot(aes(p_value)) +
+    facet_wrap(~pheno,ncol=2) +
+    geom_histogram(bins = 100) +
+    theme_bw() +
+    labs(title = "CDR3 risk score beta-coefficients")
+
+cdr3_betacoef_sig <- cdr3_betacoef %>% 
+    group_by(pheno) %>% 
+    filter(term == "pd_hla_risk_score") %>% 
+    mutate(adj_p = p.adjust(p_value, method = "BH")) %>% 
+    filter(adj_p < 0.05) %>% 
+    arrange(adj_p) %>% 
+    glimpse()
+
+# Number of significant hits across all phenotypes
+cdr3_betacoef_sig$pheno %>% table()
+
+betacoef_list <- cdr3_betacoef_sig %>% split(.$pheno)
+
+cdr3_betacoef %>% 
+    filter(pheno == "cdr3_p2_strat_filtered_cv1k") %>% 
+    glimpse()
+
+# ----------------------------------------------------------------------------
+# Creating sequence logo for the most significant CDR3 AA associations ----
+
+library(ggseqlogo)
+logo_df_full <- betacoef_list$cdr3_p2_strat_filtered_cv1k %>% 
+    mutate(cdr3_len = as.numeric(cdr3_len)) %>% 
+    mutate(cdr3_pos = factor(cdr3_pos, levels = all_imgt_pos)) %>% 
+    glimpse()
+# View(logo_df_full)
+
+logo_df_summed <- logo_df_full %>% 
+    group_by(cdr3_aa, cdr3_pos) %>% 
+    summarize(summed_effect = sum(estimate), .groups = "drop") %>% 
+    glimpse()
+logo_df_summed_mat <- logo_df_summed %>% 
+    arrange(cdr3_pos) %>% 
+    pivot_wider(names_from = cdr3_pos, values_from = summed_effect, values_fill = 0) %>% 
+    column_to_rownames(var = "cdr3_aa") %>% 
+    as.matrix()
+
+# Saving cumulative sequence logo
+pseqlogo_summed <- ggseqlogo(logo_df_summed_mat, seq_type='aa',  method='custom') +
+    ylab('Effect size') +
+    xlab('CDR3 amino acid position') +
+    scale_x_continuous(
+        breaks = 1:ncol(logo_df_summed_mat),                 # positions to tick
+        labels = colnames(logo_df_summed_mat)                # set custom labels
+    ) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+ggsave(
+    filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/cdr3_p2_strat_filtered_cv1k_logo_summed.png"),
+    plot = pseqlogo_summed,
+    width = 3.5,
+    height = 3,
+    dpi = 600
+)
+ggsave(
+    filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/cdr3_p2_strat_filtered_cv1k_logo_summed_large.png"),
+    plot = pseqlogo_summed,
+    width = 10,
+    height = 4
+)
+
+# To create sequence logo - sum the effect sizes of significant CDR3 AA assocations 
+
+logo_df_full %>% glimpse
+# l <- 15
+for (l in unique(logo_df_full$cdr3_len)) {
+    logo_df_summed <- logo_df_full %>% 
+        filter(cdr3_len == l) %>% 
+        group_by(cdr3_aa, cdr3_pos) %>% 
+        summarize(summed_effect = sum(estimate), .groups = "drop") %>% 
+        glimpse()
+    logo_df_summed_mat <- logo_df_summed %>% 
+        pivot_wider(names_from = cdr3_pos, values_from = summed_effect, values_fill = 0) %>% 
+        column_to_rownames(var = "cdr3_aa") %>% 
+        as.matrix()
+    pseqlogo_summed_len <- ggseqlogo(logo_df_summed_mat, seq_type='aa',  method='custom') +
+        ylab('Effect size') +
+        xlab('CDR3 amino acid position') +
+        ggtitle(glue("CDR3 length {l}")) +
+        scale_x_continuous(
+            breaks = 1:ncol(logo_df_summed_mat),                 # positions to tick
+            labels = colnames(logo_df_summed_mat)                # set custom labels
+        ) +
+        theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+    ggsave(
+        filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/cdr3_p2_strat_filtered_cv1k_logo_summed_len{l}.png"),
+        plot = pseqlogo_summed_len,
+        width = 5,
+        height = 4
+    )
+
+}
+
+
+
+
+
+```
+
+
+# Scoring TCRs with HLA risk score Beta-Coefficients to generate CDR3 risk scores
+
+Here we develop a single case of scoring a test TCR
+
+```{r}
+trust4_reports_tcrb <- readRDS(
+  glue("{wkdir}/data/interim/airr/trust4_reports_tcrb_clean_df_2025-07-08.rds")
+) %>% 
+  glimpse()
+
+trust4_reports_tcrb %>% glimpse()
+betacoef_list %>% glimpse()
+
+
+# Breaking down the function
+x <- "CASSVGQGLGYTF"
+# align_imgt_df()
+# df <- data.frame(ptarget=unlist(strsplit(x, "")), pos=1:len_cdr3 )
+# df$tag <- paste0(df$ptarget, ":", df$pos);
+
+len_cdr3 <- nchar(x)
+cdr3_aln <- align_imgt(x)
+cdr3_data <- data.frame(ptarget = cdr3_aln[1,], pos = colnames(cdr3_aln)) %>% 
+    mutate(tag = paste0(ptarget, ":", pos)) %>% 
+    glimpse()
+phenotype_type <- "cdr3_p2_strat_filtered_cv1k"
+pos_beta <- subset(betacoef_list[[phenotype_type]], cdr3_len==len_cdr3 ) #len_cdr3=15
+pos_beta$tag <- paste0(pos_beta$cdr3_aa, ":", pos_beta$cdr3_pos)
+pos_beta <- pos_beta[,c("tag","estimate")]
+
+cdr3_data <- merge( pos_beta, cdr3_data, by="tag" )
+cdr3_data
+if ( nrow(cdr3_data) == 0 ){
+    score = 0
+} else {
+    score = sum(cdr3_data$estimate)
+}
+score
+
+```
+
+
+Executing TCR scoring at scale for all 6 + million TCRs
+
+```{r}
+# quick speed test
+for (k in c(10, 100, 1000)) {
+    tic()
+    score_tcrs_with_betacoefs_list(
+        trust4_reports_tcrb$CDR3aa[1:k],
+        "cdr3_p2_strat_filtered_cv1k",
+        betacoef_list
+        )
+    toc()
+}
+# 100k would proably take 1.5 minutes, 1M would take 15 minutes 6 million TCRs would take 1.5 hours * 4 iterations - is way too slow
+
+future::plan(multisession, workers = 8)
+p_score_list <- list()
+for (p in names(betacoef_list)) {
+    message(glue("{get_time()} Scoring {p}..."))
+    p_score_list[[p]] <- trust4_reports_tcrb$CDR3aa %>% 
+        purrr::set_names() %>% 
+        furrr::future_map(
+            ~ score_tcrs_with_betacoefs(x = ., 
+                phenotype_type = p,
+                betacoef_list)
+        )
+}
+
+
+```
+
+
+```{r}
+# slurm batchtools parallelzed alternative
+# lets put about 100k TCRs per chunk
+length(trust4_reports_tcrb$CDR3aa)/100000
+tcr_chunks <- chunk_func(trust4_reports_tcrb$CDR3aa, 67) # 67 chunks of 100k TCRs
+names(tcr_chunks)
+
+batch_params <- expand.grid(
+    "x" = tcr_chunks,
+    "phenotype_type" = names(betacoef_list)) %>% 
+    as.data.frame() %>% 
+    mutate(betacoef_list = list(betacoef_list)) %>% 
+    mutate(filename = glue(
+        "{tcr_cdr3_riskscore_dir}/chunk_{names(x)}__{phenotype_type}__padj05.rds")) %>% 
+    glimpse()
+
+# configure registry ----
+breg <- breg_setup(cluster_name = "CDR3_QTL_RISK_SCORE", 
+    log_dir = glue("{wkdir}/.cluster_runs/"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl")
+    )
+
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = score_tcrs_with_betacoefs_list,
+  args = batch_params,
+  reg = breg
+)
+nrow(batch_params)
+
+# jobs[, chunk := chunk(job.id, chunk.size = 40)]
+# print(jobs[, .N, by = chunk])
+
+# can probably do two per minute so x jobs / 2 = minutes
+submitJobs(jobs,
+  resources = list(
+    walltime = "1:00:00",
+    memory = "5GB",
+    ncpus = 1,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+Aggregating scored TCRs
+
+```{r}
+chunked_tcr_scores <- list.files(
+    tcr_cdr3_riskscore_dir,
+    pattern = "chunk_",
+    full.names = TRUE,
+    recursive = TRUE
+) 
+
+name_map <- c(
+    "cdr3_p1_strat_filtered_cv1k" = "risk_score_p1_full_strat",
+    "cdr3_p1_unstrat_filtered_cv1k" = "risk_score_p1_full_unstrat",
+    "cdr3_p2_strat_filtered_cv1k" = "risk_score_p2_glrm_strat",
+    "cdr3_p2_unstrat_filtered_cv1k" = "risk_score_p2_glrm_unstrat"
+)
+
+tmp_df <- list()
+for (p in cdr3_phenotypes) {
+    tmp_df[[p]] <- chunked_tcr_scores %>% 
+        keep(grepl(p, .)) %>% 
+        purrr::set_names(basename(.)) %>% 
+        purrr::map(~ readRDS(.) %>% stack()) %>% 
+        bind_rows(.id = "path") %>% 
+        dplyr::rename(CDR3aa = ind, !!name_map[[p]] := values) %>% 
+        mutate(CDR3aa = as.character(CDR3aa)) %>% 
+        mutate(chunk_n = str_after_first(path, "chunk_") %>% str_before_first("__") %>% as.numeric()) %>% 
+        arrange(chunk_n) %>% 
+        glimpse()
+}
+
+# checking that CDR3aa are all aligned
+cdr3_phenotypes %>% purrr::map(
+    ~ all(tmp_df[[.]]$CDR3aa == tmp_df[["cdr3_p1_strat_filtered_cv1k"]]$CDR3aa)
+)
+
+# tmp_df[["cdr3_p1_strat_filtered_cv1k"]] %>% glimpse()
+# tmp_df[["cdr3_p1_strat_filtered_cv1k"]]$path %>% unique()
+
+# tst <- tmp_df[["cdr3_p1_strat_filtered_cv1k"]] %>% 
+#     mutate(chunk_n = str_after_first(path, "chunk_") %>% str_before_first("__") %>% as.numeric()) %>% 
+#     arrange(chunk_n) %>% 
+#     glimpse()
+
+tst$chunk_n %>% table()
+
+cdr3_risk_score_df <- data.frame(
+    CDR3aa = tmp_df[[cdr3_phenotypes[1]]]$CDR3aa,
+    risk_score_p1_full_strat = tmp_df[["cdr3_p1_strat_filtered_cv1k"]]$risk_score_p1_full_strat,
+    risk_score_p1_full_unstrat = tmp_df[["cdr3_p1_unstrat_filtered_cv1k"]]$risk_score_p1_full_unstrat,
+    risk_score_p2_glrm_strat = tmp_df[["cdr3_p2_strat_filtered_cv1k"]]$risk_score_p2_glrm_strat,
+    risk_score_p2_glrm_unstrat = tmp_df[["cdr3_p2_unstrat_filtered_cv1k"]]$risk_score_p2_glrm_unstrat
+) %>% 
+    glimpse()
+
+saveRDS(cdr3_risk_score_df, 
+    glue("{tcr_cdr3_riskscore_complied}/",
+        "risk_scores_padj05_{Sys.Date()}.rds"))
+
+```
+
+# Visualizing CDR3 risk score results
+
+```{r}
+cdr3_risk_score_df <- readRDS(
+    glue("{tcr_cdr3_riskscore_complied}/",
+        "risk_scores_padj05_2025-08-10.rds")) %>% 
+        dplyr::rename(ind = CDR3aa)
+cdr3_risk_score_df %>% glimpse()
+
+trust4_reports_tcrb <- readRDS(
+  glue("{wkdir}/data/interim/airr/trust4_reports_tcrb_clean_df_2025-07-08.rds")
+) %>% 
+  glimpse()
+
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  mutate(case_control_other_latest = factor(case_control_other_latest, levels = c("Control", "Case"))) %>% 
+  glimpse()
+
+trust4_reports_tcrb_c3rc <- bind_cols(
+    trust4_reports_tcrb,
+    cdr3_risk_score_df) %>% 
+    glimpse()
+
+# Checking that CDR3aa are all aligned
+trust4_reports_tcrb_c3rc$CDR3aa[1:20000] == trust4_reports_tcrb_c3rc$ind[1:20000]
+all(trust4_reports_tcrb_c3rc$CDR3aa == trust4_reports_tcrb_c3rc$ind)
+
+trust4_reports_tcrb_c3rc %>% glimpse()
+
+avg_cdr3_risk_score_df <- trust4_reports_tcrb_c3rc %>% 
+    group_by(participant_id, CDR3aa_length) %>% 
+    # dplyr::summarize(
+    #     avg_risk_score_p1_full_strat = mean(risk_score_p1_full_strat, na.rm = TRUE),
+    #     avg_risk_score_p1_full_unstrat = mean(risk_score_p1_full_unstrat, na.rm = TRUE),
+    #     avg_risk_score_p2_glrm_strat = mean(risk_score_p2_glrm_strat, na.rm = TRUE),
+    #     avg_risk_score_p2_glrm_unstrat = mean(risk_score_p2_glrm_unstrat, na.rm = TRUE)
+    # ) %>% 
+    dplyr::summarize(
+        across(starts_with("risk_score"), 
+               list(
+                   avg = ~mean(., na.rm = TRUE),
+                   p75 = ~quantile(., 0.75, na.rm = TRUE),
+                   p90 = ~quantile(., 0.90, na.rm = TRUE)
+               ), 
+               .names = "{.col}_{.fn}"),
+    ) %>% 
+    dplyr::left_join(
+        metadata %>% select(participant_id, case_control_other_latest, pd_hla_risk_score),
+        relationship = "many-to-many") %>% 
+    dplyr::distinct() %>% 
+    glimpse()
+
+# avg_cdr3_risk_score_df %>% glimpse()
+avg_cdr3_risk_score_df_long <- avg_cdr3_risk_score_df %>% 
+    dplyr::select(-contains("_p75"), -contains("_p90")) %>% 
+    pivot_longer(
+        cols = ends_with("avg"),
+        names_to = "risk_score_type",
+        values_to = "risk_score_value"
+    ) %>%
+    dplyr::mutate(risk_score_type = case_when(
+        risk_score_type == "risk_score_p1_full_strat_avg" ~ "P1 Full Stratified",
+        risk_score_type == "risk_score_p1_full_unstrat_avg" ~ "P1 Full Unstratified",
+        risk_score_type == "risk_score_p2_glrm_strat_avg" ~ "P2 GLRM Stratified",
+        risk_score_type == "risk_score_p2_glrm_unstrat_avg" ~ "P2 GLRM Unstratified"
+    )) %>% 
+    glimpse()
+
+p_cdr3vshla_risk_score <- avg_cdr3_risk_score_df_long %>% 
+    filter(CDR3aa_length >= 12 & CDR3aa_length <= 18) %>% 
+    ggplot(aes(x = pd_hla_risk_score, y = risk_score_value, color = case_control_other_latest)) +
+    geom_point(alpha = 0.8, shape = 21) +
+    theme_bw() +
+    geom_smooth(method = "lm") +
+    scale_color_d3() +
+    ggpubr::stat_cor(method = "pearson", label.x.npc = 0.05, label.y.npc = 0.9) +
+    facet_grid(CDR3aa_length~risk_score_type, scales = "free") +
+    labs(title="CDR3 risk score",x="HLA risk score",y="CDR3 risk score") +
+    theme(legend.position = "bottom")
+
+ggsave(
+    filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/cdr3_risk_score_vshla_risk_score_all_methods.png"),
+    plot = p_cdr3vshla_risk_score,
+    width = 15,
+    height = 15
+)
+
+
+p_cdr3vshla_risk_score_onlyp2strat <- avg_cdr3_risk_score_df_long %>% 
+    filter(CDR3aa_length >= 12 & CDR3aa_length <= 18) %>% 
+    filter(risk_score_type == "P2 GLRM Stratified") %>% 
+    ggplot(aes(x = pd_hla_risk_score, y = risk_score_value, color = case_control_other_latest)) +
+    geom_point(alpha = 0.8, shape = 21) +
+    theme_bw() +
+    geom_smooth(method = "lm") +
+    scale_color_d3() +
+    ggpubr::stat_cor(method = "pearson", label.x.npc = 0.05, label.y.npc = 0.99) +
+    facet_wrap(~CDR3aa_length, nrow = 2, scales = "free") +
+    labs(title="CDR3 risk score vs HLA risk score",x="HLA risk score",y="CDR3 risk score (P2 GLRM Stratified)") +
+    theme(legend.position = "bottom")
+
+ggsave(
+    filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/cdr3_risk_score_vshla_risk_score_p2strat.png"),
+    plot = p_cdr3vshla_risk_score_onlyp2strat,
+    width = 10,
+    height = 8
+)
+
+p_cdr3vshla_risk_score_onlyp2strat_len15only <- avg_cdr3_risk_score_df_long %>% 
+    filter(CDR3aa_length == 15) %>%
+    filter(risk_score_type == "P2 GLRM Stratified") %>% 
+    ggplot(aes(x = pd_hla_risk_score, y = risk_score_value, color = case_control_other_latest)) +
+    geom_point(alpha = 0.5, shape = 21) +
+    theme_bw() +
+    geom_smooth(method = "lm") +
+    scale_color_d3() +
+    ggpubr::stat_cor(method = "pearson", label.x.npc = 0.05, label.y.npc = 0.99) +
+    # facet_wrap(~CDR3aa_length, nrow = 2, scales = "free") +
+    labs(x="HLA risk score", y="CDR3 risk score") +
+    theme(legend.position = "none")
+
+ggsave(
+    filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/cdr3_risk_score_vshla_risk_score_p2strat_len15only.png"),
+    plot = p_cdr3vshla_risk_score_onlyp2strat_len15only,
+    width = 2.5,
+    height = 2.5
+)
+
+p_cdr3vscasecontrol <- avg_cdr3_risk_score_df_long %>% 
+    filter(CDR3aa_length >= 12 & CDR3aa_length <= 18) %>% 
+    filter(risk_score_type == "P2 GLRM Stratified") %>% 
+    ggplot(aes(x = case_control_other_latest, y = risk_score_value)) +
+    geom_point(alpha = 0.3, position = position_jitter(width = 0.2)) +
+    geom_boxplot(outlier.shape = NA) +
+    facet_wrap(~CDR3aa_length, nrow = 2, scales = "free_y") +
+    theme_bw() +
+    labs(title="Average CDR3 risk score",x="Case/Control",y="CDR3 risk score (P2 GLRM Stratified)")
+
+ggsave(
+    filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/cdr3_risk_score_vscasecontrol.png"),
+    plot = p_cdr3vscasecontrol,
+    width = 8,
+    height = 5
+)
+
+
+
+# Looking at different points of the risk score distribution
+avg_cdr3_risk_score_df %>% glimpse()
+
+avg_cdr3_risk_score_df_long_p75 <- avg_cdr3_risk_score_df %>% 
+    pivot_longer(
+        cols = "risk_score_p2_glrm_strat_p75",
+        names_to = "risk_score_type",
+        values_to = "risk_score_value"
+    ) %>% 
+    # dplyr::mutate(risk_score_type = case_when(
+    #     risk_score_type == "avg_risk_score_p1_full_strat" ~ "P1 Full Stratified",
+    #     risk_score_type == "avg_risk_score_p1_full_unstrat" ~ "P1 Full Unstratified",
+    #     risk_score_type == "avg_risk_score_p2_glrm_strat" ~ "P2 GLRM Stratified",
+    #     risk_score_type == "avg_risk_score_p2_glrm_unstrat" ~ "P2 GLRM Unstratified"
+    # )) %>% 
+    glimpse()
+
+p_cdr3vscasecontrol_p75 <- avg_cdr3_risk_score_df_long_p75 %>% 
+    filter(CDR3aa_length == 15) %>% 
+    # filter(CDR3aa_length >= 12 & CDR3aa_length <= 18) %>% 
+    # filter(risk_score_type == "P2 GLRM Stratified") %>% 
+    ggplot(aes(x = case_control_other_latest, y = risk_score_value)) +
+    geom_point(alpha = 0.3, position = position_jitter(width = 0.2)) +
+    geom_boxplot(outlier.shape = NA) +
+    # ggpubr::stat_compare_means(method = "wilcox.test", label = "p.signif") +
+    facet_wrap(~CDR3aa_length, nrow = 2, scales = "free_y") +
+    theme_bw() +
+    labs(title="CDR3 risk score at \n75th percentile",x=NULL, y="CDR3 risk score") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+    filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/cdr3_risk_score_vs_casecontrol_p75.png"),
+    plot = p_cdr3vscasecontrol_p75,
+    width = 3,
+    height = 5
+)
+
+```
+
+
+What does this distribution look like within repertoires?
+
+```{r}
+# trust4_reports_tcrb_c3rc %>% 
+#     filter(CDR3aa_length == 15) %>% glimpse()
+
+# Create ggridgeline density plot for 25 randomly selected participants
+# Load required package
+library(ggridges)
+
+# Set seed for reproducibility and select 25 random participants
+set.seed(123)
+random_participants <- trust4_reports_tcrb_c3rc$participant_id %>% 
+    unique() %>% 
+    sample(100)
+
+# Create the ggridgeline density plot
+ggridge_density_plot <- trust4_reports_tcrb_c3rc %>% 
+    # filter(participant_id %in% random_participants) %>% 
+    # filter(CDR3aa_length == 15) %>% 
+    filter(CDR3aa_length >= 12 & CDR3aa_length <= 18) %>% 
+    ggplot(aes(
+        x = risk_score_p2_glrm_strat, 
+        y = case_control_other_latest,
+        fill = case_control_other_latest
+    )) +
+    geom_density_ridges(
+        alpha = 0.7,
+        scale = 2,
+        rel_min_height = 0.01
+    ) +
+    scale_fill_d3() +
+    theme_ridges() +
+    facet_wrap(~CDR3aa_length, ncol = 1, scales = "free_y") +
+    labs(
+        title = "Distribution of CDR3 Risk Scores (P2 GLRM Stratified)",
+        subtitle = "25 Randomly Selected Participants - CDR3 Length 15",
+        x = "Risk Score (P2 GLRM Stratified)",
+        y = "Participant ID",
+        fill = "Case/Control Status"
+    ) +
+    theme(
+        legend.position = "bottom",
+        axis.text.y = element_text(size = 8),
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 12)
+    )
+
+# Display the plot
+ggridge_density_plot
+
+# Save the plot
+ggsave(
+    filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/ggridge_density_25participants_p2strat.png"),
+    plot = ggridge_density_plot,
+    width = 6,
+    height = 12,
+    dpi = 300
+)
+# Create the ggridgeline density plot
+ggridge_density_plot <- trust4_reports_tcrb_c3rc %>% 
+    # filter(participant_id %in% random_participants) %>% 
+    # filter(CDR3aa_length == 15) %>% 
+    filter(CDR3aa_length >= 12 & CDR3aa_length <= 18) %>% 
+    ggplot(aes(
+        x = risk_score_p2_glrm_strat, 
+        y = case_control_other_latest,
+        fill = case_control_other_latest
+    )) +
+    geom_density_ridges(
+        alpha = 0.7,
+        scale = 2,
+        rel_min_height = 0.01
+    ) +
+    scale_fill_d3() +
+    theme_ridges() +
+    facet_wrap(~CDR3aa_length, ncol = 1, scales = "free_y") +
+    labs(
+        title = "Distribution of CDR3 Risk Scores (P2 GLRM Stratified)",
+        subtitle = "25 Randomly Selected Participants - CDR3 Length 15",
+        x = "Risk Score (P2 GLRM Stratified)",
+        y = "Participant ID",
+        fill = "Case/Control Status"
+    ) +
+    theme(
+        legend.position = "bottom",
+        axis.text.y = element_text(size = 8),
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 12)
+    )
+
+# Display the plot
+ggridge_density_plot
+
+# Save the plot
+ggsave(
+    filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/ggridge_density_25participants_p2strat.png"),
+    plot = ggridge_density_plot,
+    width = 6,
+    height = 12,
+    dpi = 300
+)
+
+```
+
+
+Attempt at looking at clusters of values
+
+```{r}
+library(dbscan)
+my_vector <- c(1, 1.2, 1.1, 5, 5.2, 5.1, 10, 10.3, 10.2, 15, 15.1, 15.2, 20)
+my_data <- as.matrix(my_vector) # Convert to matrix
+kNNdistplot(my_data, k = 2) # k should be minPts - 1
+# Choose suitable eps and minPts based on kNNdistplot and data characteristics
+# For example:
+eps_val <- 0.5 
+minPts_val <- 2
+
+dbscan_result <- dbscan(my_data, eps = eps_val, minPts = minPts_val)
+
+```
+
+
+
+```{r}
+# Load GGally if not already loaded
+library(GGally)
+
+# Create a correlation plot for the four average risk score variables
+correlation_plot <- avg_cdr3_risk_score_df %>%
+  select(
+    avg_risk_score_p1_full_strat,
+    avg_risk_score_p1_full_unstrat, 
+    avg_risk_score_p2_glrm_strat,
+    avg_risk_score_p2_glrm_unstrat
+  ) %>%
+  # Rename columns for better readability
+  rename(
+    "P1 Full Stratified" = avg_risk_score_p1_full_strat,
+    "P1 Full Unstratified" = avg_risk_score_p1_full_unstrat,
+    "P2 GLRM Stratified" = avg_risk_score_p2_glrm_strat,
+    "P2 GLRM Unstratified" = avg_risk_score_p2_glrm_unstrat
+  ) %>%
+  ggpairs(
+    # Customize the appearance
+    upper = list(
+      continuous = wrap("cor", 
+                       method = "pearson",
+                       size = 4,
+                       color = "black",
+                       digits = 3)
+    ),
+    lower = list(
+      continuous = wrap("points", 
+                       alpha = 0.6,
+                       size = 0.8,
+                       color = "steelblue")
+    ),
+    diag = list(
+      continuous = wrap("densityDiag", 
+                       alpha = 0.7,
+                       fill = "steelblue",
+                       color = "darkblue")
+    )
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "lightgray"),
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 10, face = "bold")
+  ) +
+  labs(
+    title = "Correlation Matrix of CDR3 Risk Scores",
+    subtitle = "Pearson correlations between different CDR3 risk score methods"
+  )
+
+# Display the plot
+correlation_plot
+
+# Save the plots
+ggsave(
+  filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/cdr3_risk_score_correlation_plot.png"),
+  plot = correlation_plot,
+  width = 12,
+  height = 10
+)
+
+```
+
+
+
+Visualizing an example result
+```{r}
+source(paste0(src_dir, "/R_scripts/analyze_CDR3qtl.R"))
+
+dlist <- generate_model_inputs_cdr3_riskscore(
+    phenotype_type = "cdr3_p2_strat_filtered_cv1k",
+    cdr3_pos = "P110",
+    cdr3length = 13
+)
+
+# M <- dlist$M %>% glimpse()
+pdata <- dlist$pdata %>% glimpse()
+covar_df <- dlist$covar_df %>% glimpse()
+df <- merge(pdata,covar_df,by="participant_id") %>% 
+    # filter(AA == "R") %>% 
+    glimpse()
+
+# df %>% ggplot(aes(x=pd_hla_risk_score,y=normrate)) +
+#     geom_point(alpha = 0.3) +
+#     theme_bw() +
+#     geom_smooth(method = "lm") +
+#     facet_wrap(~AA,ncol=7,scale="free")+ #
+#     labs(title="CDR3-R risk score",x="HLA risk score",y="CDR3-R frequency")
+
+df %>% ggplot(aes(x=pd_hla_risk_score,y=normrate)) +
+    geom_point(alpha = 0.8, shape = 21) +
+    theme_bw() +
+    geom_smooth(method = "lm") +
+    facet_wrap(~AA,ncol=7,scale="free")+ #
+    ggside::geom_ysidedensity(aes(x = after_stat(density)), alpha = 0.5, fill = "steelblue") +
+    ggside::scale_xsidey_continuous(expand = c(0, 0)) +
+    ggside::theme_ggside_void() +
+    theme(
+        ggside.panel.scale = 0.3,  # Increase space for y-side panel (default is 0.2)
+        ggside.axis.text = element_blank(),
+        ggside.axis.ticks = element_blank()
+    ) +
+    labs(title="CDR3 risk score (P110)",x="HLA risk score",y="CDR3 P2-AA (13aa) frequency")
+
+
+
+dlist <- generate_model_inputs_cdr3_riskscore(
+    phenotype_type = "cdr3_p2_unstrat_filtered_cv1k",
+    cdr3_pos = "P110",
+    cdr3length = NA_character_
+)
+
+# M <- dlist$M %>% glimpse()
+pdata <- dlist$pdata %>% glimpse()
+covar_df <- dlist$covar_df %>% glimpse()
+df <- merge(pdata,covar_df,by="participant_id") %>% 
+    # filter(AA == "R") %>% 
+    glimpse()
+
+p_example <-df %>% ggplot(aes(x=pd_hla_risk_score,y=normrate)) +
+    geom_point(alpha = 0.8, shape = 21) +
+    theme_bw() +
+    geom_smooth(method = "lm") +
+    facet_wrap(~AA,ncol=7,scale="free")+ #
+    ggside::geom_ysidedensity(aes(x = after_stat(density)), alpha = 0.5, fill = "steelblue") +
+    ggside::scale_xsidey_continuous(expand = c(0, 0)) +
+    ggside::theme_ggside_void() +
+    theme(
+        ggside.panel.scale = 0.3,  # Increase space for y-side panel (default is 0.2)
+        ggside.axis.text = element_blank(),
+        ggside.axis.ticks = element_blank()
+    ) +
+    labs(title="CDR3 risk score (P110)",x="HLA risk score",y="CDR3 P2-AA frequency")
+
+ggsave(
+    filename = glue("{wkdir}/figures/CDR3-qtl/cdr3-risk-score/cdr3_risk_score_example_p2unstrat_p110-13.png"),
+    plot = p_example,
+    width = 13,
+    height = 6
+)
+
+```

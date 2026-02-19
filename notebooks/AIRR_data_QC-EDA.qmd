@@ -1,0 +1,515 @@
+---
+title: "AIRR metadata prep"
+editor: source
+author: "Joe Boktor"
+date: '2025-07-08'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+Environment setup
+
+```{r setup, message=FALSE, warning=FALSE}
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+
+# Additional libraries
+library(data.table)
+
+# Plotting libraries
+library(ggsci)
+library(ggrepel)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+library(gt)
+library(gtsummary)
+
+```
+
+
+Loading metadata and TCRB data
+
+```{r, eval=FALSE}
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>%
+  mutate(case_control_other_latest = 
+    factor(case_control_other_latest, levels = c("Control", "Case"))) %>% 
+  glimpse()
+
+trust4_reports_tcrb <- readRDS(
+  glue("{wkdir}/data/interim/airr/trust4_reports_tcrb_clean_df_2025-07-08.rds")
+) %>% 
+  glimpse()
+
+```
+
+
+
+# Visualizing Analysis Metadata
+
+How many samples are in the analysis? From which cohorts? Home many total donors? How many PD/Control?
+
+```{r, eval=FALSE}
+# 1. Unique participants by cohort and disease status (with totals)
+participant_summary_with_totals <- metadata %>%
+  dplyr::distinct(participant_id, study, case_control_other_latest) %>%
+  dplyr::count(study, case_control_other_latest) %>%
+  pivot_wider(
+    names_from = case_control_other_latest,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  dplyr::rename(
+    "Study" = study,
+    "Control" = Control,
+    "PD" = Case
+  ) %>%
+  dplyr::mutate(
+    Total = Control + PD
+  ) %>%
+  gt() %>%
+  tab_header(
+    title = "Unique Participants by Cohort and Disease Status"
+  ) %>%
+  tab_style(
+    style = cell_fill(color = "lightgray"),
+    locations = cells_column_labels()
+  ) %>%
+  fmt_number(
+    columns = c("Control", "PD", "Total"),
+    decimals = 0
+  )
+
+# 2. Unique samples by cohort and disease status (with totals)
+sample_summary_with_totals <- metadata %>%
+  dplyr::count(study, case_control_other_latest) %>%
+  pivot_wider(
+    names_from = case_control_other_latest,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  dplyr::rename(
+    "Study" = study,
+    "Control" = Control,
+    "PD" = Case
+  ) %>%
+  dplyr::mutate(
+    Total = Control + PD
+  ) %>%
+  gt() %>%
+  tab_header(
+    title = "Unique Samples by Cohort and Disease Status"
+  ) %>%
+  tab_style(
+    style = cell_fill(color = "lightgray"),
+    locations = cells_column_labels()
+  ) %>%
+  fmt_number(
+    columns = c("Control", "PD", "Total"),
+    decimals = 0
+  )
+
+# # Display both tables
+# participant_summary_with_totals
+# sample_summary_with_totals
+
+# Save both tables
+participant_summary_with_totals %>%
+  gtsave(filename = glue("{wkdir}/figures/tables/participant_summary_{Sys.Date()}.html"))
+
+sample_summary_with_totals %>%
+  gtsave(filename = glue("{wkdir}/figures/tables/sample_summary_{Sys.Date()}.html"))
+
+```
+
+
+```{r}
+htmltools::includeHTML(glue("{wkdir}/figures/tables/participant_summary_2025-07-08.html"))
+
+htmltools::includeHTML(glue("{wkdir}/figures/tables/sample_summary_2025-07-08.html"))
+
+```
+
+
+Visualzing demographic and clinical data for samples.
+
+```{r, eval=FALSE}
+# plot the distribution of total samples per participant
+p_sample_counts <- metadata %>% 
+    dplyr::summarise(n = n(), .by = "participant_id") %>% 
+    left_join(metadata) %>% 
+    ggplot(aes(x = n, fill = case_control_other_latest)) +
+    geom_bar(position = "stack", width = 0.6) +
+    scale_fill_d3() +
+    theme_bw(base_size = 16) +
+    labs(x = "Samples per participant", 
+         y = "Count",
+         fill = "Disease Status")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/sample_counts_{Sys.Date()}.png"),
+    plot = p_sample_counts,
+    width = 4,
+    height = 3.5
+)
+
+baseline_meta <- metadata %>% 
+    select(participant_id, age_at_baseline, case_control_other_latest, sex, study) %>% 
+    distinct()
+
+p_age_density <- baseline_meta %>% 
+    ggplot(aes(x = age_at_baseline, color = case_control_other_latest)) +
+    geom_density(alpha = 0.5, size = 2) +
+    scale_color_d3() +
+    theme_bw(base_size = 16) +
+    labs(x = "Age at Baseline",
+         y = "Density",
+         color = NULL) +
+    theme(legend.position = "none")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/age_density_{Sys.Date()}.png"),
+    plot = p_age_density,
+    width = 4,
+    height = 3.5
+)
+
+p_sex_dist <- baseline_meta %>%
+    # Plot sex distribution
+    ggplot(aes(x = sex, fill = case_control_other_latest)) +
+    geom_bar(position = "stack", width = 0.6) +
+    scale_fill_d3() +
+    theme_bw(base_size = 16) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(x = "Sex", 
+         y = "Count",
+         fill = "Disease Status")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/sex_dist_{Sys.Date()}.png"),
+    plot = p_sex_dist,
+    width = 3.5,
+    height = 3.5
+)
+
+# Plot study distribution
+p_study_dist <- baseline_meta %>%
+    ggplot(aes(x = study, fill = case_control_other_latest)) +
+    geom_bar(position = "stack", width = 0.6) +
+    scale_fill_d3() +
+    theme_bw(base_size = 16) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(x = "Study", 
+         y = "Count",
+         fill = "Disease Status")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/study_dist_{Sys.Date()}.png"),
+    plot = p_study_dist,
+    width = 4,
+    height = 3.5
+)
+
+
+
+fig2_panel <- (
+  p_age_density +
+  p_sex_dist   +
+  p_study_dist +
+  p_sample_counts
+) +
+  plot_layout(
+    nrow = 1, guides = "collect",
+    widths = c(1.3, 0.6, 1, 1.3)
+  ) &
+  theme(legend.position = "bottom")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/FIGURE2_top_panel_{Sys.Date()}.png"),
+    plot = fig2_panel,
+    width = 12,
+    height = 4
+)
+
+```
+
+
+Visualzing TCRB count distributions
+
+```{r}
+sid_counts <- trust4_reports_tcrb %>%
+    group_by(sample_id, C) %>%
+    dplyr::summarise(n = n()) %>%
+    mutate(grouping = "sample") %>%
+    dplyr::rename(unit = sample_id) %>%
+    glimpse()
+pid_counts <- trust4_reports_tcrb %>%
+    group_by(participant_id, C) %>%
+    dplyr::summarise(n = n()) %>%
+    mutate(grouping = "donor") %>%
+    dplyr::rename(unit = participant_id) %>%
+    glimpse()
+sid_study_pair <- metadata %>% select(sample_id, study) %>% distinct() %>% 
+  dplyr::rename(unit = sample_id)
+pid_study_pair <- metadata %>% select(participant_id, study) %>% distinct() %>% 
+  dplyr::rename(unit = participant_id)
+
+rec_counts_df <- bind_rows(sid_counts, pid_counts) %>%
+    mutate(cell_type_origin = case_when(
+        grepl("TR", C) ~ "TCR",
+        # grepl("IG", C) ~ "BCR",
+        TRUE ~ "ERROR"
+    )) %>%
+    left_join(bind_rows(sid_study_pair, pid_study_pair)) %>% 
+    glimpse()
+
+
+p_ecdf_TCRS <- rec_counts_df %>%
+    filter(cell_type_origin == "TCR") %>% 
+    mutate(grouping = factor(grouping, levels = c("sample", "donor"))) %>%
+    ggplot(aes(n)) +
+    stat_ecdf(aes(color = study), geom = "step", linewidth = 1, alpha = 0.8) +
+    facet_grid(cell_type_origin ~ grouping, scales = "free") +
+    scale_x_log10() +
+    theme_bw() +
+    labs(
+        x = "Number of Receptors",
+        y = "Cumulative Proportion",
+        color = NULL
+    ) +
+    scale_color_nejm()
+    # scale_color_manual(values = c(
+    #     "TRAC" = "#a6cee3",
+    #     "TRBC" = "#1f78b4",
+    #     "TRDC" = "#fb9a99",
+    #     "TRGC" = "#e31a1c"
+    # ))
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/ecdf_TRUST4_TCRS_{Sys.Date()}.png"),
+    plot = p_ecdf_TCRS,
+    width = 5,
+    height = 2.25
+)
+
+
+```
+
+
+
+Visualize HLA genotype risk and protective status
+
+```{r, eval=FALSE}
+
+p_arcas_hla_risk <- metadata %>% 
+  filter(DRB1_risk != "none") %>% 
+  # Calculate counts for each group
+  group_by(DRB1_grouped, DRB1_risk, case_control_other_latest) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  # Create the plot
+  ggplot(aes(x = fct_reorder(DRB1_grouped, count), y = count, fill = case_control_other_latest)) +
+  geom_bar(stat = "identity") +
+  # Add count labels on top of each bar
+  # geom_text(aes(label = count),
+  #           position = position_stack(vjust = 0.5),
+  #           size = 3) +
+  scale_fill_d3() +
+  facet_grid(DRB1_risk ~ ., scales = "free", space = "free") +
+  theme_bw() +
+  labs(
+    # title = "Distribution of Case/Control Status by DRB1 Genotype",
+    x = NULL,
+    y = "Count",
+    fill = "Case/Control Status"
+  ) +
+  coord_flip() +
+  theme(
+    # axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none",
+    # Add left padding to prevent cutoff
+    plot.margin = margin(t = 5, r = 5, b = 5, l = 40, unit = "pt"),
+    strip.text.y   = element_text(angle = 0),
+    strip.text.y.left  = element_text(angle = 0),
+    strip.text.y.right = element_text(angle = 0)
+  )
+
+ggsave(
+  glue("{wkdir}/figures/AIRR/arcasHLA/arcas_hla_risk_barplot_{Sys.Date()}.png"),
+  p_arcas_hla_risk,
+  width = 5,
+  height = 3.5
+)
+
+```
+
+
+
+Visualize Read depth vs clonotype count and clonoal volume
+
+```{r}
+metadata %>% glimpse()
+
+clonotype_volume_df <- trust4_reports_tcrb %>% 
+  group_by(sample_id) %>% 
+  dplyr::summarize(tcrb_volume = sum(`#count`)) %>% 
+  ungroup() %>% 
+  glimpse()
+
+clonotype_count_df <- trust4_reports_tcrb %>% 
+  group_by(sample_id) %>% 
+  dplyr::summarize(tcrb_count = n()) %>% 
+  ungroup() %>% 
+  glimpse()
+
+count_volume_df <- clonotype_count_df %>% 
+  left_join(clonotype_volume_df) %>% 
+  left_join(metadata) %>% 
+  glimpse()
+
+lmm_model_count <- lme(aligned_reads ~ case_control_other_latest + study,
+    random = ~ 1 | participant_id,
+    data = metadata,
+    na.action = na.omit
+)
+broom.mixed::tidy(lmm_model_count)
+
+lmm_model_tcellreads <- lme(est_tcell_reads_abis ~ case_control_other_latest + study,
+    random = ~ 1 | participant_id,
+    data = metadata,
+    na.action = na.omit
+)
+broom.mixed::tidy(lmm_model_tcellreads) %>% 
+    DT::datatable()
+
+
+p_aligned_reads_boxplot <- count_volume_df %>% 
+    ggplot(aes(y = aligned_reads, x = case_control_other_latest)) +
+    geom_point(size = 0.2, alpha = 0.75, 
+        position = position_jitter(width = 0.4)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.75, width = 0.5) +
+    facet_wrap(~study, nrow = 1) +
+    theme_bw() +
+    scale_y_log10() +
+    labs(y = "Aligned Reads (Picard)", x = NULL, color = "Quantile") +
+    guides(color = guide_legend(override.aes = list(size = 3))) +
+    theme(legend.position = "top")
+
+p_tcell_reads_boxplot <- count_volume_df %>% 
+    ggplot(aes(y = est_tcell_reads_abis, x = case_control_other_latest)) +
+    geom_point(size = 0.2, alpha = 0.75, 
+        position = position_jitter(width = 0.4)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.75, width = 0.5) +
+    facet_wrap(~study, nrow = 1) +
+    theme_bw() +
+    scale_y_log10() +
+    labs(y = "T-Cell Estimated Reads (ABIS)", x = NULL, color = "Quantile") +
+    guides(color = guide_legend(override.aes = list(size = 3))) +
+    theme(legend.position = "top")
+
+p_seq_depth_boxplots <- p_aligned_reads_boxplot + p_tcell_reads_boxplot
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/seq_depth_boxplots_{Sys.Date()}.png"),
+    plot = p_seq_depth_boxplots,
+    width = 10,
+    height = 4
+)
+
+# Interesting that aligned reads are consistent between cohorts and disease status but T-cell reads are significant in both conditions
+
+# correlating Aligned reads with clonotype and clonal volume
+p_seq_depth_tcell_abis <- count_volume_df %>% 
+  ggplot(aes(x = est_tcell_reads_abis, y = tcrb_volume, color = study)) +
+  geom_point(alpha = 0.5, size = 0.2) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1) +
+  ggpubr::stat_cor(
+    method = "pearson",
+    label.x.npc = 0.7,
+    label.y.npc = c(0.39, 0.37, 0.35, 0.33),
+    aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+    size = 3, # larger font
+    digits = 2, # two decimal places
+    p.accuracy = 0.001, # p-value accuracy
+    show.legend = FALSE,
+    parse = TRUE # pretty math notation
+  ) +
+  scale_color_jama() +
+  scale_x_log10() +
+  scale_y_log10() +
+  theme_bw() +
+  guides(color = guide_legend(override.aes = list(text = NA))) +
+  labs(x = "T-Cell Estimated Reads (ABIS)",
+       y = "Clonotype Volume",
+       color = "Study") +
+  theme(legend.position = "top")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/seq_depth_tcell_abis_{Sys.Date()}.png"),
+    plot = p_seq_depth_tcell_abis,
+    width = 5,
+    height = 4
+)
+
+p_seq_depth_aligned_reads <- count_volume_df %>% 
+  ggplot(aes(x = aligned_reads, y = tcrb_volume, color = study)) +
+  geom_point(alpha = 0.5, size = 0.2) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1) +
+  ggpubr::stat_cor(
+    method = "pearson",
+    # label.x = 7.75, #label.y = 3.1,
+    label.x.npc = 0.7,
+    label.y.npc = c(0.39, 0.37, 0.35, 0.33),
+    aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+    size = 3, # larger font
+    digits = 2, # two decimal places
+    p.accuracy = 0.001, # p-value accuracy
+    show.legend = FALSE,
+    parse = TRUE # pretty math notation
+  ) +
+  scale_color_jama() +
+  scale_x_log10() +
+  scale_y_log10() +
+  theme_bw() +
+  guides(color = guide_legend(override.aes = list(text = NA))) +
+  labs(x = "Aligned Reads (Picard)",
+       y = "Clonotype Volume",
+       color = "Study") +
+  theme(legend.position = "top")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/seq_depth_aligned_reads_{Sys.Date()}.png"),
+    plot = p_seq_depth_aligned_reads,
+    width = 5,
+    height = 4
+)
+
+
+p_aligned_and_tcell_reads <- p_seq_depth_aligned_reads + p_seq_depth_tcell_abis
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/seq_depth_aligned_and_tcell_reads_{Sys.Date()}.png"),
+    plot = p_aligned_and_tcell_reads,
+    width = 10,
+    height = 4
+)
+
+
+```
+
+
+
+```{r}
+sessionInfo()
+```

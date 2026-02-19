@@ -1,0 +1,598 @@
+---
+title: "Parkinson's Disease Blood Virome: Executing Kallisto + PalmDB for Virus Quantification"
+editor: source
+author: "Joe Boktor"
+date: '2024-07-01'
+bibliography: references.bib
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: false
+    code-tools: true
+    fig-align: center
+    grid:
+      sidebar-width: 300px
+      body-width: 900px
+      margin-width: 300px
+      gutter-width: 1.5rem
+---
+
+# Background / Introduction
+
+# Analysis Setup
+
+```{r}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(glue)
+# microbiome analysis
+library(phyloseq)
+library(microbiome)
+library(vegan)
+library(Seurat)
+library(Matrix)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggside)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+palmdb_data <- glue("{ref_dir}/PalmDB")
+palm_interim <- glue("{wkdir}/data/interim/PalmDB_mapping")
+dir.create(palm_interim, showWarnings = FALSE)
+palmddb_res <- glue("{pdmbs_dir}/workflow/RNASEQ/palmdb_bwa_dlist")
+
+# options(future.globals.maxSize= 6291456000)
+# future::plan("multisession", workers = 8)
+```
+
+
+
+## Kallisto Mapping to PalmDB + D-1. first
+
+Here we take the cleaned reads and map them to the PalmDB + D-1. This will allow us to quantify the viral reads in the samples.
+
+### Creating a Kallisto index for PalmDB 
+
+```{bash, eval=FALSE}
+
+# kb ref \
+#     --aa \
+#     --d-list /central/groups/MazmanianLab/joeB/Downloads/RefDBs/ref_genomes/T2T-CHM13v2.0_plusY/chm13v2.0.fa \
+#     -i index.idx --workflow custom \
+#     palmdb_rdrp_seqs.fa
+
+# Creating an index for PalmDB + 
+kb ref \
+    --aa \
+    -t 24 \
+    --d-list /central/groups/MazmanianLab/joeB/Downloads/RefDBs/ref_genomes/GRCh38/Homo_sapiens.GRCh38.cdna_dna.fa.gz \
+    -i index_GRCh38_PalmDB.idx --workflow custom \
+    palmdb_rdrp_seqs.fa
+
+```
+
+Sample of running Kallisto Count (option #1)
+
+```{bash, eval=FALSE}
+
+kb count \
+    -t 24 \
+    -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/test_palmdb_bwa_dlist \
+    --aa \
+    -m 4G \
+    -i index_GRCh38_PalmDB.idx \
+    -g palmdb_clustered_t2g.txt \
+    --parity paired \
+    -x BULK \
+    --matrix-to-files \
+    /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R1.fastq.gz \
+    /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R2.fastq.gz
+
+
+# "--batch-barcodes batch.txt"
+# Also can create h5ad file
+
+```
+
+Alternative Kallisto Run (option #2)
+
+```{bash, eval=FALSE}
+
+kallisto bus \
+        --aa \
+        -i index_GRCh38_PalmDB.idx \
+        -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1 \
+        -t 24 \
+        -x BULK \
+        /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R1.fastq.gz \
+    /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R2.fastq.gz
+
+
+bustools sort -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/output_sorted.bus /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/output.bus
+
+bustools count \
+    --genecounts \
+    --cm \
+    -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/bustools_count \
+    -g palmdb_clustered_t2g.txt \
+    -e /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/matrix.ec \
+    -t /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/transcripts.txt \
+    /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/output_sorted.bus
+
+```
+
+
+### Running Kallisto at scale with R
+
+```{r, eval=FALSE}
+# Run Kallisto on PalmDB
+run_kallisto_palmdb <- function(fwd, rev, threads, output_dir, wkdir) {
+    require(glue)
+    source(glue("{wkdir}/notebooks/R_scripts/_misc_functions.R"))
+    palmdb <- "/central/groups/MazmanianLab/joeB/Downloads/RefDBs/PalmDB"
+    cmd <- glue(
+        "mamba run -n kallisto_env ",
+        "kb count",
+        " -t {threads}",
+        " -o {output_dir}",
+        " -m 4G",
+        " -i {palmdb}/index.idx",
+        " -g {palmdb}/palmdb_clustered_t2g.txt",
+        " -x BULK",
+        " --aa",
+        " --parity paired",
+        " --matrix-to-files",
+        " {fwd} {rev}"
+    )
+    print(cmd)
+    shell_do(cmd)
+}
+
+
+fq_paths <- list.files(
+    glue("{pdmbs_dir}/workflow/RNASEQ/clean_reads"),
+    pattern = "fastq.gz",
+    full.names = TRUE
+    ) %>% 
+    data.frame("fq_path" = .) %>%
+    mutate(sample_id = basename(fq_path) %>% strex::str_before_last("_")) %>%
+    mutate(annot = case_when(
+        grepl("_R1.fastq.gz", fq_path) ~ "fwd",
+        grepl("_R2.fastq.gz", fq_path) ~ "rev",
+        TRUE ~ "ERROR"
+    )) %>%
+    pivot_wider(names_from = annot, values_from = fq_path)
+
+# Run Kallisto on PalmDB
+batchtools_params <- fq_paths %>%
+    # calculate f1 size in MB
+    mutate(f1_size = file.size(fwd) / 1e6) %>%
+    # filter for files larger than 100MB (all other files are empty)
+    filter(f1_size >= 100) %>%
+    mutate(
+        threads = 4,
+        output_dir = glue(
+            "{pdmbs_dir}/workflow/RNASEQ/palmdb_bwa_dlist/{sample_id}"
+            ),
+        wkdir = wkdir
+    ) %>%
+    dplyr::select(-c(sample_id, f1_size)) %>% 
+    glimpse()
+
+# configure registry ----
+cluster_run <- glue("{get_time()}_Kallisto_PalmDB")
+message("\n\nRUNNING:  ", cluster_run, "\n")
+breg <- makeRegistry(
+  file.dir = glue(
+    "{wkdir}/.cluster_runs/",
+    cluster_run
+  ),
+  seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+  template = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+  scheduler.latency = 0.1,
+  fs.latency = 1
+)
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = run_kallisto_palmdb,
+  args = batchtools_params,
+  reg = breg
+)
+# jobs[, chunk := chunk(job.id, chunk.size = 1)]
+# print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+    resources = list(
+        walltime = 3600, # sec
+        memory = 32000, # MB
+        ncpus = 8,
+        max.concurrent.jobs = 9999
+    )
+)
+
+```
+
+
+## Assessing Read Concordance and Distribution
+### Aggregating individual sample counts
+
+```{r, eval=FALSE}
+
+sample_id <- list.dirs(palmddb_res, recursive = FALSE) %>%
+    basename()
+
+convert_dgCMatrix_to_tidy <- function(fwd_counts, rev_counts) {
+    tidy_df <-
+        data.frame(
+            virus_ids = names(fwd_counts),
+            forward_reads = fwd_counts,
+            reverse_reads = rev_counts
+        ) %>%
+        dplyr::filter(forward_reads > 0 | reverse_reads > 0)
+    return(tidy_df)
+}
+
+progress_bar <- progress::progress_bar$new(
+    format = "  :spin [:bar] :percent eta: :eta",
+    total = length(sample_id)
+)
+
+palm_res <- tibble()
+
+for (id in sample_id) {
+    results_path <- glue("{palmddb_res}/{id}/counts_unfiltered")
+    progress_bar$tick()
+    gene_list_path <- glue("{results_path}/cells_x_genes.genes.names.txt")
+    mtx_path = glue("{results_path}/cells_x_genes.mtx")
+
+    feature.names <- read.table(
+        file = gene_list_path,
+        header = FALSE, sep = "\t", row.names = NULL, skip = 0
+    )
+
+    mtx <- readMM(mtx_path)
+    dense_mat <- as.matrix(mtx)
+    colnames(dense_mat) <- feature.names$V1
+
+    sample_df <- convert_dgCMatrix_to_tidy(dense_mat[1, ], dense_mat[2, ]) %>%
+        mutate(sample_id = id)
+    palm_res %<>% bind_rows(sample_df)
+}
+
+# Save forward and reverse read counts
+saveRDS(
+    palm_res,
+    glue(
+        "{palm_interim}/",
+        "fwd-rev-counts_BWA-dlist-GRCh38-dna-rna_{Sys.Date()}.rds"
+    )
+)
+
+```
+
+
+### Visualizing concordance between forward and reverse reads
+
+```{r, eval=FALSE}
+
+palm_res <- readRDS(
+    glue(
+        "{palm_interim}/",
+        "fwd-rev-counts_BWA-dlist-GRCh38-dna-rna_2024-07-04.rds"
+    )
+)
+
+# read in virus metadata
+palm_meta <- read.csv(
+    glue("{palmdb_data}/ID_to_taxonomy_mapping.csv"),
+    stringsAsFactors = FALSE
+) %>%
+    dplyr::select(-ID) %>%
+    distinct() %>%
+    glimpse()
+
+
+fwd_rev_stats <- palm_res %>%
+    group_by(virus_ids) %>%
+    dplyr::reframe(
+        forward_reads = sum(forward_reads),
+        reverse_reads = sum(reverse_reads),
+        prevalence_n = n()
+    ) %>%
+    left_join(palm_meta, by = c("virus_ids" = "rep_ID")) %>% 
+    glimpse()
+
+
+stand_colors <- c(pal_d3("category10")(8))
+names(stand_colors) <- sort(unique(fwd_rev_stats$strandedness))
+
+strand_alpha <- c(rep(0.7, 7), 0.1)
+names(strand_alpha) <- names(stand_colors)
+
+# Summated viral counts across all samples and plotting
+# scatter of fwd/rev reads
+p_fwdrev_spread <- fwd_rev_stats %>%
+    mutate(not_unk = ifelse(strandedness == "unknown", 0, 1)) %>%
+    arrange(not_unk) %>%
+    mutate(virus_ids = factor(virus_ids, levels = unique(virus_ids))) %>%
+    ggplot(aes(x = reverse_reads + 1, y = forward_reads + 1)) +
+    geom_point(
+        aes(color = strandedness, size = prevalence_n, alpha = strandedness)
+    ) +
+    scale_x_log10() +
+    scale_y_log10() +
+    scale_alpha_manual(values = strand_alpha) +
+    scale_color_manual(values = stand_colors) +
+    coord_fixed() +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+    labs(y="Total Forward Reads + 1", x="Total Reverse Reads + 1") +
+    guides(colour = guide_legend(override.aes = list(size=3))) +
+    theme_bw()
+
+ggsave(
+    glue(
+        "{wkdir}/figures/Viral/",
+        "fwd-rev-counts_BWA-dlist-GRCh38-dna-rna_{Sys.Date()}.png"
+    ),
+    p_fwdrev_spread,
+    width = 10, height = 8
+)
+
+dt_r1_r2_delta <- fwd_rev_stats %>%
+    mutate(r1r2_delta = forward_reads - reverse_reads) %>%
+    filter(abs(r1r2_delta) > 1000) %>% 
+    DT::datatable()
+
+saveRDS(
+    dt_r1_r2_delta,
+    glue("{palm_interim}/fwd_rev_stats_delta_{Sys.Date()}.rds")
+)
+
+```
+
+
+![Forward vs Reverse Read Counts](../figures/Viral/fwd-rev-counts_BWA-dlist-GRCh38-dna-rna_2024-07-05.png)
+
+```{r}
+dt_r1_r2_delta <- readRDS(
+    glue("{palm_interim}/fwd_rev_stats_delta_2024-07-05.rds")
+)
+dt_r1_r2_delta
+```
+
+Calculating R1/R2 read correlation for each virus id
+
+```{r, eval=FALSE}
+# Function to calculate Pearson correlation for each virus_id
+calculate_correlation <- function(virus_data) {
+    cor_result <- stats::cor(
+        virus_data$forward_reads,
+        virus_data$reverse_reads,
+        method = "pearson"
+    )
+    cor_result_rank <- stats::cor(
+        virus_data$forward_reads,
+        virus_data$reverse_reads,
+        method = "spearman"
+    )
+    tibble(
+        pearson_correlation = cor_result,
+        spearman_correlation = cor_result_rank
+    )
+}
+
+# Parallel setup
+future::plan("multisession", workers = 24)
+
+# Calculate correlations in parallel
+read_direction_cor <- palm_res %>%
+    group_by(virus_ids) %>%
+    nest() %>%
+    mutate(correlation = furrr::future_map(data, calculate_correlation)) %>%
+    unnest(correlation) %>%
+    mutate(max_vals = furrr::future_map(data, ~ {{ tibble(
+        fwd_max = max(.$forward_reads),
+        rev_max = max(.$reverse_reads),
+        total_max = max(c(fwd_max, rev_max)),
+        prevalence_n = length(.$sample_id)
+    ) }})) %>%
+    unnest(max_vals)
+
+read_direction_cor %>% glimpse()
+
+saveRDS(
+    read_direction_cor,
+    glue(
+        "{palm_interim}/",
+        "fwd-rev-count-correlations_BWA-dlist-GRCh38-dna-rna_{Sys.Date()}.rds"
+    )
+)
+
+```
+
+
+```{r, eval=FALSE}
+read_direction_cor <- readRDS(
+    glue(
+        "{palm_interim}/",
+        "fwd-rev-count-correlations_BWA-dlist-GRCh38-dna-rna_2024-07-05.rds"
+    )
+)
+
+p_corr <- read_direction_cor %>%
+    filter(total_max > 10) %>%
+    ggplot(aes(y = "all viruses", x = pearson_correlation)) +
+    geom_boxplot(outlier.alpha = 0, alpha = 0.6) +
+    geom_point(
+        aes(size = prevalence_n),
+        alpha = 0.2, position = position_jitter()) +
+    geom_xsidedensity(aes(y = after_stat(density))) +
+        theme(ggside.panel.scale = 2) +
+        labs(y = NULL, x = "R1/R2 Pearson Correlation") +
+        theme_light() +
+        theme(
+            ggside.panel.scale = .3,
+            axis.text.y = element_blank()
+        )
+
+ggsave(
+    glue(
+        "{wkdir}/figures/Viral/",
+        "correlation_boxplot_{Sys.Date()}.png"
+    ),
+    p_corr,
+    width = 8, height = 3
+)
+```
+
+![Forward vs Reverse Read Spearman's Correlation](../figures/Viral/correlation_boxplot_2024-07-05.png)
+Here in this figure, we examine the distibution of correlation values between forward and reverse reads for each virus id, with a maximum of at least 5 reads in one sample. 
+
+
+Further manual inspection of a few correlation values.
+
+```{r, eval=FALSE}
+
+# palm_meta %>%
+#     filter(rep_ID == "u39705")
+# read_direction_cor %>%
+#     filter(total_max > 20) %>%
+#     arrange(pearson_correlation, desc(prevalence_n)) %>%
+#     dplyr::select(-data) %>%
+#     View
+    
+# Example of common virus with high read correlation
+p_r1r2_u100011 <- read_direction_cor %>%
+    filter(virus_ids == "u100011") %>%
+    unnest(cols = c(data)) %>%
+    ggplot(aes(x = forward_reads, y = reverse_reads)) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(method = "lm") +
+    labs(title = "u100011 | Howeltoviricetes") +
+    theme_bw()
+
+ggsave(
+    glue("{wkdir}/figures/Viral/correlation_u100011_{Sys.Date()}.png"),
+    p_r1r2_u100011,
+    width = 4, height = 4
+)
+
+p_r1r2_u39705 <- read_direction_cor %>%
+    filter(virus_ids == "u39705") %>%
+    unnest(cols = c(data)) %>%
+    ggplot(aes(x = forward_reads, y = reverse_reads)) +
+    geom_point(alpha = 0.2) +
+    labs(title = "u39705 | No taxonomy") +
+    # geom_smooth(method = "lm") +
+    theme_bw()
+
+ggsave(
+    glue("{wkdir}/figures/Viral/correlation_u39705_{Sys.Date()}.png"),
+    p_r1r2_u39705,
+    width = 4, height = 4
+)
+
+```
+
+
+::: {#fig-corr-scat layout-ncol=2}
+
+![R1 R2 Correlation for u100011](../figures/Viral/correlation_u100011_2024-07-05.png){#fig-u100011 width=70%}
+![R1 R2 Correlation for u39705](../figures/Viral/correlation_u39705_2024-07-05.png){#fig-u39705 width=70%}
+
+Example R1 / R2 correlation plots for two different viruses. The first virus, u100011, shows a strong linear relationship between forward and reverse reads. The second virus, u39705, shows an inconsistent relationship between forward and reverse reads.
+
+:::
+
+
+### Creating a phyloseq object from PalmDB results
+
+Summing forward and reverse reads for each virus id and generating a phyloseq object
+
+```{r, eval=FALSE}
+
+count_df <- palm_res %>%
+    mutate(count = forward_reads + reverse_reads) %>%
+    dplyr::select(-c(forward_reads, reverse_reads)) %>%
+    as.data.table() %>%
+    tidyr::pivot_wider(
+        names_from = virus_ids,
+        values_from = count,
+        values_fill = 0
+    ) %>%
+    glimpse()
+
+saveRDS(
+    count_df,
+    glue(
+        "{palm_interim}/",
+        "count-matrix_BWA-dlist-GRCh38-dna-rna_{Sys.Date()}.rds"
+    )
+)
+
+# read in metadata
+metadata_df <- readRDS(
+    glue("{wkdir}/data/interim/metadata/2023-07-14_phyloseq-metadata.rds")
+)$RNASEQ
+
+# saving a phyloseq object from PalmDB results
+sotu <- count_df %>%
+    column_to_rownames(var = "sample_id") %>%
+    t() %>%
+    otu_table(., taxa_are_rows = TRUE)
+
+# formatting metadata
+ps_meta <- metadata_df %>%
+    filter(sample_id %in% colnames(sotu)) %>%
+    as.data.frame() %>%
+    glimpse()
+rownames(ps_meta) <- ps_meta$sample_id
+ps_meta <- phyloseq::sample_data(ps_meta)
+ps_taxtable <- palm_meta %>%
+    mutate_all(
+        ~ gsub("\\.", "", .) %>% tolower()
+    ) %>%
+    dplyr::select(-strandedness) %>%
+    column_to_rownames("rep_ID") %>%
+    as.matrix() %>%
+    phyloseq::tax_table()
+
+# assemble phyloseq object
+ps <- phyloseq(sotu, ps_meta, ps_taxtable)
+
+saveRDS(
+  ps,
+  glue(
+    "{palm_interim}/",
+    "phyloseq_count_matrix_BWA-dlist-GRCh38-dna-rna_{Sys.Date()}.rds"
+  )
+)
+
+```

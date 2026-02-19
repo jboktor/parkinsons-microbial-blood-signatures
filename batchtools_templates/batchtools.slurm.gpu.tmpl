@@ -1,0 +1,41 @@
+#!/bin/bash
+
+<%
+# relative paths are not handled well by Slurm
+log.file = fs::path_expand(log.file)
+-%>
+
+#SBATCH --job-name=<%= resources$name %>
+#SBATCH --output=<%= log.file %>
+#SBATCH --error=<%= log.file %>
+#SBATCH --ntasks=1
+#SBATCH --time=<%= resources$walltime %>
+#SBATCH --cpus-per-task=<%= resources$ncpus %>
+#SBATCH --gpus-per-task=<%= resources$ngpus %>
+#SBATCH --mem-per-gpu=<%= resources$memory_gpu %>
+#SBATCH --mail-user=jboktor@caltech.edu
+#SBATCH --partition=gpu
+
+<%= if (!is.null(resources$partition)) sprintf(paste0("#SBATCH --partition='", resources$partition, "'")) %>
+<%= if (array.jobs) sprintf("#SBATCH --array=1-%i", nrow(jobs)) else "" %>
+
+## Initialize work environment
+source /home/${USER}/.bashrc
+module load cuda/12.2.1-gcc-11.3.1-sdqrj2e
+master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+export MASTER_ADDR=$master_addr
+export MASTER_PORT=13579
+export TRANSFORMERS_CACHE=/central/groups/MazmanianLab/joeB/cache
+export TORCH_HOME=/central/groups/MazmanianLab/joeB/cache/torch
+source activate pdmbsR
+
+# Export value of DEBUGME environemnt var to slave
+export DEBUGME=<%= Sys.getenv("DEBUGME") %>
+
+## Use /scratch on the node, TMPDIR is mounted as tmpfs
+export TMPDIR=/central/scratch/jbok/R/${SLURM_JOBID}
+mkdir -p ${TMPDIR}
+
+## Run R:
+## we merge R output with stdout from SLURM, which gets then logged via --output option
+Rscript -e 'batchtools::doJobCollection("<%= uri %>")'

@@ -1,0 +1,613 @@
+---
+title: "Read Quality Assurance"
+editor: visual
+author: "Joe Boktor"
+date: '2022-11-16'
+eval: false
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    column: page
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+This notebook will explore quality control metrics for WGS reads
+1. read in flagstat metrics across 
+
+```{r}
+#| warning: false
+
+# library(reticulate)
+# conda_python(envname = "pdmbsR")
+pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+wgs_wkdir <- paste0(pdmbs_dir, "/workflow/WGS")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
+library(data.table)
+library(progress)
+library(janitor)
+library(ggside)
+library(ggsci)
+library(ggpubr)
+library(strex)
+library(ggpackets)
+library(viridis)
+library(plotly)
+```
+
+
+```{r}
+# met_df <- readRDS(glue("{wkdir}/data/interim/metadata/2022-11-25_static_metdata.rds"))
+met_df <- readRDS(glue("{wkdir}/data/interim/metadata/2023-07-14_phyloseq-metadata.rds"))$WGS
+met_df %<>% select(
+  participant_id, study, diagnosis_at_baseline,
+  case_control_other_at_baseline, age_at_baseline,
+  ethnicity, sex, race
+) %>%
+  mutate(sample_id = participant_id)
+
+``` 
+
+
+### Exploring BBDUK Stats
+
+What is the distribution of quality scores? Are more reads low quality or high? How many reads will we lose if we set a phred threshold of 20% vs 30%
+
+| Metric | Description |
+| ----------- | ----------- |
+| bhist | Base composition histogram by position. |
+| qhist | Quality histogram by position. |
+| gchist | GC content |
+| aqhist | Histogram of average read quality. |
+| lhist | Read length histogram. |
+
+
+```{r, eval=FALSE}
+bbkduk_meta <-
+  list.files(glue("{wgs_wkdir}/stats_clean_reads"), full.names = TRUE)
+bbkduk_metric_file_paths <- list(
+  "bhist" = bbkduk_meta %>% keep(grepl("bhist", .)),
+  "gchist" = bbkduk_meta %>% keep(grepl("gchist", .)),
+  "lhist" = bbkduk_meta %>% keep(grepl("lhist", .)),
+  "aqhist" = bbkduk_meta %>% keep(grepl("aqhist", .)),
+  "qhist" = bbkduk_meta %>% keep(grepl("qhist", .) & !grepl("aqhist", .))
+)
+
+# functions to read in specific file types
+readin_bbduk_metrics <- function(metric, file_path) {
+  switch(metric,
+    "aqhist" = {
+      seq_metrics <- read.delim(file_path, header = TRUE, sep = "\t") %>%
+        mutate(sample_id = gsub("_aqhist.txt", "", basename(file_path))) %>%
+        dplyr::rename(quality_number = "X.Quality")
+    },
+    "lhist" = {
+      seq_metrics <- read.delim(file_path, header = TRUE, sep = "\t") %>%
+        mutate(sample_id = gsub("_lhist.txt", "", basename(file_path))) %>%
+        dplyr::rename(read_length = "X.Length")
+    },
+    "qhist" = {
+      seq_metrics <- read.delim(file_path, header = TRUE, sep = "\t") %>%
+        mutate(sample_id = gsub("_qhist.txt", "", basename(file_path))) %>%
+        dplyr::rename(base_number = "X.BaseNum")
+    },
+    "gchist" = {
+      seq_metrics <-
+      read.delim(file_path, header = TRUE, sep = "\t", skip = 4) %>%
+        mutate(sample_id = gsub("_gchist.txt", "", basename(file_path))) %>%
+        dplyr::rename(GC_percentage = "X.GC")
+    },
+    "bhist" = {
+      seq_metrics <- read.delim(file_path, header = TRUE, sep = "\t") %>%
+        mutate(sample_id = gsub("_bhist.txt", "", basename(file_path))) %>%
+        dplyr::rename(position = "X.Pos")
+    },
+    stop(
+      "ERROR: must define one of the following bbduk metrics: \n
+      aqhist, lhist, qhist, gchist, bhist"
+    )
+  )
+  seq_metrics %<>% as.data.table()
+  return(seq_metrics)
+}
+
+aggregate_bbduk_files <- function(metric, input_files) {
+  require(purrr)
+  require(data.table)
+  require(stringr)
+  require(dplyr)
+  require(readr)
+  purrr::map(
+    input_files,
+    ~ readin_bbduk_metrics(file_path = ., metric = metric)
+  ) %>% bind_rows()
+}
+```
+
+```{r, eval=FALSE}
+seq_meta_levels <- c("bhist", "gchist", "lhist", "qhist", "aqhist")
+readqc_metrics <- list()
+for (seq_metric in seq_meta_levels) {
+  print("\naggregating: ", seq_metric, "files\n")
+  readqc_metrics[[seq_metric]] <- bbkduk_metric_file_paths[[seq_metric]] %>%
+    aggregate_bbduk_files(metric = seq_metric)
+}
+outdir <- glue("{wkdir}/data/processed/readqc")
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+saveRDS(readqc_metrics,
+  glue("{outdir}/{Sys.Date()}_WGS_bbduk-metrics.rds")
+)
+```
+
+```{r}
+outdir <- glue("{wkdir}/data/processed/readqc")
+readqc_metrics <- readRDS(
+  glue("{outdir}/2023-01-02_WGS_bbduk-metrics.rds")
+)
+
+p_lhist <- readqc_metrics[["lhist"]] %>%
+  left_join(met_df) %>%
+  ggplot(aes(x = read_length, y = Count)) +
+  geom_boxplot(aes(group = read_length),
+    alpha = 1, fill = "#ADD8E6", outlier.alpha = 0.1, lwd = 0.5) +
+  labs(x = "Read Length") +
+  scale_y_log10() +
+  theme(legend.position = "none")
+
+ggsave(p_lhist,
+  filename =
+  glue("{wkdir}/figures/readqc/{Sys.Date()}_read-length-histogram.png"),
+  dpi = 600, height = 6, width = 10
+)
+```
+
+![](../figures/readqc/2023-01-06_read-length-histogram.png)
+
+```{r}
+p_aqhist <- readqc_metrics[["aqhist"]] %>%
+  left_join(met_df) %>%
+  ggplot() +
+  geom_jitter(aes(x = quality_number, y = count1, color = study),
+    alpha = 0.7, size = 0.2) +
+  scale_color_nejm() +
+  labs(x = "Phred Quality", y = "Log Counts") +
+  guides(color = guide_legend(override.aes = list(size = 4))) +
+  scale_y_log10()
+
+ggsave(p_aqhist,
+  filename =
+  glue("{wkdir}/figures/readqc/{Sys.Date()}_averge-phred-quality.png"),
+  dpi = 600, height = 6, width = 10
+)
+```
+
+![](../figures/readqc/2023-01-06_averge-phred-quality.png)
+
+
+```{r}
+p_qhist <- readqc_metrics[["qhist"]] %>%
+  left_join(met_df) %>%
+  ggplot() +
+  geom_jitter(
+    aes(x = base_number, y = Read1_linear, color = study),
+    alpha = 0.8, size = 0.02) +
+    labs(x = "Base Position", y = "Phred Quality") +
+    scale_color_nejm() +
+    guides(color = guide_legend(override.aes = list(size = 4)))
+
+ggsave(p_qhist,
+  filename =
+  glue("{wkdir}/figures/readqc/{Sys.Date()}_base-position-phred-quality.png"),
+  dpi = 1200, height = 6, width = 10
+)
+
+```
+
+![](../figures/readqc/2023-01-06_base-position-phred-quality.png)
+
+Key takeaways:
+
+### Tracing reads across QC filtering
+Here we load in flagstat metrics that have been collected at each step of the workflow to determine how reads are trimmed.
+
+
+```{r}
+# Function to read and format flagstat data
+read_flagstat_tsv <- function(file_path) {
+  readr::read_tsv(file_path,
+  col_names = FALSE, show_col_types = FALSE
+) %>%
+  dplyr::select(-X2) %>%
+  dplyr::rename(
+    qc_passed = X1,
+  ) %>%
+    dplyr::mutate(
+      qc_passed =
+      gsub("%", "", qc_passed) %>% as.numeric()
+    ) %>%
+    tidyr::pivot_wider(
+      names_from = "X3",
+      values_from = c("qc_passed")
+    ) %>%
+      mutate(filepath = file_path)
+}
+
+flagstat_dfs <- list()
+for (seq_method in c("WGS", "RNASEQ")) {
+  flag_stat_dir <- glue("{pdmbs_dir}/workflow/{seq_method}/flagstats")
+  flag_stat_paths <- list.files(
+    flag_stat_dir,
+    full.names = TRUE,
+    recursive = TRUE
+  )
+  flagstat_dfs[[seq_method]] <-
+    flag_stat_paths %>%
+    purrr::map(read_flagstat_tsv) %>%
+    bind_rows()
+}
+
+readqc_processed <- glue("{wkdir}/data/processed/readqc")
+saveRDS(
+  flagstat_dfs,
+  glue(
+    "{readqc_processed}/",
+    "{Sys.Date()}_flagstat-metrics_WGS-RNASEQ.rds"
+  )
+)
+```
+
+
+
+
+
+```{r, eval=FALSE}
+seq_meta_files <- list.files(glue("{wgs_wkdir}/sequence_metadata"), full.names = TRUE)
+pb <- progress_bar$new(total = length(seq_meta_files))
+wgs_sequencing_meta <- data.table()
+for (file in seq_along(seq_meta_files)) {
+  new_line <-
+    read.table(seq_meta_files[file])[-1] %>%
+    dplyr::rename(
+      ID = V2,
+      SAMPLE = V3,
+      LIBRARY = V4,
+      PLATFORM = V5,
+      PLATFORM_UNIT = V6,
+      CENTER = V7,
+      DATE = V8,
+      PLATFORM_MODEL = V9
+    ) %>%
+    as.data.table()
+  wgs_sequencing_meta %<>% bind_rows(new_line)
+  pb$tick()
+}
+
+saveRDS(
+  wgs_sequencing_meta,
+  glue("data/interim/metadata/{Sys.Date()}_sequencing_metadata.rds")
+)
+
+```
+
+```{r, eval=FALSE}
+dim(wgs_sequencing_meta)
+wgs_sequencing_meta %>% nrow()
+tst <- as_tibble(wgs_sequencing_meta)
+wgs_sequencing_meta %>% get_dupes(SAMPLE)
+
+# DATE 231
+# CENTER 2
+# PLATFORM_UNIT 118,98
+
+wgs_sequencing_meta$DATE %>% unique() %>% length()
+wgs_sequencing_meta$CENTER %>% unique() %>% length()
+wgs_sequencing_meta$PLATFORM_UNIT %>% unique() %>% length()
+dim(wgs_sequencing_meta)
+wgs_sequencing_meta %>% filter(CENTER == "CN:MG")
+
+```
+
+
+
+What sequencing metadata may be useful for filtering, and how are metadata categories related to one another? 
+
+Ideal metadata for filtering will consist of distinct subsets of samples. Samples which fall into multiple categofies within a metadata category will be more complex to manage.
+
+
+```{r}
+
+
+```
+
+
+
+
+```{r, eval=FALSE}
+wgs_sequencing_meta <- readRDS(glue("data/interim/metadata/{Sys.Date()}_sequencing_metadata.rds"))
+
+```
+
+
+```{r, eval=FALSE}
+# read in sample summary stats across analysis levels
+flagstat_df <- readRDS(
+  glue(
+    "{wkdir}/data/processed/readqc/",
+    "2023-01-06_flagstat-metrics_WGS-RNASEQ.rds"
+  )
+)
+wgs_flagstat_metrics <- flagstat_df[["WGS"]] %>%
+  mutate(
+    analysis_stage = filepath %>%
+      str_before_last("/") %>% str_after_last("/")
+  )  %>%
+  mutate(
+    sample_id = case_when(
+      analysis_stage ==
+        "01_CRAM" ~ basename(filepath) %>%
+        str_remove("_flagstat.tsv"),
+      analysis_stage ==
+        "02_BAM-unmapped" ~ basename(filepath) %>%
+        str_remove("_unmapped-f4_flagstat.tsv"),
+      analysis_stage ==
+        "03_BAM-unmapped-3328-filtered" ~ basename(filepath) %>%
+        str_remove("_unmapped-F3328_flagstat.tsv"),
+      TRUE ~ "ERROR"
+    )
+  ) %>%
+    glimpse
+
+ps_formatted_flagstat <- wgs_flagstat_metrics %>%
+  mutate(analysis_stage = glue("flagstat_{analysis_stage}")) %>%
+  pivot_wider(
+    names_from = analysis_stage,
+    values_from = !c(sample_id, analysis_stage),
+      names_glue = "{analysis_stage}_{.value}",
+  ) %>%
+    janitor::clean_names() %>%
+  glimpse()
+
+saveRDS(
+  ps_formatted_flagstat,
+  glue(
+    "{wkdir}/data/processed/readqc/",
+    "{Sys.Date()}_WGS_flagstat-metrics_phyloseq-formatted.rds"
+  )
+)
+
+```
+
+
+Here we will explore quality control parameters for whole blood whole genome sequencing BAM files. Rigorous quality control is essential as data downstream from this section will impact many analyses. Questions of interest include:
+
+1. What is the frequency of singleton reads in the unmapped read population?
+2. Where to reads whose mate maps to the human genome map to in the human genome?
+    -   If this is in a specific region, is this due to limitations in the human reference genome and should we trust it?
+
+To begin answering these questions we will download a small subset of CRAM files and convert them to BAM files.
+
+To determine the
+
+Next we will explore the frequencies of paired/single-end read populations, determine their quality and examine the reads mo
+
+
+
+
+```{r, eval=FALSE}
+# Download and save bbduk stdout QC file
+for (seq_method in c("WGS", "RNASEQ")){
+  file_ext <- "_bbduk_stdout.txt"
+  clean_fqs <- glue("{pdmbs_dir}/workflow/{seq_method}/stats_clean_reads")
+  readqc_stdout <- list.files(clean_fqs, full.names = TRUE)
+  bbduk_stdout <- readqc_stdout %>% keep(grepl(file_ext, .))
+  pb <- progress_bar$new(total = length(bbduk_stdout))
+  readqc_stats <- tibble()
+
+  for (f in bbduk_stdout) {
+    stdout <- read.delim(f, header = F, sep = "\t")[24:45,]
+    stats_list <- stdout %>% str_split(., pattern = " ")
+    sample_id <- basename(f) %>% stringr::str_remove(file_ext)
+    pb$tick()
+    sample_stdout <- try(
+      readqc_stats %<>% bind_rows(as_tibble_row(
+        c(
+          "sample_id" = sample_id,
+          "input_reads" = stats_list[[2]][1],
+          "input_bases" = stats_list[[4]][1],
+          "q_trimmed_reads" = stats_list[[6]][1],
+          "q_trimmed_bases" = stats_list[[7]][1],
+          "k_trimmed_reads" = stats_list[[9]][1],
+          "k_trimmed_bases" = stats_list[[10]][1],
+          "removed_reads" = stats_list[[12]][1],
+          "removed_bases" = stats_list[[13]][1],
+          "final_reads" = stats_list[[15]][1],
+          "final_bases" = stats_list[[16]][1]
+        )
+      ))
+    )
+    if (inherits(sample_stdout, "try-error")) {
+      cat("\nERROR: ", sample_id, f, "\n")
+      next
+    }
+  }
+  outputdir <- glue("{wkdir}/data/interim/readqc/")
+  saveRDS(
+    readqc_stats,
+    glue("{outputdir}{Sys.Date()}_{seq_method}_bbduk-stats-df.rds")
+  )
+}
+
+```
+
+
+
+
+```{r}
+
+readstats_dir <- glue("{wkdir}/data/interim/readqc")
+readqc_stats <- readRDS(glue("{readstats_dir}/2022-12-31_bbduk-stats-df.rds")) %>% 
+  dplyr::rename(participant_id = sample_id)
+
+df_readqc_stats <-
+  readqc_stats %>%
+  column_to_rownames(var = "participant_id") %>%
+  mutate_all(as.numeric) %>%
+  mutate(
+    percent_reads_removed = 100 * ((input_reads - final_reads)/input_reads) ,
+    percent_bases_removed = 100 * ((input_bases - final_bases)/input_bases)
+  ) %>% 
+  rownames_to_column(var = "participant_id") %>% 
+  glimpse()
+
+```
+
+
+
+
+quality control summary statistics
+```{r}
+# checking to see number of samples = 9833
+df_readqc_stats$participant_id %>% unique()  %>% length()
+
+# checking to see all files have a numeric output
+df_readqc_stats %>% glimpse()
+
+# checking the range of total quality reads per sample 
+read_summary <- df_readqc_stats %>%
+  group_by(participant_id) %>%
+  summarise(total_reads = sum(final_reads)) %>%
+  arrange(total_reads)
+
+read_summary %>% head()
+read_summary %>% tail()
+
+```
+
+
+```{r}
+
+df_readqc_stats %>% 
+  left_join(met_df, by = "participant_id") %>% 
+  ggplot(aes(input_bases, final_bases)) +
+  geom_point(aes(color = study), shape = 21, alpha = 0.5, size = 0.4) +
+  scale_x_log10(limits = c(1e7, 1e10)) +
+  scale_y_log10(limits = c(1e7, 1e10)) +
+  geom_smooth(method = "lm", se = F, aes(color = study)) +
+  theme_bw() +
+  coord_fixed() +
+  scale_color_npg() 
+  # stat_regline_equation(label.y.npc = 0.95) +
+  # stat_cor(label.y.npc = 0.9) +
+  # facet_grid(~read_class)
+
+```
+
+```{r}
+#| fig-cap: Total read input by final quality trimmed reads, binned by forward/reverse/singleton read class. 
+
+df_readqc_stats %>% 
+  left_join(met_df, by = "participant_id") %>% 
+  ggplot(aes(input_reads, final_reads)) +
+  geom_point(aes(color = study), shape = 21, alpha = 0.5, size = 0.4) +
+  scale_x_log10() +
+  scale_y_log10() +
+  geom_smooth(method = "lm", se = F, aes(color = study)) +
+  theme_bw() +
+  coord_fixed() +
+  scale_color_npg()
+  # stat_regline_equation(label.y.npc = 0.95) +
+  # stat_cor(label.y.npc = 0.9) +
+  # facet_grid(~read_class)
+
+```
+
+```{r}
+df_readqc_stats %>% 
+  left_join(met_df, by = "participant_id") %>% 
+  ggplot(aes(final_reads + 1)) +
+  geom_density(aes(color = study)) +
+  scale_x_log10() 
+
+```
+
+```{r, eval=FALSE}
+
+df_readqc_stats_paired <- df_readqc_stats %>%
+  filter(read_class != "single") %>%
+  group_by(participant_id) %>%
+  summarize(across(
+    !c(read_class, percent_reads_removed, percent_bases_removed),
+    sum
+  ))  %>% 
+  dplyr::rename_if(is.numeric, ~paste0(., "_paired"))
+
+df_readqc_stats_single <- 
+  df_readqc_stats %>% 
+  filter(read_class == "single") %>% 
+  select(-read_class) %>% 
+  dplyr::rename_if(is.numeric, ~paste0(., "_single"))
+
+df_readqc_stats_wide <- 
+  full_join(df_readqc_stats_paired, df_readqc_stats_single,
+             by = c("participant_id"))
+
+```
+
+Observing the ratio of paired vs singlet read counts
+
+```{r, eval=FALSE}
+
+df_readqc_stats_wide %>% 
+  ggplot() +
+  geom_histogram(aes(x=final_reads_paired + 1, fill = "paired"), bins = 100, alpha = 0.6) +
+  geom_histogram(aes(x=final_reads_single + 1, fill = "single"), bins = 100, alpha = 0.6) +
+  scale_x_log10() +
+  scale_fill_manual(values = c("paired" = "blue", "single" = "orange")) +
+  labs(fill = NULL)
+
+```
+
+Conclusion: Single reads have a more narrow distribution,
+
+How do read quality distributions compare between paired vs singlet reads?
+
+```{r, eval=FALSE}
+
+df_readqc_stats_long_readclass <- df_readqc_stats_wide %>%
+  pivot_longer(
+    !participant_id,
+    names_to = c("metric", ".value"),
+    names_pattern = "(.+)_(.+$)"
+  )
+
+df_readqc_stats_long <- df_readqc_stats_long_readclass %>% 
+  pivot_longer(c(paired, single), names_to = "read_class", values_to = "value")
+read_metrics <- c("input_reads", "final_reads", "input_bases", "final_bases")
+
+df_readqc_stats_long_readclass %>% 
+  filter(metric %in% read_metrics) %>% 
+  ggplot(aes(x = metric, y = paired / single)) +
+  geom_point(position = position_jitter(height = 0, width = 0.2), alpha = 0.2) +
+  geom_boxplot(outlier.alpha = 0) +
+  scale_y_log10()
+
+df_readqc_stats_long %>% 
+  filter(metric %in% read_metrics) %>% 
+  mutate(metric = factor(metric, levels = read_metrics)) %>% 
+  ggplot(aes(x = metric, y =value)) +
+  geom_point(position = position_jitter(height = 0, width = 0.2), alpha = 0.2) +
+  geom_boxplot(outlier.alpha = 0, alpha = 0.1) +
+  facet_wrap(~read_class) +
+  scale_y_log10()
+```
+
+```{r}
+sessionInfo()
+```
+
+~

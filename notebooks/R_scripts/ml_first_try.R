@@ -1,211 +1,163 @@
 # Joe Boktor
 # Caltech - Mazmanian lab
 
-source("src/_load_packages.R")
-source("src/_plot-functions.R")
-library(tidyverse)
-library(tidymodels)
-library(skimr)
-library(finetune)
+# source("src/_load_packages.R")
+# source("src/_plot-functions.R")
+# library(tidymodels)
+# library(parsnip)
+# # library(skimr)
+# library(finetune)
 
-base::load("data/Phyloseq_Objects/Phyloseq_all_outliers_removed.RData") #phyloseq_objs
-refDB <- "UHGG"
-level <- "Species"
-dat.obj <- refDB_phyloseq_orm[[refDB]][[level]] %>% 
-  subset_samples(case_control_other_latest != "Other")
-
-
-metadat <- meta(dat.obj)
-model_matrix <-
-  model.matrix( ~ 0 + case_control_other_latest + sex + study,
-                data = metadat)
-
-dge <- 
-  dat.obj %>% 
-  phyloseq_to_deseq2(~ case_control_other_latest + sex + study) %>% 
-  as.DGEList()
-# dge_highQC <- filterByExpr(dge, model_matrix)
-# dge.filtered <- dge[dge_highQC,,keep.lib.sizes=FALSE]
-dge.norm <- dge %>%  #dge.filtered %>% 
-  calcNormFactors(method = "TMM") %>% 
-  voom(design = model_matrix, plot = TRUE, save.plot = TRUE, normalize.method="none")
-print(dim(t(dge.norm$E)))
-
-
-# rawdat <- dge.norm$E
-# adj.var <- model.matrix(~ study, data=metadat)
-# bio.var.input <- model.matrix(~ sex + age_at_baseline, data = metadat)
-# snm.obj <-
-#   snm(
-#     raw.dat = rawdat,
-#     bio.var = bio.var.input,
-#     adj.var = adj.var,
-#     rm.adj = TRUE,
-#     verbose = TRUE,
-#     diagnose = TRUE
-#   )
-
-
-#______________________________________________________________________________
+# ______________________________________________________________________________
 ## Build Models ----
 
+library(tidyverse)
+library(parsnip)
+library(rsample)
+library(yardstick)
+library(recipes)
+library(workflows)
+library(dials)
+library(tune)
+
+ps_trim_norm <- readRDS(
+  glue(
+    "{wkdir}/data/processed/",
+    "phyloseq_objects/decontaminated/",
+    "2024-02-27_WGS_KrakenUnique_phyloseq_humanreadnorm.rds"
+  )
+)
+
+# load normalized phyloseq object and filter for cohorts of interest
+ps_model <- ps_trim_norm %>%
+  # subset_samples(study %in% c("BioFIND", "HBS", "PDBP", "PPMI")) %>%
+  subset_samples(case_control_other_latest != "Other") %>%
+  core(detection = 0, prevalence = 1/100)
+
+# collect metdata
+metadata_df <- microbiome::meta(ps_model) %>%
+  dplyr::select(participant_id, case_control_other_latest, sex, study) %>%
+  glimpse
+
 
 set.seed(42)
-metadata_df <- metadat %>% 
-  dplyr::select(participant_id, case_control_other_latest, sex, study)
-df_plot <- 
-  t(dge.norm$E) %>%
-  # t(snm.obj$norm.dat) %>% 
-  as.data.frame() %>%
+df_plot <- abundances(ps_model) %>%
+  t() %>%
+  as.data.frame() %>% 
   rownames_to_column(var = "participant_id") %>%
   left_join(metadata_df) %>%
-  initial_split(strata = case_control_other_latest)
-# df_plot <- 
-#   dat.obj %>% 
-#   abundances() %>% t() %>% 
-#   as.data.frame() %>% 
-#   rownames_to_column(var = "participant_id") %>% 
-#   left_join(metadata_df) %>%
-#   initial_split(strata = case_control_other_latest)
+  rsample::initial_split(strata = case_control_other_latest)
 
-ml_train <- training(df_plot)
-ml_test <- testing(df_plot)
-ml_metrics <- metric_set(accuracy, roc_auc, mn_log_loss)
+ml_train <- rsample::training(df_plot)
+ml_test <- rsample::testing(df_plot)
+ml_metrics <- yardstick::metric_set(accuracy, roc_auc, mn_log_loss)
 
 
+# Set up 10-fold cross-validation recipe
 set.seed(42)
 train_folds <- vfold_cv(ml_train, v = 10, strata = case_control_other_latest)
-train_folds
-
-ml_recipe <- recipe(case_control_other_latest ~., data = ml_train) %>%
-  update_role(participant_id, new_role = "participant_id") %>%
-  update_role(sex, new_role = "sex") %>%
-  update_role(study, new_role = "study") %>%
-  step_nzv(all_predictors()) %>%
-  step_normalize(all_predictors())
-ml_recipe
-
-#______________________________________________________________________________
-#                             LASSO Model ----
-#______________________________________________________________________________
-
-{
-  
+ml_recipe <- recipes::recipe(case_control_other_latest ~., data = ml_train) %>%
+  recipes::update_role(participant_id, new_role = "participant_id") %>%
+  recipes::update_role(sex, new_role = "sex") %>%
+  recipes::update_role(study, new_role = "study") %>%
+  recipes::step_nzv(all_predictors()) %>%
+  recipes::step_normalize(all_predictors())
 
 # Define tunable Lasso model
-tune_spec <- logistic_reg(penalty = tune(), mixture = 1) %>%
-  set_engine("glmnet")
+tune_spec <- parsnip::logistic_reg(penalty = tune(), mixture = 1) %>%
+  parsnip::set_engine("glmnet")
 
-wf <- workflow() %>% 
-  add_recipe(ml_recipe) %>% 
-  add_model(tune_spec)
+# defining workflow
+wf <- workflows::workflow() %>%
+  workflows::add_recipe(ml_recipe) %>%
+  workflows::add_model(tune_spec)
 
+# Create a grid of penalty values to test (LASSO MODEL)
+lambda_grid <- dials::grid_regular(penalty(), levels = 100)
 
-#_____________________________________________________
-#                TUNE LASSO MODEL  
-#_____________________________________________________
-# Create a grid of penalty values to test
-lambda_grid <- grid_regular(penalty(), levels = 50)
-# ctrl <- control_grid(save_pred = TRUE, verbose = TRUE)
+# TUNE MODEL
 doParallel::registerDoParallel()
-
-set.seed(42)
 lasso_grid <- tune_grid(wf, resamples = train_folds, grid = lambda_grid)
 
 ## Evaluate model results
-show_best(lasso_grid)
+tune::show_best(lasso_grid, metric = "roc_auc")
 # select optimal penalty by filtering largest rocauc
 best_aucroc <- select_best(lasso_grid, "roc_auc")
 # visualize model metrics of grid 
-model_performance <- 
-  lasso_grid %>% 
-  collect_metrics() %>% 
-  ggplot(aes(penalty, mean, color = .metric)) +
-  geom_errorbar(aes(ymin = mean - std_err,
-                    ymax = mean + std_err),
-                alpha = 0.5) +
-  geom_line(size = 1.25, show.legend = F) +
-  facet_wrap(~.metric, scales = "free", nrow = 2) +
-  theme_bw() + 
-  scale_x_log10() +
-  scale_color_viridis_d(option = "cividis", begin = .9, end = 0) +
-  theme(legend.position = "none")
-print(model_performance)
 
-ggsave(model_performance, filename = paste0("figures/machine_learning/lasso_vanilla/training_perf.png"),
-       dpi = 600, width = 5, height =3)
+# model_performance <- 
+#   lasso_grid %>% 
+#   collect_metrics() %>% 
+#   ggplot(aes(penalty, mean, color = .metric)) +
+#   geom_errorbar(aes(ymin = mean - std_err,
+#                     ymax = mean + std_err),
+#                 alpha = 0.5) +
+#   geom_line(linewidth = 1.25, show.legend = F) +
+#   facet_wrap(~.metric, scales = "free", nrow = 2) +
+#   theme_bw() + 
+#   scale_x_log10() +
+#   scale_color_viridis_d(option = "cividis", begin = .9, end = 0) +
+#   theme(legend.position = "none")
+# model_performance
+
+# ggsave(model_performance,
+#   filename = glue("{wkdir}/figures/ml/lasso_vanilla_training_perf.png"),
+#   width = 5, height = 3
+# )
 
 # Finalize and fit workflow with tuned parameters
-train_lasso <-
-  wf %>%
-  finalize_workflow(best_aucroc) %>%
-  fit(ml_train)
+train_lasso <- finalize_workflow(wf, best_aucroc) %>% fit(ml_train)
 
 # Predictions on test data
-hold_out_set <-
-  wf %>%
-  finalize_workflow(best_aucroc) %>%
-  last_fit(df_plot)
-hold_out_set
+hold_out_set <- finalize_workflow(wf, best_aucroc) %>% last_fit(df_plot)
 
-conf_matrix <- 
-  hold_out_set %>% 
-  collect_predictions() %>% 
+conf_matrix <- collect_predictions(hold_out_set) %>% 
   conf_mat(case_control_other_latest, .pred_class) %>% 
   autoplot(type = "heatmap")
 print(conf_matrix)
 
-aurocplot <- 
-  hold_out_set %>% 
-  collect_predictions() %>% 
+aurocplot <- collect_predictions(hold_out_set) %>% 
   roc_curve(case_control_other_latest, .pred_Case) %>%
   autoplot()
 aurocplot
 
-aupr.plot <- 
-  hold_out_set %>% 
-  collect_predictions() %>% 
+aupr_plot <- collect_predictions(hold_out_set) %>% 
   pr_curve(case_control_other_latest, .pred_Case) %>%
   autoplot()
-aupr.plot
+aupr_plot
 
-ggsave(conf_matrix, filename = paste0("figures/machine_learning/lasso_vanilla/",
-                                      refDB, "_", level, "_confusion.png"),
-       dpi = 600, width = 3.25, height =3)
-ggsave(aurocplot, filename = paste0("figures/machine_learning/lasso_vanilla/",
-                                    refDB, "_", level, "_AUROC.png"),
-       dpi = 600, width = 4.5, height =4.5)
-ggsave(aupr.plot, filename = paste0("figures/machine_learning/lasso_vanilla/",
-                                    refDB, "_", level, "_AUPR.png"),
-       dpi = 600, width = 4.5, height =4.5)
+# ggsave(conf_matrix, filename = paste0("figures/machine_learning/lasso_vanilla/",
+#                                       refDB, "_", level, "_confusion.png"),
+#        dpi = 600, width = 3.25, height =3)
+# ggsave(aurocplot, filename = paste0("figures/machine_learning/lasso_vanilla/",
+#                                     refDB, "_", level, "_AUROC.png"),
+#        dpi = 600, width = 4.5, height =4.5)
+# ggsave(aupr.plot, filename = paste0("figures/machine_learning/lasso_vanilla/",
+#                                     refDB, "_", level, "_AUPR.png"),
+#        dpi = 600, width = 4.5, height =4.5)
 
-pred_accuracy <- hold_out_set %>% 
-  collect_predictions() %>% 
-  metrics(case_control_other_latest, .pred_class) %>% 
-  filter(.metric == "accuracy")
-pred_auroc <- hold_out_set %>% 
-  collect_predictions() %>% 
-  roc_auc(case_control_other_latest, .pred_Case)
-pred_prauc <- hold_out_set %>% 
-  collect_predictions() %>% 
-  pr_auc(case_control_other_latest, .pred_Case)
-pred_ppv <- hold_out_set %>% 
-  collect_predictions() %>% 
-  ppv(case_control_other_latest, .pred_class)
-pred_npv <- hold_out_set %>% 
-  collect_predictions() %>% 
-  npv(case_control_other_latest, .pred_class)
-pred_sensitivity <- hold_out_set %>% 
-  collect_predictions() %>% 
-  sensitivity(case_control_other_latest, .pred_class)
-pred_specificity <- hold_out_set %>% 
-  collect_predictions() %>% 
-  specificity(case_control_other_latest, .pred_class)
+
+collect_metrics <- function(hold_out_set, group) {
+  preds <- collect_predictions(hold_out_set)
+  pred_accuracy <- metrics(preds, group, .pred_class) %>%
+    filter(.metric == "accuracy")
+  pred_auroc <- roc_auc(preds, group, .pred_Case)
+  pred_prauc <- pr_auc(preds, group, .pred_Case)
+  pred_ppv <- ppv(preds, group, .pred_class)
+  pred_npv <- npv(preds, group, .pred_class)
+  pred_sensitivity <- sensitivity(preds, group, .pred_class)
+  pred_specificity <- specificity(preds, group, .pred_class)
+  model_stats <- dplyr::bind_rows(
+    pred_accuracy, pred_auroc, pred_prauc,
+    pred_ppv, pred_npv, pred_sensitivity, pred_specificity
+  )
+  return(model_stats)
+}
+
+model_stats <- collect_metrics(hold_out_set, "case_control_other_latest")
 
 
 
-model_stats <- bind_rows(pred_accuracy, pred_auroc, pred_prauc, 
-                         pred_ppv, pred_npv, pred_sensitivity, pred_specificity)
 
 model_stats_summary <- model_stats %>% 
   ggplot(aes(x = .estimate, y = .metric)) +
@@ -215,22 +167,21 @@ model_stats_summary <- model_stats %>%
       "accuracy" = "Accuracy",
       "roc_auc" = "AUROC",
       "pr_auc" = "AUPR",
-      "sens" = "Sensitivity",
-      "spec" = "Specificity",
-      "ppv" = "PPV",
-      "npv" = "NPV")) +
+      "Sensitivity" = "Sensitivity",
+      "Specificity" = "Specificity",
+      "PPV" = "PPV",
+      "NPV" = "NPV")) +
   labs(x = "", y = "") +
   geom_text(aes(label = round(.estimate, digits = 3), x = .estimate - 0.075, y = .metric), 
             color = "white") +
   theme_bw() 
 model_stats_summary
+
 ggsave(model_stats_summary, filename = paste0("figures/machine_learning/lasso_vanilla/",
                                               refDB, "_", level, "_model_stats_summary.png"),
        dpi = 600, width = 4.5, height =3)
 
 
-
-}
 #______________________________________________________________________________
 #                             XGBoost Model ----
 #______________________________________________________________________________

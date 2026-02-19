@@ -1,0 +1,378 @@
+---
+title: "Quantifying Generation Probability and Selection Factors of CDR3β Sequences using IGoR/OLGA/SoNNia"
+editor: source
+author: "Joe Boktor"
+date: '2025-05-04'
+eval: false
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    fig-height: 8
+    fig-width: 14
+---
+
+This notebook performs OLGA and SoNNia analyses to quantify the probability of CDR3β generation and produce $P_{gen}$ and $P_{post}$ statistics for each receptor. Then we perform distribution testing across samples as a pairwise distance metric.
+
+## Analysis Setup
+
+Environment setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(fastICA)
+library(parallelDist)
+library(mclust)
+library(seqinr)
+library(progress)
+library(transport)
+library(immunarch)
+library(nlme)
+library(broom)
+library(broom.mixed)
+library(philentropy)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+sonnia_dir <- glue("{wkdir}/data/interim/olga_sonnia")
+sonnia_output_dir <- glue("{sonnia_dir}/results")
+sonnia_analysis_dir <- glue("{sonnia_dir}/analysis")
+```
+
+
+Reading in metadata
+
+```{r}
+# full_meta_df <- readRDS(
+#     glue("{wkdir}/data/interim/airr/full_meta_df_2025-06-07.rds")) %>% 
+#     glimpse()
+
+# mds_tests <- full_meta_df %>%
+#     dplyr::select(matches("mds_updrs.*_summary_score")) %>%
+#     colnames()
+
+# key_meta_df <- full_meta_df %>%
+#     dplyr::select(
+#         sample_id, case_control_other_latest,
+#         ethnicity, race,
+#         visit_month, age_at_baseline, sex, study, participant_id,
+#         raw_total_reads, raw_total_reads_binned, DRB1_grouped, DRB1_risk,
+#         all_of(mds_tests)
+#     ) %>%
+#     glimpse()
+
+```
+
+Loading metadata and TCRB data
+
+```{r, eval=FALSE}
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-17.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  glimpse()
+
+trust4_reports_tcrb <- readRDS(
+  glue("{wkdir}/data/interim/airr/trust4_reports_tcrb_clean_df_2025-07-08.rds")
+) %>% 
+  glimpse()
+
+```
+
+
+Prepping TRUST4 data for GLIPH2
+
+```{r}
+# trust4_reports <- fread(
+#     glue("{wkdir}/data/interim/airr/2023-05-04_TRUST4-reports-all.csv"),
+#     header = TRUE
+# ) %>%
+#     dplyr::select(-V1) %>%
+#     glimpse()
+
+# trust4_reports_tcrb <- trust4_reports %>%
+#     filter(C == "TRBC") %>%
+#     filter(V != "." & J != ".") %>%
+#     filter(CDR3aa != "out_of_frame") %>%
+#     filter(!grepl("_", CDR3aa))
+
+
+# valid_aa <- "^[ACDEFGHIKLMNPQRSTVWY]+$"
+# sonnia_cdr3b_base <- trust4_reports_tcrb %>%
+#     filter(grepl(valid_aa, CDR3aa)) %>%
+#     left_join(key_meta_df, by = c("sample_id" = "sample_id")) %>%
+#     filter(case_control_other_latest != "Other") %>%
+#     mutate(v_gene = str_before_first(V, "\\*")) %>%
+#     mutate(j_gene = str_before_first(J, "\\*"))
+# sonnia_cdr3b_base %>% glimpse()
+trust4_reports_tcrb %>% glimpse()
+
+sonnia_cdr3b_case <-
+    filter(trust4_reports_tcrb, case_control_other_latest == "Case") %>%
+    dplyr::select("amino_acid" = CDR3aa, v_gene, j_gene) %>% glimpse()
+sonnia_cdr3b_ctrl <-
+    filter(trust4_reports_tcrb, case_control_other_latest == "Control") %>%
+    dplyr::select("amino_acid" = CDR3aa, v_gene, j_gene) %>% glimpse()
+
+# write.csv(
+#   sonnia_cdr3b_case %>% sample_n(2e4) %>% distinct(),
+#   file = glue("{sonnia_dir}/test_input_case.csv"),
+#   quote = FALSE,
+#   row.names = FALSE
+# )
+write.csv(
+  sonnia_cdr3b_case %>% distinct(),
+  file = glue("{sonnia_dir}/tcrb_case.csv"),
+  quote = FALSE,
+  row.names = FALSE
+)
+write.csv(
+  sonnia_cdr3b_ctrl %>% distinct(),
+  file = glue("{sonnia_dir}/tcrb_ctrl.csv"),
+  quote = FALSE,
+  row.names = FALSE
+)
+
+```
+
+## Running SoNNia
+
+```{r}
+shell_do(glue(
+    "mamba activate statbiophys && ",
+    "python {src_dir}/python_scripts/sonnia_pipeline.py",
+    " --input_data {sonnia_dir}/tcrb_case.csv",
+    " --output_dir {sonnia_output_dir}/tcrb_case_results_{Sys.Date()}",
+    " --output_csv tcrb_case_results.csv"
+    ))
+
+shell_do(glue(
+    "mamba activate statbiophys && ",
+    "python {src_dir}/python_scripts/sonnia_pipeline.py",
+    " --input_data {sonnia_dir}/tcrb_ctrl.csv",
+    " --output_dir {sonnia_output_dir}/tcrb_ctrl_results_{Sys.Date()}",
+    " --output_csv tcrb_ctrl_results.csv"
+    ))
+
+# shell_do(glue(
+#     "mamba activate statbiophys && ",
+#     "python {src_dir}/python_scripts/sonnia_pipeline.py",
+#     " --input_data {sonnia_dir}/test_input_case.csv",
+#     " --output_dir {sonnia_dir}/test_input_case_results",
+#     " --output_csv test_input_case_results.csv"
+#     ))
+
+```
+
+
+![Case Samples Model learning](../data/interim/olga_sonnia/results/tcrb_case_results/figures/model_learning.png)
+
+![Control Samples Model learning](../data/interim/olga_sonnia/results/tcrb_ctrl_results/figures/model_learning.png)
+
+
+** Takeaways **
+
+- Model learning is good for both case and control samples, the validation split is not overfitting and the marginals of the model seem tight.
+
+
+## Visualizing & analyzing SoNNia results
+
+```{r}
+sonnia_case_df <- read_csv(
+    glue("{sonnia_output_dir}/tcrb_case_results_2025-07-09/tcrb_case_results.csv")) %>%
+    mutate(case_control_other_latest = "Case") %>% 
+    glimpse()
+
+sonnia_ctrl_df <- read_csv(
+    glue("{sonnia_output_dir}/tcrb_ctrl_results_2025-07-09/tcrb_ctrl_results.csv")) %>%
+    mutate(case_control_other_latest = "Control") %>% 
+    glimpse()
+
+sonnia_df <- bind_rows(sonnia_case_df, sonnia_ctrl_df) %>% glimpse()
+
+# Visualizing SoNNia results
+sonnia_df %>% glimpse()
+trust4_reports_tcrb %>% glimpse()
+
+tcrb_df <- trust4_reports_tcrb %>% 
+    left_join(sonnia_df, 
+        by = c("CDR3aa" = "amino_acid", "v_gene", "j_gene", "case_control_other_latest")
+    ) %>% 
+    filter(!is.na(Q_data)) %>% 
+    glimpse()
+
+write_csv(tcrb_df, glue("{wkdir}/data/interim/airr/tcrb_soNNia_{Sys.Date()}.csv"))
+
+```
+
+
+```{r}
+tcrb_df <- fread(
+    glue("{wkdir}/data/interim/airr/tcrb_soNNia_2025-08-20.csv")) %>%
+    glimpse()
+
+tcrb_df %>% glimpse()
+
+# # Visualizing Pgen, Ppost, and Q_data
+# tcrb_df %>% 
+#     ggplot(aes(x = log10(Q_data), color = DRB1_risk)) +
+#     geom_density() +
+#     theme_bw() +
+#     scale_color_d3() +
+#     facet_wrap(~case_control_other_latest) +
+#     labs(x = "log10(Pgen)", y = "Density")
+
+
+sids <- unique(tcrb_df$sample_id)
+pairwise_sid_grid <- expand.grid("Sample_1" = sids, "Sample_2" = sids) %>% 
+    filter(Sample_1 != Sample_2) %>% 
+    glimpse()
+
+# visualizing histrogram binning
+sids[1:10]
+for (s in sids[1:10]) {
+    tcrb_df %>% 
+        filter(sample_id == s) %>% 
+        pull(Q_data) %>% hist(100)
+}
+
+
+
+# All are positive distributions (no negative values)
+tcrb_df %>% glimpse()
+tcrb_df$Q_data %>% summary()
+tcrb_df$pgen_data %>% summary()
+tcrb_df$ppost_data %>% summary()
+
+q_mat <- tcrb_df %>% 
+    # dplyr::filter(sample_id %in% sids[1:50]) %>% 
+    dplyr::select(sample_id, Q_data) %>% 
+    group_by(sample_id) %>% 
+    mutate(row_num = row_number()) %>% 
+    tidyr::pivot_wider(names_from = sample_id, values_from = Q_data, 
+        values_fill = 0) %>% 
+    dplyr::select(-row_num) %>% 
+    glimpse()
+
+# rownames(q_mat)
+
+q_mat <- as.matrix(q_mat + 1e-12) %>% t()
+# q_mat <- as.matrix(q_mat) %>% t()
+
+jsd_q_prob <- JSD(q_mat, est.prob = "empirical", unit = "log2")
+rownames(jsd_q_prob) <- colnames(jsd_q_prob) <- rownames(q_mat)
+saveRDS(jsd_q_prob, glue("{sonnia_analysis_dir}/jsd_q_prob_{Sys.Date()}.rds"))
+
+jsd_q_baseline <- JSD(q_mat, unit = "log2")
+rownames(jsd_q_baseline) <- colnames(jsd_q_baseline) <- rownames(q_mat)
+saveRDS(jsd_q_baseline, glue("{sonnia_analysis_dir}/jsd_q_baseline_{Sys.Date()}.rds"))
+
+
+# Chopping up values into distributions
+tcrb_df$Q_data %>% summary
+
+
+
+
+breaks <- seq(min(tcrb_df$Q_data, na.rm = TRUE),
+              max(tcrb_df$Q_data, na.rm = TRUE),
+              length.out = 101)          # 200 intervals → 201 breakpoints
+
+tcrb_df <- tcrb_df %>% 
+  # assign every Q_data value to one of the 200 bins
+  mutate(bin = cut(log10(Q_data),
+                   breaks = breaks,
+                   include.lowest = TRUE,
+                   labels = FALSE)) %>%
+  # count how many observations fall into each bin (within each sample)
+  group_by(sample_id) %>% 
+  add_count(bin, name = "bin_count") %>%
+  # convert that count to the probability mass of the bin
+  mutate(Q_data_bin = bin_count / n()) %>%     # Σ Q_data_bind == 1
+  select(-bin_count, -bin)
+
+
+# tcrb_df$Q_data_bin %>% table()
+# tcrb_df %>% filter(sample_id == "PP-4021-BLM0T1") %>% 
+#     pull(Q_data_bin) %>% hist()
+
+tcrb_df$Q_data_bin %>% hist(100)
+tcrb_df$Q_data %>% hist(100)
+
+# tcrb_df$Q_data_bin %>% log() %>% hist(200)
+# tcrb_df$Q_data %>% log %>% hist(200)
+
+sids[1:10]
+for (s in sids[1:10]) {
+    vals <- tcrb_df %>% 
+        filter(sample_id == s) %>% 
+        pull(Q_data_bin) %>% print()
+    hist(vals)
+}
+
+
+tibble(sample_id = c("A","A","A","B","B"),
+       bin       = c( 1 ,  1 ,  2 , 1 , 2)) %>%
+#   group_by(sample_id) %>%
+  add_count(bin, name = "bin_count")
+
+
+tcrb_df %>% 
+    select(sample_id, Q_data)
+
+
+```
+
+
+
+```{r}
+
+
+jsd_q_prob <- readRDS(glue("{sonnia_analysis_dir}/jsd_q_prob_2025-05-31.rds"))
+
+# dim(jsd_q_prob)
+
+# jsd_q_prob %>% heatmap()
+
+
+
+
+
+
+
+```
+
+
+
+```{r}
+sessionInfo()
+```

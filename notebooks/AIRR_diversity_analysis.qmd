@@ -1,0 +1,437 @@
+---
+title: "Adaptive Immune Receptor Repertoire in Parkinson's Disease: Global Diversity Analysis"
+editor: source
+author: "Joe Boktor"
+date: '2025-07-08'
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+---
+
+Environment setup
+
+```{r setup, message=FALSE, warning=FALSE}
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+
+# Additional libraries
+library(data.table)
+
+# Plotting libraries
+library(ggsci)
+library(ggrepel)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+library(gt)
+library(gtsummary)
+library(immunarch)
+library(nlme)
+
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+imm_plots_dir <- glue("{wkdir}/figures/AIRR/immunarch")
+```
+
+Loading metadata and TCRB data
+
+```{r, eval=FALSE}
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  glimpse()
+
+key_meta_df <- metadata %>% 
+  dplyr::select(
+    sample_id, participant_id, case_control_other_latest, 
+    age_at_baseline, sex, abis_t_cell, ethnicity, race, visit_month, study,
+    aligned_reads, est_tcell_reads_abis, pd_hla_risk_score, pd_hla_risk_score_z
+  ) %>% 
+  glimpse()
+
+trust4_reports_tcrb <- readRDS(
+  glue("{wkdir}/data/interim/airr/trust4_reports_tcrb_clean_df_2025-07-08.rds")
+) %>% 
+  glimpse()
+```
+
+# Collecting Diverstiy Metrics with Immunarch  
+
+### Formatting TRUST4 TCRB data for Immunarch
+
+```{r}
+immunarch_formatted <- trust4_reports_tcrb %>%
+  dplyr::rename(
+    Clones = `#count`,
+    Proportion = frequency,
+    CDR3.nt = CDR3nt,
+    CDR3.aa = CDR3aa,
+    V.name = V,
+    D.name = D,
+    J.name = J
+  ) %>%
+  dplyr::mutate(
+    VJ.ins = NA_character_,
+    VD.ins = NA_character_,
+    DJ.ins = NA_character_,
+    V.end = NA_integer_,
+    D.start = NA_integer_,
+    D.end = NA_integer_,
+    J.start = NA_integer_,
+    Sequence = NA_character_
+  ) %>%
+  glimpse()
+
+# Split data into immunarch format and metadata
+immunarch_data <- immunarch_formatted %>%
+  dplyr::select(Clones, Proportion, CDR3.nt, CDR3.aa, V.name, D.name, J.name,
+                VJ.ins, VD.ins, DJ.ins, Sequence) %>% 
+  glimpse()
+
+metadata_immunarch <- immunarch_formatted %>%
+  dplyr::select(C, cid, cid_full_length, sample_id) %>% 
+  left_join(metadata) %>% 
+  glimpse()
+
+# Create list structure expected by immunarch
+tictoc::tic("Creating immunarch object")
+immdata <- list(
+  data = split(immunarch_data, immunarch_formatted$sample_id),
+  meta = metadata_immunarch
+)
+tictoc::toc()
+
+saveRDS(
+    immdata,
+    glue("{wkdir}/data/interim/airr/immunarch/immunarch-obj_TCRB_{Sys.Date()}.rds"),
+    compress = FALSE
+)
+
+```
+
+
+### Executing Immunarch functions
+
+Note that this section takes about 4-6 hours to run.
+
+```{r}
+future::plan(future::multisession, workers = 30)
+immdata <- readRDS(
+    glue("{wkdir}/data/interim/airr/immunarch/immunarch-obj_TCRB_2025-07-08.rds")
+)
+immdata %>% glimpse()
+
+#' Computes basic statistics, 
+#' including clones/distributions of lengths and counts.
+#' https://immunarch.com/articles/web_only/v3_basic_analysis.html
+clonal_metrics = c("volume", "count", "len", "clones")
+for (m in clonal_metrics) {
+    message(glue("Calculating {m} clonal metrics"))
+    metric_data <- repExplore(immdata$data, .method = m, .col = c("aa")) %>% 
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{metrics_dir}/rep-explore-{m}_{Sys.Date()}.rds")
+    )
+}
+
+# Exploring Clonality
+# https://immunarch.com/reference/repClonality.html
+clone_mets <- c("clonal.prop", "homeo", "top", "rare")
+for (m in clone_mets) {
+    message(glue("Calculating {m} clonal metrics"))
+    metric_data <- repClonality(immdata$data, .method = m) %>% 
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{metrics_dir}/rep-clonality-{m}_{Sys.Date()}.rds"
+            )
+    )
+}
+
+# Gene Usage Analysis
+# https://immunarch.com/reference/geneUsage.html
+gene_metrics <- c("hs.trbv", "HomoSapiens.TRBJ")
+for (g in gene_metrics) {
+    message(glue("Calculating {g} gene usage metrics"))
+    metric_data <- geneUsage(immdata$data, g) %>%
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{metrics_dir}/gene-usage-{g}_{Sys.Date()}.rds"
+            )
+    )
+}
+
+# Analyzing Repertoire Diversity
+# https://immunarch.com/articles/web_only/v6_diversity.html
+div_metrics <- c(
+    # "chao1", "hill", 
+    # "div", "gini.simp", "inv.simp", 
+    # "gini", 
+    "d50" #"raref",
+)
+for (d in div_metrics) {
+    message(glue("Calculating {d} diversity metrics"))
+    metric_data <- repDiversity(immdata$data, .method = d) %>%
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{metrics_dir}/rep-diversity-{d}_{Sys.Date()}.rds"
+            )
+    )
+}
+
+```
+
+
+# Diversity Analysis of Beta Chain Repertoires
+
+V-gene usage analysis
+
+```{r}
+# Visualizing v-gene usage
+v_gene_usage <- readRDS(
+    glue("{metrics_dir}/gene-usage-hs.trbv_2025-07-09.rds")
+)
+v_gene_usage_long <- v_gene_usage %>%
+    pivot_longer(-Names, names_to = "sample_id", values_to = "counts") %>%
+    mutate(counts = ifelse(is.na(counts), 0, counts)) %>%
+    left_join(key_meta_df, by = c("sample_id")) %>%
+    filter(case_control_other_latest != "Other") %>%
+    group_by(sample_id) %>%
+    mutate(vgenefreq = counts / sum(counts) * 100) %>%
+    glimpse()
+
+p_v_gene_usage <- v_gene_usage_long %>%
+    ggplot(aes(
+        x = fct_reorder(Names, vgenefreq, .desc = TRUE),
+        y = vgenefreq
+    )) +
+    geom_point(aes(color = case_control_other_latest),
+        position = position_jitterdodge(), alpha = 0.1, size = 0.05) +
+    geom_boxplot(
+        aes(group = interaction(Names, case_control_other_latest)),
+        outlier.alpha = 0, # fill.alpha = 0.2,
+        position = position_dodge(width = 0.75), alpha = 0.3, color = "black"
+    ) +
+    scale_color_d3() +
+    scale_fill_d3() +
+    theme_bw() +
+    labs(
+        x = "V-Gene", y = "V-Gene Frequency (%)",
+        fill = "Disease Status",
+        color = "Disease Status"
+    ) +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top"
+    )
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/immunarch/v_gene_usage_{Sys.Date()}.png"),
+    plot = p_v_gene_usage,
+    width = 14,
+    height = 6
+)
+
+# Grouping by higher level gene id
+v_gene_usage_long %>% glimpse()
+
+v_gene_usage_long_broad <- v_gene_usage_long %>%
+    mutate(vgenebroad = str_extract(Names, "^[A-Z0-9]+")) %>%
+    group_by(sample_id, vgenebroad) %>%
+    dplyr::summarise(counts = sum(counts)) %>%
+    group_by(sample_id) %>%
+    mutate(vgenebroadfreq = counts / sum(counts) * 100) %>%
+    left_join(key_meta_df, by = c("sample_id")) %>%
+    filter(case_control_other_latest != "Other") %>%
+    mutate(case_control_other_latest = factor(case_control_other_latest, 
+        levels = c("Control", "Case"))) %>%
+    glimpse()
+
+vgenebroad_order <- v_gene_usage_long_broad %>% 
+    group_by(vgenebroad) %>% 
+    dplyr::summarise(med_freq = median(vgenebroadfreq)) %>% 
+    arrange(desc(med_freq)) %>% 
+    pull(vgenebroad)
+
+p_v_gene_usage_broad <- v_gene_usage_long_broad %>%
+    filter(case_control_other_latest != "Other") %>%
+    mutate(vgenebroad = factor(vgenebroad, levels = vgenebroad_order)) %>%
+    ggplot(aes(
+        x = vgenebroad,
+        y = vgenebroadfreq, color = case_control_other_latest
+    )) +
+    geom_point(aes(color = case_control_other_latest),
+        position = position_jitterdodge(), alpha = 0.1, size = 0.05) +
+    geom_boxplot(
+        aes(group = interaction(vgenebroad, case_control_other_latest)),
+        outlier.alpha = 0, # fill.alpha = 0.2,
+        position = position_dodge(width = 0.75), alpha = 0.3, color = "black"
+    ) +
+    scale_color_d3() +
+    scale_fill_d3() +
+    theme_bw() +
+    labs(
+        x = "V-Gene", y = "V-Gene Frequency (%)",
+        fill = "Disease Status",
+        color = "Disease Status"
+    ) +
+    guides(color = guide_legend(override.aes = list(size = 3))) +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/immunarch/v_gene_usage_broad_{Sys.Date()}.png"),
+    plot = p_v_gene_usage_broad,
+    width = 14,
+    height = 6
+)
+
+vgene_data %>% glimpse()
+unique_vgenes <- unique(v_gene_usage_long_broad$vgenebroad)
+lmm_results <- list()
+# lmm_anova_res <- list()
+
+# Iterate through each vgenebroad
+for (vgene in unique_vgenes) {
+    # Subset data for current vgene
+    vgene_data <- v_gene_usage_long_broad %>%
+        filter(vgenebroad == vgene)
+
+    # Skip if not enough data
+    if (nrow(vgene_data) < 10) {
+        message(glue("Insufficient data for {vgene}"))
+        lmm_results[[vgene]] <- NULL
+        next
+    }
+
+    # Run linear mixed model
+    tryCatch(
+        {
+            lmm_model <- nlme::lme(vgenebroadfreq ~ case_control_other_latest + age_at_baseline + sex + est_tcell_reads_abis + study,
+                random = ~ 1 | participant_id,
+                data = vgene_data,
+                control = lmeControl(opt = "optim")
+            )
+
+            # Store model summary
+            lmm_results[[vgene]] <- lmm_model
+
+            # Print basic results
+            cat("Results for", vgene, ":\n")
+            print(anova(lmm_model))
+            cat("\n")
+        },
+        error = function(e) {
+            cat("Error in model for", vgene, ":", e$message, "\n\n")
+            lmm_results[[vgene]] <- NULL
+        }
+    )
+}
+
+vgene_lmm_res <- lmm_results %>%
+    purrr::set_names(names(.)) %>%
+    purrr::map(~ broom.mixed::tidy(.)) %>%
+    bind_rows(.id = "vgene") %>%
+    glimpse()
+
+vgene_lmm_res %>% 
+    filter(term == "case_control_other_latestCase") %>% 
+    arrange(p.value) 
+
+
+vgene_lmm_res_better <- tibble()
+for (v in names(lmm_results)) {
+    d <- lmm_results[[v]] %>% anova() %>% 
+        rownames_to_column(var = "term") %>% 
+        mutate(vgene = v)
+    vgene_lmm_res_better %<>% bind_rows(d)
+}
+vgene_lmm_res_better %>% glimpse()
+
+vgene_lmm_res_better <- vgene_lmm_res_better %>%
+    dplyr::rename(p.value = `p-value`, f.value = `F-value`) %>% 
+    filter(term == "case_control_other_latest") %>%
+    arrange(p.value) %>% 
+    glimpse()
+
+# vgene_lmm_res_better %>% View()
+
+# Create a plot of LMM results
+vgene_lmm_plot <- vgene_lmm_res_better %>%
+    # filter(term == "case_control_other_latestCase") %>%
+    # Match the order of vgenes from the previous plot
+    mutate(vgene = factor(vgene, levels = vgenebroad_order)) %>%
+    # Add significance flag
+    mutate(is_significant = p.value <= 0.05) %>%
+    ggplot(aes(x = vgene, y = f.value)) +
+    geom_point(aes(color = is_significant)) +
+    # geom_pointrange(aes(
+    #     ymin = estimate - std.error, 
+    #     ymax = estimate + std.error,
+    #     color = is_significant
+    # ), size = 0.2) +
+    scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red")) +
+    theme_bw() +
+    labs(x = NULL, y = "F-Statistic",
+         title = "Linear Mixed Model Results for V Gene Usage") +
+    theme(axis.text.x = element_blank(), legend.position = "top") +
+    guides(color = "none")
+
+# Stack the plots vertically using aplot
+p_v_gene_usage_broad_lmm <- p_v_gene_usage_broad %>%
+    aplot::insert_top(vgene_lmm_plot, 
+                     height = 0.3)
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/immunarch/v_gene_usage_broad_lmm_{Sys.Date()}.png"),
+    plot = p_v_gene_usage_broad_lmm,
+    width = 12,
+    height = 6
+)
+
+# vgene_lmm_res %>%
+#     filter(term == "case_control_other_latestCase") %>% 
+#     DT::datatable()
+
+lmm_results[["TRBV27"]] %>% anova()
+lmm_results[["TRBV27"]] %>% broom.mixed::tidy() %>% print
+# lmm_results[["TRBV27"]] %>% broom.mixed::tidy() %>% 
+#     filter(term == "case_control_other_latestCase") %>% print()
+
+key_meta_df %>% glimpse()
+
+v_gene_usage_long_broad %>% 
+    filter(vgenebroad %in% c("TRBV14", "TRBV29", "TRBV3", "TRBV25")) %>% 
+    left_join(key_meta_df) %>% 
+    ggplot(aes(x = study, y = vgenebroadfreq, color = case_control_other_latest)) +
+    geom_point(position = position_jitterdodge(jitter.width = 0.2), alpha = 0.3, size = 0.2) +
+    geom_boxplot(
+        aes(group = interaction(study, case_control_other_latest)),
+        outlier.alpha = 0, # fill.alpha = 0.2,
+        position = position_dodge(width = 0.75), alpha = 0.3, color = "black"
+    ) +
+    scale_color_d3() +
+    facet_wrap(~ vgenebroad, scales = "free_y") +
+    theme_bw()
+
+
+```
+
+
+Since data is not log-scaled and is in percentages, the interpretation of this result is that only one V-gene has a significant difference in frequency between control and case. However, the effect size is about a 0.11% difference in frequency between control and case - which is unlikely to be biologically meaningful.

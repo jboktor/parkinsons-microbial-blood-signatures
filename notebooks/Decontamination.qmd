@@ -1,0 +1,717 @@
+---
+title: "Decontamination Workflow"
+editor: visual
+author: "Joe Boktor"
+date: '2023-07-18'
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 3
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+---
+
+```{r, eval=FALSE}
+#| warning: false
+#| message: false
+
+pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+wgs_wkdir <- paste0(pdmbs_dir, "/workflow/WGS")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
+library(phyloseq)
+library(microbiome)
+library(ggsci)
+library(aplot)
+# 1.5gb  limit (1500*1024^2 = 1572864000)
+options(future.globals.maxSize= 1572864000)
+
+physeq_decon_dir <- glue(
+  "{wkdir}/data/processed/",
+  "phyloseq_objects/decontaminated"
+)
+dir.create(physeq_decon_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+```{mermaid}
+%%| fig-width: 8
+flowchart TD
+  A(Microbial Profile \nWGX) --> |split by group| B(Microbial Profile \nWGX CASE)
+  A(Microbial Profile \nWGX) --> C(Microbial Profile \nWGX CONTROL)
+  A(Microbial Profile \nWGX) --> D(Microbial Profile \nWGX OTHER)
+  B(Microbial Profile \nWGX CASE) --> |Batch Prevalence filter| E(Taxa Prevalence for: \n--Flowcell Barcodes \n--Sequencing Dates \n--Sequencing centers \n--Cohorts)
+  C --> E
+  D --> E
+  E --> F(Remove Batches with < 25\n Compare max and min \nprevalence across batches)
+  F --> G(taxa with a \nmax prev. > 0.5 and > 2x increase \nfrom min batch prev.)
+
+
+  A(Microbial Profile \nWGX) --> | Read Count \nfilter| I(Taxa with max \nread count < 100)
+  I --> Z[(Taxa\nblacklist)]
+  A --> |Reagent \ncontaminants| J(Taxa flagged in \nSalter et al. 2014)
+  J --> Z
+  G --> Z
+
+```
+
+
+Utility functions
+
+```{r, eval=FALSE}
+
+# Utility functions ----
+calculate_batch_prevalence <- function(ps, subset_var) {
+    require(magrittr)
+    subset_data <- microbiome::meta(ps) %>%
+        dplyr::pull(subset_var)
+    batches <- subset_data %>% unique()
+    prevalence_stats <- tibble::tibble()
+    for (batch in batches) {
+        print(batch)
+        batch_samples <<- grepl(batch, subset_data)
+        # skip if there are less than 25 samples
+        if (sum(batch_samples) < 25) next
+        ps_batch <- phyloseq::subset_samples(ps, batch_samples)
+        print(ps_batch)
+        batch_stats <- microbiome::prevalence(ps_batch) %>%
+            stack() %>%
+            dplyr::mutate(
+                batch_subset = as.character(batch),
+                batch_variable = subset_var,
+                sample_n = phyloseq::nsamples(ps_batch)
+            )
+        prevalence_stats %<>% dplyr::bind_rows(batch_stats)
+    }
+    return(prevalence_stats)
+}
+
+```
+
+
+Formatting sequencing flowcell / date / center metadata for decontamination
+
+```{r, eval=FALSE}
+wgs_sequencing_meta <- readRDS(
+  glue(
+    "{wkdir}/data/interim/metadata/",
+    "2022-12-31_sequencing_metadata.rds"
+  )
+)
+# Platform unit naming convention
+# {FLOWCELL_BARCODE}.{LANE}.{SAMPLE_BARCODE}.
+# ftp://gatk.broadinstitute.org/hc/en-us/articles/360035890671-Read-groups
+wgs_sequencing_meta_formatted <- wgs_sequencing_meta %>%
+  mutate(PLATFORM_UNIT = 
+  if_else(grepl("LB-", SAMPLE), 
+    gsub("_X", ".X", PLATFORM_UNIT) %>% gsub("_E", ".E", .),
+    PLATFORM_UNIT)
+  ) %>% 
+  separate(PLATFORM_UNIT,
+    c("FLOWCELL_BARCODE", "SAMPLE_BARCODE", "PLATFORM_UNIT_LANE"),
+    sep = "\\.", remove = FALSE
+  ) %>%
+    mutate(SAMPLE = str_remove(SAMPLE, "SM:"))
+
+meta_freq <-
+  colnames(wgs_sequencing_meta_formatted) %>%
+  purrr::map(
+    ~ wgs_sequencing_meta_formatted %>%
+      group_by(!!sym(.x)) %>%
+      summarize(n = n())
+  )
+
+center_info <- wgs_sequencing_meta_formatted %>%
+  select(SAMPLE, CENTER) %>%
+  distinct()
+flowcell_info <- wgs_sequencing_meta_formatted %>%
+  get_dupes(FLOWCELL_BARCODE) %>%
+  filter(dupe_count >= 25) %>%
+  select(SAMPLE, FLOWCELL_BARCODE) %>%
+  distinct() %>%
+  mutate(detected = 1) %>%
+  pivot_wider(
+    names_from = FLOWCELL_BARCODE,
+    values_from = detected, values_fill = 0
+  )
+
+dates <- wgs_sequencing_meta_formatted$DATE %>% unique
+
+# Adding sequencing data metadata to phyloseq object
+meta_wide <- wgs_sequencing_meta_formatted %>%
+  get_dupes(DATE) %>%
+  filter(dupe_count >= 25) %>%
+  select(SAMPLE, DATE) %>%
+  distinct() %>%
+  mutate(detected = 1) %>%
+  pivot_wider(names_from = DATE, values_from = detected, values_fill = 0) %>%
+  dplyr::full_join(flowcell_info, by = "SAMPLE") %>%
+  dplyr::full_join(center_info, by = "SAMPLE") %>%
+  dplyr::rename(participant_id = SAMPLE) %>%
+  clean_names() %>%
+  mutate_if(is.numeric, as.logical) %>%
+  mutate_if(is.logical, ~ replace_na(., FALSE))
+date_timepoints <- meta_wide %>%
+  select_if(is.logical) %>%
+  select(contains("dt_")) %>% 
+  colnames()
+flowcell_barcodes <- meta_wide %>%
+  select_if(is.logical) %>%
+  select(contains("pu_")) %>% 
+  colnames()
+
+batch_meta <- c(
+    "study",
+    "center",
+    date_timepoints,
+    flowcell_barcodes
+)
+
+```
+
+### Calculating Batch Prevalence statistics
+
+**Decontaminaton procedure** 
+
+- Iterate over cohort / flow cell / and sequencing date and extract samples which have only been run in a single run (check to see if this means we lose any cohorts or flowcells)
+
+- Then, calculate prevalence for each in-group / out-group sample set
+
+
+
+```{r, eval=FALSE}
+
+# Function take subsets of samples from a phyloseq object and return a
+# dataframe with prevalence stats on a per-feature basis for within and
+# without subset groups
+# filter samples by cohort
+# Sequencing date
+# Sequencing center
+# Flowcell barcode
+
+# Load phyloseq object
+ps <- readRDS(
+  glue(
+    "data/processed/phyloseq_objects/raw/",
+    "2023-10-19_WGS_KrakenUnique_phyloseq.rds"
+  )
+)
+
+# add sequencing metadata to phyloseq object
+meta <- ps %>% meta()
+meta_seq <- meta %>%
+    dplyr::left_join(meta_wide, by = "participant_id") %>%
+    mutate_if(is.logical, ~ replace_na(., FALSE))
+rownames(meta_seq) <- meta_seq$participant_id
+sample_data(ps) <- phyloseq::sample_data(meta_seq)
+
+# Prevalence filter
+ps_groups <- c(
+    "Case" = phyloseq::subset_samples(
+        ps,
+        case_control_other_latest == "Case"
+    ),
+    "Control" = phyloseq::subset_samples(
+        ps,
+        case_control_other_latest == "Control"
+    ),
+    "Other" = phyloseq::subset_samples(
+        ps,
+        case_control_other_latest == "Other"
+    )
+)
+
+# all possible combos of an x var and a y var
+pair_combos <- expand_grid(
+    ps_list = names(ps_groups),
+    var_list = batch_meta
+) %>%
+    mutate(batch_id = glue("{ps_list}_{var_list}"))
+ps_list <- pair_combos$ps_list
+var_list <- pair_combos$var_list
+names(ps_list) <- pair_combos$batch_id
+
+tic()
+future::plan("multisession", workers = 8)
+prevalence_stats <- furrr::future_map2(
+    ps_list,
+    var_list,
+    ~ calculate_batch_prevalence(ps_groups[[.x]], .y)
+) %>%
+    bind_rows(.id = "grouping_meta")
+
+toc()
+
+# Select features with a max of at least 25% prevalence and
+# a minimum of < 2x for other batches
+prevalence_stats_proc <- prevalence_stats %>%
+    filter(batch_subset != "FALSE") %>%
+    mutate(batch_subset = case_when(
+        grepl("dt_|pu_", batch_variable) ~ batch_variable,
+        TRUE ~ batch_subset
+    ), batch_variable = case_when(
+        grepl("dt_", batch_variable) ~ "date",
+        grepl("pu_", batch_variable) ~ "flowcell_barcode",
+        TRUE ~ batch_variable
+    )) %>%
+    mutate(case_control_other_latest = strex::str_before_first(
+        grouping_meta, "_"
+    ))
+
+# flag microbes that are present in at least 50% of samples in at least
+# one batch and are at least 2x more abundant in
+# that batch than in any other
+blacklist_prev <- prevalence_stat_summary %>%
+    filter(max > 0.5, min <= max / 2) %>%
+    arrange(desc(prevalence_delta)) %>%
+    pull(ind) %>%
+    unique()
+
+saveRDS(
+    prevalence_stats_proc,
+    glue(
+        "{wkdir}/data/interim/decontamination/",
+        "{Sys.Date()}_WGS_KrakenUnique_prevalence_stats.rds"
+    )
+)
+saveRDS(
+    blacklist_prev,
+    glue(
+        "{wkdir}/data/interim/decontamination/",
+        "{Sys.Date()}_WGS_KrakenUnique_prevalence_blacklist.rds"
+    )
+)
+
+```
+
+Visualizing prevalence stats
+
+```{r, eval=FALSE}
+
+prevalence_stats_proc <- readRDS(
+    glue(
+        "{wkdir}/data/interim/decontamination/",
+        "2023-10-19_WGS_KrakenUnique_prevalence_stats.rds"
+    )
+)
+blacklist_prev <- readRDS(
+    glue(
+        "{wkdir}/data/interim/decontamination/",
+        "2023-10-19_WGS_KrakenUnique_prevalence_blacklist.rds"
+    )
+)
+
+prevalence_stat_summary <- prevalence_stats_proc %>%
+    # remove batches with fewer than 25 samples
+    filter(sample_n > 25) %>%
+    # check that all batches have at least a min and a max
+    get_dupes(ind, batch_variable, case_control_other_latest) %>%
+    filter(dupe_count > 1) %>%
+    # summarize the min and max prevalence for each microbe
+    group_by(ind, batch_variable, case_control_other_latest) %>%
+    dplyr::summarise(
+        min = min(values), max = max(values),
+        prevalence_delta = max - min
+    ) %>%
+    glimpse()
+
+plot_df <- prevalence_stat_summary %>%
+    ungroup() %>%
+    mutate(ind = as.character(ind)) %>%
+    mutate(blacklist = purrr::map_lgl(ind,  ~ . %in% blacklist_prev)) %>%
+    arrange(blacklist, desc(prevalence_delta)) %>%
+    mutate(ind = factor(ind))
+
+p1 <- plot_df %>%
+    ggplot(aes(x = ind, y = prevalence_delta, color = blacklist)) +
+    geom_point(alpha = 0.7, size = 0.5) +
+    scale_color_d3() +
+    facet_grid(batch_variable ~ case_control_other_latest) +
+    theme_bw() +
+    labs(x = "microbe", y = "max prevalence - min prevalence") +
+        theme(axis.text.x = element_blank())
+
+# How does blacklist detection compare across groups
+p2 <- plot_df %>%
+    ggplot(aes(
+    x = case_control_other_latest,
+    y = prevalence_delta,
+    color = blacklist
+    )) +
+    geom_point(alpha = 0.3) +
+    geom_line(aes(group = ind), alpha = 0.3, linewidth = 0.3) +
+    facet_wrap(~batch_variable, ncol = 1) +
+    scale_color_d3() +
+    labs(x = NULL, y = NULL) +
+    theme_bw() +
+    theme(legend.position='none')
+
+final_plot <- p1 %>% insert_right(p2, width = 0.5)
+ggsave(
+    glue(
+        "{wkdir}/figures/decontamination/",
+        "{Sys.Date()}_WGS_KrakenUnique_prevalence_filter_EDA.png"
+    ),
+    final_plot,
+    width = 12, height = 10
+)
+
+```
+
+![](../figures/decontamination/2023-10-19_WGS_KrakenUnique_prevalence_filter_EDA.png){#fig_batchprevEDA}
+
+### Read Count Filter
+Flagging taxa with a max read count below 100 across all 9,833 samples for removal
+
+```{r, eval=FALSE}
+# Read count filter ----
+blacklist_readcounts <-
+    filter_taxa(ps, function(x) max(x) < 100, TRUE) %>%
+    taxa()
+saveRDS(
+    blacklist_readcounts,
+    glue(
+        "{wkdir}/data/interim/decontamination/",
+        "{Sys.Date()}_WGS_KrakenUnique",
+        "_blacklist_readcounts.rds"
+    )
+)
+
+```
+
+
+### Reagent contaminants [Salter et al. 2014](https://link.springer.com/article/10.1186/s12915-014-0087-z)
+
+This section aggregates genera-level taxa identifed from Salter et. al, and annotates them with NCBI lineage information. We then expand this genera-level list across the Family to Strain clades. Taxa here are flagged for removal.
+
+```{r, eval=FALSE}
+# Reagent contaminant list from here: 
+# https://link.springer.com/article/10.1186/s12915-014-0087-z/tables/1
+
+contaminant_genera_blacklist <- list(
+  Afipia = "1033",
+  Aquabacterium = "92793",
+  Asticcacaulis = "76890",
+  Aurantimonas = "182269",
+  Beijerinckia = "532",
+  Bosea = "85413",
+  Bradyrhizobium = "374",
+  Brevundimonas = "41275",
+  Caulobacter = "75",
+  Craurococcus = "77583",
+  Devosia = "46913",
+  Hoeflea = "274591",
+  Mesorhizobium =  "68287",
+  Methylobacterium = "407",
+  Novosphingobium = "165696",
+  Ochrobactrum = "528",
+  Paracoccus = "265",
+  Pedomicrobium = "47494",
+  Phyllobacterium = "28100",
+  Rhizobium = "379",
+  Roseomonas = "125216",
+  Sphingobium = "165695",
+  Sphingomonas = "13687",
+  Sphingopyxis = "165697",
+  Acidovorax = "12916",
+  Azoarcus = "12960",
+  Azospira = "146937",
+  Burkholderia = "32008",
+  Comamonas = "283",
+  Cupriavidus = "106589",
+  Curvibacter = "281915",
+  Delftia = "80865",
+  Duganella = "75654",
+  Herbaspirillum = "963",
+  Janthinobacterium = "29580",
+  Kingella = "32257",
+  Leptothrix = "88",
+  Limnobacter = "131079",
+  Massilia = "149698",
+  Methylophilus = "16",
+  Methyloversatilis = "378210",
+  Oxalobacter = "846",
+  Roseateles = "93681", # renamed from Pelomonas
+  Polaromonas = "52972",
+  Ralstonia = "48736",
+  Caldimonas = "196013", # renamed from Schlegelella
+  Sulfuritalea = "1054211",
+  Undibacterium = "401469",
+  Variovorax = "34072",
+  Acinetobacter = "469",
+  Enhydrobacter = "212791",
+  Enterobacter = "547",
+  Escherichia = "561",
+  Nevskia = "64001",
+  Pseudomonas = "286",
+  Pseudoxanthomonas = "83618",
+  Psychrobacter = "497",
+  Stenotrophomonas = "40323",
+  Xanthomonas = "338",
+  Aeromicrobium = "2040",
+  Arthrobacter = "1663",
+  Beutenbergia = "84756",
+  Brevibacterium = "1696",
+  Corynebacterium = "1716",
+  Curtobacterium = "2034",
+  Dietzia = "37914",
+  Geodermatophilus = "1860",
+  Janibacter = "53457",
+  Kocuria = "57493",
+  Microbacterium = "33882",
+  Micrococcus = "1269",
+  Microlunatus = "29404",
+  Patulibacter = "361607",
+  Propionibacterium = "1743",
+  Rhodococcus = "1827",
+  Tsukamurella = "2060",
+  Abiotrophia = "46123",
+  Bacillus = "1386",
+  Brevibacillus = "55080",
+  Brochothrix = "2755",
+  Facklamia = "66831",
+  Paenibacillus = "44249",
+  Streptococcus = "1301",
+  Chryseobacterium = "59732",
+  Dyadobacter = "120831",
+  Flavobacterium = "237",
+  Hydrotalea = "1004300",
+  Niastella = "354354",
+  Olivibacter = "376469",
+  Pedobacter = "84567",
+  Wautersiella = "343873",
+  Deinococcus = "1298",
+  unclassified_Acidobacteriota = "305072"
+  )
+
+# Annotating taxa with NCBI lineage information
+ncbi_lineages <- read.delim(
+  glue(
+    "/central/groups/MazmanianLab/joeB/Downloads/",
+    "2023-08-02_ncbi-taxdump/fullnamelineage.dmp"
+  ),
+  quote = "",
+  header = FALSE
+) %>%
+  select(-c(V2, V4, V6)) %>%
+      dplyr::rename(taxid = V1, name = V3, lineage = V5) %>%
+      mutate(lineage = case_when(
+          grepl("Viruses", lineage) ~ paste0("Viruses; ", lineage),
+          TRUE ~ lineage
+      )) %>%
+  glimpse
+
+# mapping taxids to NCBI lineages to get an extensive list of contaminant taxa 
+# ranging from the Family -> Strain level
+
+contaminant_genera_lineages <- ncbi_lineages %>%
+  filter(taxid %in% contaminant_genera_blacklist) %>%
+  pull(lineage)
+
+# filter lineages of contaminant genera using taxids and names
+contaminant_lineages <- ncbi_lineages %>%
+  mutate(contaminant_lineage = purrr::map_lgl(
+    lineage,
+    ~ . %in% contaminant_genera_lineages
+  )) %>%
+  mutate(genera_found = map_lgl(.x = lineage, 
+    ~any(str_detect(.x, paste(names(contaminant_genera_blacklist), collapse = "|") )))) %>%
+  filter(
+    contaminant_lineage | 
+    genera_found) %>%
+  glimpse
+
+
+# making sure all contaminant genera taxid's are in NCBI table
+all(unlist(contaminant_genera_blacklist) %in% contaminant_lineages$taxid)
+
+saveRDS(
+  contaminant_lineages,
+  glue(
+    "{wkdir}/data/interim/decontamination/",
+    "{Sys.Date()}_reagent_blacklist_contaminant_lineages.rds"
+  )
+)
+
+```
+
+Assembling blacklists.
+
+```{r, eval=FALSE}
+blacklist_readcounts <- readRDS(
+  glue(
+    "{wkdir}/data/interim/decontamination/",
+    "2023-10-19_WGS_KrakenUnique_blacklist_readcounts.rds"
+  )
+)
+blacklist_prev <- readRDS(
+    glue(
+        "{wkdir}/data/interim/decontamination/",
+        "2023-10-19_WGS_KrakenUnique_prevalence_blacklist.rds"
+    )
+) %>% as.character()
+
+contaminant_lineages <- readRDS(
+  glue(
+    "{wkdir}/data/interim/decontamination/",
+    "2024-02-25_reagent_blacklist_contaminant_lineages.rds"
+  )
+)
+final_blacklist <- c(
+  blacklist_prev,
+  blacklist_readcounts,
+  contaminant_lineages$taxid
+) %>%
+  unique()
+
+# Annotating taxa with NCBI lineage information
+ncbi_lineages <- read.delim(
+  glue(
+    "/central/groups/MazmanianLab/joeB/Downloads/",
+    "2023-08-02_ncbi-taxdump/fullnamelineage.dmp"
+  ),
+  quote = "",
+  header = FALSE
+) %>%
+  select(-c(V2, V4, V6)) %>%
+    dplyr::rename(taxid = V1, name = V3, lineage = V5) %>%
+    mutate(lineage = case_when(
+      grepl("Viruses", lineage) ~ paste0("Viruses; ", lineage),
+      TRUE ~ lineage
+    ))
+
+kraken_uniq_results_df <- readRDS(
+  glue(
+    "{wkdir}/data/interim/kraken_results/",
+    "2023-10-15_WGS_KrakenUniq_results.rds"
+  )
+)
+kuq <- kraken_uniq_results_df %>%
+    dplyr::rename(taxid = taxID) %>%
+    left_join(ncbi_lineages, by = "taxid")
+
+kuq_decon <- kuq %>%
+  # fitler human, vector, and unmapped reads
+  filter(
+    !is.na(lineage) & lineage != ""
+  ) %>% 
+  filter(
+    !grepl("cellular organisms; Eukaryota;", lineage) &
+        name != "Eukaryota" & taxName != "other sequences"
+  ) %>%
+    # filter blacklisted taxa
+  filter(taxid %nin% final_blacklist)
+
+# Saving annotated Kraken Tables
+saveRDS(
+    kuq, glue(
+        "{wkdir}/data/interim/kraken_results/",
+        "{Sys.Date()}_WGS_KrakenUniq_results_with_lineage.rds"
+    )
+)
+saveRDS(
+    kuq_decon, glue(
+        "{wkdir}/data/interim/kraken_results/",
+        "{Sys.Date()}_WGS_KrakenUniq_results_with_lineage_decon.rds"
+    )
+)
+
+```
+
+Visualizing a venn diagram of taxa flagged for removal across methods
+
+```{r, eval=FALSE}
+library(VennDiagram)
+# Load phyloseq object
+ps <- readRDS(
+  glue(
+    "data/processed/phyloseq_objects/raw/",
+    "2023-10-19_WGS_KrakenUnique_phyloseq.rds"
+  )
+)
+# Create a named list for the Venn diagram
+venn_input <- list(
+  Set1 = blacklist_readcounts,
+  Set2 = blacklist_prev, 
+  Set3 = taxa_names(ps)[(contaminant_lineages$taxid %in% taxa_names(ps))] %>% 
+    unique() %>% 
+    discard(is.na)
+)
+
+# Generate the Venn diagram
+venn.plot <- venn.diagram(
+  x = venn_input,
+  category.names = c(
+    "Abundance filter",
+    "Prevalence filter",
+    "Reagent contaminants"
+  ),
+  output = TRUE,
+  filename = glue(
+    "{wkdir}/figures/decontamination/",
+    "{Sys.Date()}_blacklist_venn.png"
+  ),
+  imagetype = "png",
+  height = 480*3, width = 480*3, resolution = 300,
+  compression = "lzw",
+  lwd = 1, col = "black",
+  fill = c("#e41a1c", "#377eb8", "#4daf4a"),
+  alpha = 0,
+  label.col = "black",
+  cex = 1.5, fontfamily = "sans", fontface = "plain",
+  cat.cex = 1.5, cat.col = "black",
+  cat.fontfamily = "sans",
+  cat.default.pos = "outer",
+  cat.pos = c(-27, 27, 135),
+  rotation.degree = 0,
+  margin = 0.06
+)
+# Show the plot
+grid.draw(venn.plot)
+
+```
+
+![](../figures/decontamination/2024-02-25_blacklist_venn.png){#fig_blacklist_venn width=50%}
+
+
+Removing flagged taxa from phyloseq object
+
+```{r, eval=FALSE}
+# Saving a decontaminated phyloseq object
+kuq_decon <- readRDS(
+  glue(
+    "{wkdir}/data/interim/kraken_results/",
+    "2024-02-25_WGS_KrakenUniq_results_with_lineage_decon.rds"
+  )
+)
+# Load phyloseq object
+ps <- readRDS(
+  glue(
+    "data/processed/phyloseq_objects/raw/",
+    "2023-10-19_WGS_KrakenUnique_phyloseq.rds"
+  )
+)
+
+
+
+ps_trim <- ps %>% 
+    prune_taxa(taxa = as.character(unique(kuq_decon$taxid)))
+
+saveRDS(
+    ps_trim,
+    glue(
+        "{physeq_decon_dir}/",
+        "{Sys.Date()}_WGS_KrakenUnique_phyloseq.rds"
+    )
+)
+
+```
+
+```{r}
+sessionInfo()
+```

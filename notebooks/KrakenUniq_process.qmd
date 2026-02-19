@@ -1,0 +1,188 @@
+---
+title: "Executing KrakenUniq on Quality Filtered Reads"
+eval: false
+editor: source
+author: "Joe Boktor"
+date: '2022-12-23'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    column: page
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+
+```{r}
+library(glue)
+library(purrr)
+library(tibble)
+library(magrittr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(stringr)
+library(ggsci)
+library(aplot)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+load_dot_env(glue("{wkdir}/.env"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+
+```
+
+
+Download the MicrobialDB KrakenUniq Indexes from: https://benlangmead.github.io/aws-indexes/k2 This db contains archaea, bacteria, viral, human, UniVec_Core, Eukaryotic pathogen genomes with contaminants removed. Last updated (8/16/2020)
+
+```{r, eval = FALSE}
+log_dir <- glue("{wkdir}/.cluster_runs/{get_time()}_KrakenUniq_MicrobialDB_Download")
+outdir <- "/central/groups/MazmanianLab/joeB/Downloads/RefDBs/KrakenUniq/MicrobialDB"
+dir.create(log_dir, recursive = T, showWarnings = F)
+dir.create(outdir, recursive = T, showWarnings = F)
+
+wget_download_slurm(
+  jobname = "KrakenUniq_MicrobialDB_kdb",
+  download_link = "https://genome-idx.s3.amazonaws.com/kraken/uniq/MicrobialDB_202008/database.kdb",
+  slurm_out = log_dir,
+  output_dir = outdir,
+  walltime = "72:00:00"
+  )
+
+wget_download_slurm(
+  jobname = "KrakenUniq_MicrobialDB_tar",
+  download_link = "https://genome-idx.s3.amazonaws.com/kraken/uniq/MicrobialDB_202008/kuniq_microbialdb.kdb.20200816.tgz",
+  slurm_out = log_dir,
+  output_dir = outdir,
+  walltime = "72:00:00"
+  )
+
+```
+
+
+# WGS KrakenUniq Alignment
+
+Generating a batchtools parameter dataframe.
+
+```{r}
+bowtie2_cleaned_reads <-
+  data.frame(
+    paths =
+      list.files("/central/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads",
+        full.names = TRUE
+      )
+  )
+
+batchtools_params_krakenUniq <- bowtie2_cleaned_reads %>%
+  mutate(fr = case_when(
+    grepl("_R1.fastq.gz", paths) ~ "inpath_f",
+    grepl("_R2.fastq.gz", paths) ~ "inpath_r",
+    TRUE ~ "ERROR"
+  ),
+  id = basename(paths)  %>% str_remove("_R[1-2].fastq.gz")
+  ) %>%
+  pivot_wider(names_from = fr, values_from = paths) %>%
+    mutate(
+      outputdir = "/central/scratch/jbok/PDMBS/WGS/KrakenUniq_results",
+      threads = 4,
+      wkdir = wkdir
+    )
+batchtools_params_krakenUniq %>% glimpse
+
+```
+
+Executing workflow
+```{r}
+
+# configure registry ----
+cluster_run <- glue("{get_time()}_KrakenUniq_{seq_method}")
+message("\n\nRUNNING:  ", cluster_run, "\n")
+breg <- makeRegistry(
+  file.dir = glue(
+    "{wkdir}/.cluster_runs/",
+    cluster_run
+  ),
+  seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+  template = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+  scheduler.latency = 0.1,
+  fs.latency = 1
+)
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = shell_do_krakenunique,
+  args = batchtools_params_krakenUniq,
+  reg = breg
+)
+jobs[, chunk := chunk(job.id, chunk.size = 100)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = 86400,
+    memory = 112500, # 450GB total
+    ncpus = 4,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+
+Move results into group dir
+```{r}
+list.files("/central/scratch/jbok/PDMBS/WGS/KrakenUniq_results",
+  full.names = TRUE, pattern = "_report.tsv"
+  ) %>%
+  file.copy(
+    from = .,
+    to = glue("{wkdir}/data/interim/kraken_results/2023-10-18_KrakenUnique_reports/")
+    )
+
+```
+
+Aggregate Results
+```{r}
+kraken_uniq_result_paths <-
+  list.files(glue("{wkdir}/data/interim/kraken_results/2023-10-18_KrakenUnique_reports/"),
+    full.names = TRUE, pattern = "_report.tsv"
+  )
+
+future::plan("multisession", workers = 8)
+kraken_uniq_results_df <- kraken_uniq_result_paths %>%
+  purrr::set_names(
+    str_remove(basename(.), "_KrakenUniq_report.tsv")
+    ) %>%
+  furrr::future_map(~ read_tsv(., skip = 2, show_col_types = FALSE)) %>%
+    bind_rows(.id = "sample_id") %>%
+    dplyr::rename("percent_reads" = `%`)
+
+kraken_uniq_results_df %>% glimpse
+saveRDS(
+  kraken_uniq_results_df,
+  glue(
+    "{wkdir}/data/interim/kraken_results/",
+    "{Sys.Date()}_WGS_KrakenUniq_results.rds"
+  )
+)
+
+```
+
+# RNA KrakenUniq Alignment ...
+
+
+
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,103 @@
+---
+title: "Distribution Testing"
+eval: false
+editor: source
+author: "Joe Boktor"
+date: '2023-10-23'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    column: page
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+
+```{r}
+#| warning: false
+#| message: false
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+
+library(phyloseq)
+library(microbiome)
+library(ggsci)
+library(aplot)
+library(usedist)
+```
+
+Load phyloseq object
+
+```{r}
+# loading metadata (this is a list with both RNASEQ and WGS metadata)
+# phymeta <- readRDS("data/interim/metadata/2023-07-14_phyloseq-metadata.rds")
+
+ps <- readRDS(
+    glue("{wkdir}/data/processed/phyloseq_objects",
+        "/decontaminated/2023-11-01_WGS_KrakenUnique_phyloseq.rds"
+    )
+)
+
+ps_analysis <- ps %>% 
+    microbiome::transform("compositional")
+ps_analysis
+
+ps_analysis %>% microbiome::abundances() %>% head()
+
+```
+
+
+### Kullback-Leibler divergence metric (relative entropy) 
+Here we calculate the KL divergence between pairs of samples. This is a measure of the difference between two probability distributions. In this case, we are comparing the distribution of taxa in PD vs Control samples.
+
+$$
+
+D_{KL} (p(x) ||q(x)) = \sum_{x=1}^{n} p_i \ln \frac{p_i}{q_i}
+
+$$
+
+
+Using `usedist()`, obtain a set of distance pairs of interest
+
+```{r}
+
+kl_metric <- function(p, q) {
+     purrr::map2(
+        .x = p, .y = q,
+        ~ (.x * log(.x/.y))
+    )
+}
+
+```
+
+
+```{r}
+
+kl_metric(
+    c(0.5, 0.5, 0.2, 0.1),
+    c(0.4, 0.5, 0.211, 0.01)
+) %>% unlist() %>%sum()
+
+
+
+```
+
+For each pair of samples, calculate the KL divergence for all taxa
+
+
+
+```{r}
+
+```
+
+

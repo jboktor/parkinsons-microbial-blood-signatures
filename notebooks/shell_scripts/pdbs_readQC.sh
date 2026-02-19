@@ -8,7 +8,7 @@
 #SBATCH --mem-per-cpu=20G   # memory per CPU core
 #SBATCH -J "ReadQC"   # job name
 # Notify at the beginning, end of job and on failure.
-#SBATCH --mail-user=<jboktor>@caltech.edu   # email address
+#SBATCH --mail-user=jboktor@caltech.edu   # email address
 #SBATCH --mail-type=FAIL
 #SBATCH --output=/central/scratch/jbok/slurmdump/ReadQC_%j.out
 

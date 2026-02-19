@@ -1,0 +1,820 @@
+---
+title: "Parkinson's Disease Blood Virome: QC & Decontamination"
+editor: visual
+author: "Joe Boktor"
+date: '2024-07-01'
+bibliography: references.bib
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: false
+    code-tools: true
+    fig-align: center
+    grid:
+      sidebar-width: 300px
+      body-width: 900px
+      margin-width: 300px
+      gutter-width: 1.5rem
+---
+
+# Background / Introduction
+
+This notebook performs quality control and decontamination of viral sequencing data through several key steps:
+
+1. Parsing technical metadata from FASTQ files, including:
+   - Sequencing machine IDs
+   - Flow cell IDs 
+   - Run IDs
+
+2. Removing potential contaminants by:
+   - Applying batch-aware prevalence filters
+   - Screening against a curated blacklist of common viral contaminants
+   - Filtering low-abundance viral sequences
+
+The goal is to generate a high-confidence set of viral counts for downstream analysis.
+
+
+
+# Analysis Setup
+
+```{r}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(glue)
+library(ShortRead)
+# microbiome analysis
+library(phyloseq)
+library(microbiome)
+library(vegan)
+library(Seurat)
+library(Matrix)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggside)
+library(ggrepel)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+palmdb_data <- glue("{ref_dir}/PalmDB")
+palm_interim <- glue("{wkdir}/data/interim/PalmDB_mapping")
+dir.create(palm_interim, showWarnings = FALSE)
+palmddb_res <- glue("{pdmbs_dir}/workflow/RNASEQ/palmdb_bwa_dlist")
+
+# Create directory for RDS files if it doesn't exist
+header_summary_dir <- glue(
+    "{pdmbs_dir}/workflow/RNASEQ/clean_reads_fq_header_summary"
+)
+dir.create(header_summary_dir, recursive = TRUE, showWarnings = FALSE)
+
+# options(future.globals.maxSize= 6291456000)
+# future::plan("multisession", workers = 8)
+```
+
+# Decontaminating Viral reads
+
+## Parsing metadata from FASTQ files
+
+```{r}
+parse_header_info <- function(fastq_path, output_path){
+    require(magrittr)
+    require(dplyr)
+
+    extract_headers <- function(fastq_path) {
+        fastq_data <- ShortRead::readFastq(fastq_path)
+        as.character(ShortRead::id(fastq_data))
+    }
+
+    summarize_header_info <- function(header_list){
+        # Convert the character vector to a data frame first
+        header_df <- stringr::str_split(header_list, ":") %>%
+            purrr::map_dfr(~ data.frame(
+                Instrument = .x[1],
+                RunID = .x[2], 
+                FlowCellID = .x[3]
+            ))
+
+        # Now we can use group_by since we have a data frame
+        header_df %>%
+            group_by(Instrument, RunID, FlowCellID) %>%
+            janitor::get_dupes() %>%
+            dplyr::distinct()
+    }
+
+    df <- extract_headers(fastq_path) %>% summarize_header_info()
+    saveRDS(df, output_path)
+}
+
+batchtools_params <- list.files(
+    glue("{pdmbs_dir}/workflow/RNASEQ/clean_reads"),
+    pattern = "fastq.gz",
+    full.names = TRUE
+    ) %>% 
+    data.frame("fastq_path" = .) %>%
+    mutate(sample_id = basename(fastq_path) %>% strex::str_before_last("_")) %>%
+    mutate(annot = case_when(
+        grepl("_R1.fastq.gz", fastq_path) ~ "fwd",
+        grepl("_R2.fastq.gz", fastq_path) ~ "rev",
+        TRUE ~ "ERROR"
+    )) %>%
+    filter(file.size(fastq_path) > 100) %>% 
+    mutate(output_path = file.path(
+        header_summary_dir,
+        paste0(
+            tools::file_path_sans_ext(basename(fastq_path), compression = TRUE),
+            ".rds"
+        )
+    )) %>% 
+    filter(!file.exists(output_path)) %>%
+    select(fastq_path, output_path) %>%
+    glimpse()
+
+# configure registry ----
+cluster_run <- glue("{get_time()}_ParseHeaders")
+message("\n\nRUNNING: ", cluster_run, "\n")
+breg <- makeRegistry(
+    file.dir = glue(
+        "{wkdir}/.cluster_runs/",
+        cluster_run
+    ),
+    seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+    template = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+    scheduler.latency = 0.1,
+    fs.latency = 1
+)
+
+# Calculate chunks to get ~100 jobs
+n_files <- length(batchtools_params$fastq_path)
+chunk_size <- ceiling(n_files / 2000)
+
+# Submit Jobs ----
+jobs <- batchMap(
+    fun = parse_header_info,
+    args = batchtools_params,
+    reg = breg
+)
+jobs[, chunk := chunk(job.id, chunk.size = chunk_size)]
+
+
+submitJobs(jobs,
+    resources = list(
+        walltime = round(500 * chunk_size * 1.1), # 60 min per file
+        memory = "200GB", # 50GB per job
+        ncpus = 6,
+        max.concurrent.jobs = 9999
+    )
+)
+
+```
+
+
+Loading in the PalmDB phyloseq object
+
+```{r}
+# Increase maximum size for future globals to handle large phyloseq object
+future::plan("multisession", workers = 24)
+options(future.globals.maxSize = 4000 * 1024^2) # Set to 4GB
+
+ps <- readRDS(
+  glue(
+    "{palm_interim}/",
+    "phyloseq_count_matrix_BWA-dlist-GRCh38-dna-rna_2024-08-08.rds"
+  )
+)
+ps
+
+```
+
+Loading in the FASTQ header metadata
+
+```{r}
+fq_header_summary_dirs <- list.files(header_summary_dir, full.names = TRUE)
+
+fq_header_metadata <- fq_header_summary_dirs %>%
+    purrr::set_names(basename(.) %>% tools::file_path_sans_ext()) %>%
+    furrr::future_map(readRDS) %>%
+    bind_rows(.id = "sample_id_direction") %>%
+    glimpse()
+
+
+fq_header_metadata_wide <- fq_header_metadata %>%
+    dplyr::rename(clean_read_counts = dupe_count) %>% 
+    mutate(sample_id = strex::str_before_last(sample_id_direction, "_")) %>%
+    mutate(unique_id = 
+        glue("{sample_id}_{Instrument}:{RunID}:{FlowCellID}")) %>%
+    mutate(read_direction = strex::str_after_last(sample_id_direction, "_")) %>%
+    select(-sample_id_direction) %>%
+    pivot_wider(
+        names_from = "read_direction",
+        values_from = c("Instrument", "RunID", 
+        "FlowCellID", "clean_read_counts"
+        )
+    ) %>%
+    glimpse()
+
+
+saveRDS(
+    fq_header_metadata_wide,
+    glue("{wkdir}/data/interim/RNASEQ_fq-header-metadata_{Sys.Date()}.rds")
+)
+
+```
+
+
+Format fastq metadata for joining with phyloseq
+
+```{r}
+fq_header_metadata_wide <- readRDS(
+    glue("{wkdir}/data/interim/RNASEQ_fq-header-metadata_2024-11-02.rds")) %>% 
+    glimpse()
+
+#' # Check that the instrument, run, and flowcell IDs match between R1 and R2 (some read )
+#' Some read counts are different between R1 and R2
+# fq_header_metadata_wide %>% 
+#     mutate(checks_out = Instrument_R1 == Instrument_R2) %>% 
+#     filter(!checks_out) %>% 
+#     View
+
+fq_metadata <- fq_header_metadata_wide %>%
+    dplyr::rename(
+        instrument_id = Instrument_R1,
+        run_id = RunID_R1,
+        flowcell_id = FlowCellID_R1) %>%
+    mutate(clean_read_counts = clean_read_counts_R1 + clean_read_counts_R2) %>%
+    select(sample_id, instrument_id, run_id, flowcell_id, 
+        clean_read_counts_R1, clean_read_counts_R2, clean_read_counts) %>%
+    glimpse()
+
+fq_metadata$sample_id %>% length
+fq_metadata$sample_id %>% unique %>% length
+samples_with_dupes_df <- fq_metadata %>% 
+    janitor::get_dupes(sample_id)
+
+# There are 443 samples that were sequenced on more than one platform
+samples_with_dupes_df$sample_id %>% unique
+
+#' For the sake of this batch effect analysis, 
+#' we will have to ignore these samples for now
+unique(samples_with_dupes_df$sample_id)
+
+# 3567 samples remain
+unique(fq_metadata$sample_id) %nin% unique(samples_with_dupes_df$sample_id) %>% sum()
+
+
+fq_metadata_tidy <- fq_metadata %>%
+    group_by(sample_id) %>%
+    summarise(
+        instrument_id = paste(unique(instrument_id), collapse = ";"),
+        run_id = paste(unique(run_id), collapse = ";"),
+        flowcell_id = paste(unique(flowcell_id), collapse = ";"),
+        clean_read_counts_R1 = paste(clean_read_counts_R1, collapse = ";"),
+        clean_read_counts_R2 = paste(clean_read_counts_R2, collapse = ";"),
+        clean_read_counts = paste(clean_read_counts, collapse = ";")
+    ) %>%
+    glimpse()
+
+# Join phyloseq metadata with fastq header metadata
+sample_data(ps) <- meta(ps) %>% 
+    as.data.frame() %>% 
+    left_join(fq_metadata_tidy, by = c("sample_id")) %>% 
+    mutate(rowname = sample_id) %>%
+    column_to_rownames("rowname") %>%
+    sample_data()
+
+# create numeric column for total clean reads per sample
+sample_data(ps)$clean_read_counts_numeric <- 
+    meta(ps)$clean_read_counts %>%
+    str_split(";") %>%
+    map_dbl(~sum(as.numeric(.x)))
+
+meta(ps) %>% glimpse
+```
+
+
+# Decontamination Pipeline
+
+```{r}
+# Abundance threshold ----
+og_taxa <- microbiome::taxa(ps)
+
+# Most abundant sample needs to have at least 10 reads
+relab <- microbiome::abundances(ps)
+taxa_count_maxs <- apply(relab, 1, max)
+count_threshold <- (taxa_count_maxs >= 10)
+ps_trim_abund <- ps %>% subset_taxa(count_threshold)
+taxa_trimmed_abund <- og_taxa[!og_taxa %in% microbiome::taxa(ps_trim_abund)]
+
+# Prevalence threshold ----
+ps_trim_prev <- ps %>% 
+    microbiome::core(detection = 0, prevalence = 0.01)
+taxa_trimmed_prev <- og_taxa[
+    !og_taxa %in% microbiome::taxa(ps_trim_prev)
+    ]
+
+# Lab reagent contaminants ----
+# Read in the laboratory reagent contaminants
+lab_reagent_contaminants <- read_csv(
+    glue("{wkdir}/data/input/virome/",
+        "total_raw_count_per_virus_id_in_laboratory_reagents.csv")
+    ) %>%
+    glimpse()
+
+contaminant_ids <- lab_reagent_contaminants %>%
+    filter(count > 5) %>%
+    pull(virus) %>%
+    unique()
+
+```
+
+## Batch effect analysis for sequencing instrument/flowcell
+
+```{r}
+calculate_batch_prevalence <- function(ps_obj, subset_var) {
+  require(magrittr)
+  subset_data <- microbiome::meta(ps_obj)[[subset_var]]
+  batches <- subset_data %>% unique()
+  prevalence_stats <- tibble::tibble()
+  for (batch in batches) {
+    print(batch)
+    batch_samples <<- grepl(batch, subset_data)
+    # skip if there are less than 25 samples in a batch
+    if (sum(batch_samples) < 25) next
+    ps_batch <- phyloseq::subset_samples(ps_obj, batch_samples)
+    print(ps_batch)
+    batch_stats <- microbiome::prevalence(ps_batch) %>%
+      stack() %>%
+      dplyr::mutate(
+        batch_subset = as.character(batch),
+        batch_variable = subset_var,
+        sample_n = phyloseq::nsamples(ps_batch)
+      )
+    prevalence_stats %<>% dplyr::bind_rows(batch_stats)
+  }
+  return(prevalence_stats)
+}
+
+ps_groups <- c(
+    "Case" = phyloseq::subset_samples(ps, case_control_other_latest == "Case"),
+    "Control" = phyloseq::subset_samples(ps, case_control_other_latest == "Control"),
+    "Other" = phyloseq::subset_samples(ps, case_control_other_latest == "Other")
+)
+
+# Define batch variables to analyze
+batch_meta <- c("instrument_id", "flowcell_id")
+# Create combinations for analysis
+pair_combos <- expand_grid(
+    ps_list = names(ps_groups),
+    var_list = batch_meta
+) %>%
+    mutate(batch_id = glue("{ps_list}_{var_list}"))
+
+# Run prevalence analysis
+tic("Calculating batch prevalence")
+prevalence_stats <- purrr::pmap_dfr(
+    list(
+        ps = pair_combos$ps_list,
+        var = pair_combos$var_list,
+        id = pair_combos$batch_id
+    ),
+    function(ps, var, id) {
+        result <- calculate_batch_prevalence(ps_groups[[ps]], var)
+        if(!is.null(result)) {
+            result$grouping_meta <- id
+            return(result)
+        }
+    }
+)
+toc()
+
+# Process prevalence statistics
+prevalence_stats_proc <- prevalence_stats %>%
+    filter(batch_subset != "FALSE") %>%
+    filter(!grepl(";", batch_subset)) %>%
+    filter(!is.na(batch_subset)) %>%
+    mutate(case_control_other_latest = 
+        strex::str_before_first(grouping_meta, "_")
+    )
+
+# Summarize prevalence statistics
+prevalence_stat_summary <- prevalence_stats_proc %>%
+    filter(sample_n >= 50) %>%
+    get_dupes(ind, batch_variable, case_control_other_latest) %>%
+    filter(dupe_count > 1) %>%
+    group_by(ind, batch_variable, case_control_other_latest) %>%
+    dplyr::summarise(
+        min = min(values),
+        max = max(values),
+        prevalence_delta = max - min,
+        .groups = "drop"
+    )
+
+# Identify potential contaminants
+blacklist_prev <- prevalence_stat_summary %>%
+    filter(max > 0.5, min <= max / 2) %>%
+    arrange(desc(prevalence_delta)) %>%
+    pull(ind) %>%
+    unique() %>% 
+    as.character()
+
+# Create visualization
+plot_df <- prevalence_stat_summary %>%
+    mutate(blacklist = ind %in% blacklist_prev) %>%
+    arrange(blacklist, desc(prevalence_delta)) %>%
+    mutate(ind = factor(ind))
+
+# Generate plots
+p1 <- plot_df %>%
+    ggplot(aes(x = ind, y = prevalence_delta, color = blacklist)) +
+    geom_point(alpha = 0.7) +
+    scale_color_d3() +
+    facet_grid(batch_variable ~ case_control_other_latest) +
+    theme_bw() +
+    labs(x = "microbe", y = "max prevalence - min prevalence") +
+    theme(axis.text.x = element_blank())
+
+p2 <- plot_df %>%
+    ggplot(aes(
+        x = case_control_other_latest,
+        y = prevalence_delta,
+        color = blacklist
+    )) +
+    geom_point(alpha = 0.3) +
+    geom_line(aes(group = ind), alpha = 0.3) +
+    facet_wrap(~batch_variable, ncol = 1) +
+    scale_color_d3() +
+    labs(x = NULL, y = NULL) +
+    theme_bw() +
+    theme(legend.position = 'none')
+
+# Combine and save plots
+final_plot <- p1 + p2 + plot_layout(widths = c(2, 1))
+
+ggsave(
+    glue("{wkdir}/figures/Viral/",
+    "decontamination-{Sys.Date()}_sequencing-batch_prevalence_filter.png"),
+    final_plot,
+    width = 16,
+    height = 4
+)
+
+# Save results
+saveRDS(
+    prevalence_stats_proc,
+    glue("{wkdir}/data/interim/PalmDB_mapping/decontamination/",
+        "{Sys.Date()}_sequencing-batch_prevalence_stats.rds")
+)
+
+saveRDS(
+    blacklist_prev,
+    glue("{wkdir}/data/interim/PalmDB_mapping/decontamination/",
+        "{Sys.Date()}_sequencing-batch_prevalence_blacklist.rds")
+)
+
+```
+
+## Visualize decontamination results
+
+```{r}
+# Create lists for Venn diagram
+venn_lists <- list(
+    "Reagent \nContaminants" = contaminant_ids,
+    "Low \nAbundance" = taxa_trimmed_abund,
+    "Low \nPrevalence" = taxa_trimmed_prev,
+    "Facility/Flowcell \nArtifact" = blacklist_prev
+)
+
+# Create Venn diagram
+venn_plot <- ggvenn::ggvenn(
+    venn_lists,
+    show_percentage = FALSE,
+    fill_color = c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF"),
+    stroke_size = 0.5,
+    set_name_size = 4
+)
+
+ggsave(
+    filename = glue("{wkdir}/figures/Viral/",
+        "Venn-exclusion-lists_{Sys.Date()}.png"),
+    venn_plot,
+    width = 10, height = 10
+)
+
+# Combine all exclusion lists
+blacklist <- c(
+    contaminant_ids,
+    taxa_trimmed_abund,
+    taxa_trimmed_prev,
+    blacklist_prev) %>%
+    unique()
+
+ps_trim <- ps %>% subset_taxa(!og_taxa %in% blacklist)
+ps_trim
+
+saveRDS(ps_trim,
+    glue("{palm_interim}/",
+        "phyloseq_count_matrix_BWA-dlist-GRCh38-dna-rna",
+        "_decontaminated_{Sys.Date()}.rds"
+    )
+)
+
+```
+
+
+![](figures/Viral/Venn-exclusion-lists_2024-11-03.png)
+
+## Visualize Batch Prevalence Filter
+
+```{r}
+prev_plot_df <- prevalence_stats %>% 
+    filter(ind %in% blacklist_prev) %>%
+    filter(batch_variable == "instrument_id") %>%
+    mutate(plot_label = glue("{ind}")) %>%
+    mutate(case_control_other_latest = 
+        strex::str_before_first(grouping_meta, "_")
+    ) %>%
+    glimpse()
+
+p_prev <- prev_plot_df %>%
+    filter(!grepl(";", batch_subset)) %>%
+    ggplot(aes(x = fct_reorder(batch_subset, -values), 
+        y = values, 
+        fill = case_control_other_latest)) +
+    geom_col(alpha = 0.7, position = "dodge") +
+    facet_wrap(~plot_label, scales = "free_x", ncol = 2) +
+    scale_fill_d3() +
+    labs(
+        x = "Batch",
+        y = "Prevalence",
+        title = "Prevalence of Top Variable Blacklisted Taxa Across Batches"
+    ) +
+    theme_bw() +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 8),
+        legend.title = element_blank()
+    )
+
+# Save plot
+ggsave(
+    filename = glue("{wkdir}/figures/Viral/",
+        "blacklisted-taxa-prevalence-by-batch_{Sys.Date()}.png"),
+    p_prev,
+    width = 7,
+    height = 10
+)
+
+```
+
+
+
+![](../figures/Viral/decontamination-2024-11-03_sequencing-batch_prevalence_filter.png)
+
+![](../figures/Viral/blacklisted-taxa-prevalence-by-batch_2024-11-03.png)
+
+
+Visualize the relationship between virus prevalence and mean relative abundance
+
+```{r}
+prev_stats <- microbiome::prevalence(ps_trim) %>%
+    as.data.frame() %>%
+    setNames("prev") %>%
+    rownames_to_column("taxon") %>%
+    glimpse()
+
+rel_abund_df <- ps_trim %>% 
+    microbiome::transform("compositional") %>% 
+    microbiome::abundances() %>% 
+    t() %>% 
+    as.data.frame() %>% 
+    glimpse()
+
+taxon_iqr <- rel_abund_df %>%
+    purrr::map(~IQR(., na.rm = TRUE)) %>% 
+    unlist()
+
+rel_abund_summary <- data.frame(
+  taxon = colnames(rel_abund_df),
+  prevalence = prev_stats$prev,
+  mean = colMeans(rel_abund_df),
+  ci95 = taxon_iqr) %>%
+  glimpse()
+
+# Get taxa annotations from phyloseq object
+taxa_annots <- tax_table(ps_trim) %>%
+    as.data.frame() %>%
+    rownames_to_column("taxon") %>%
+    # Get finest resolution annotation (last non-NA value in each row)
+    mutate(finest_annot = apply(., 1, function(x) {
+        non_na <- x[!is.na(x)]
+        if(length(non_na) > 1) {
+            return(non_na[length(non_na)])
+        } else {
+            return(x[1]) # Return taxon ID if no other annotations
+        }
+    })) %>% 
+    glimpse()
+
+# Add annotations to abundance summary
+rel_abund_summary %<>%
+    left_join(taxa_annots %>% 
+    select(taxon, finest_annot), by = "taxon") %>%
+    mutate(is_top15 = rank(-mean) <= 100) %>% 
+    glimpse()
+
+# Create scatter plot with labels
+p_abund_prev <- ggplot(rel_abund_summary, aes(x = prevalence, y = mean)) +
+    geom_point(alpha = 0.6) +
+    geom_text_repel(
+        # data = subset(rel_abund_summary, is_top15),
+        aes(label = finest_annot),
+        size = 3,
+        box.padding = 0.5,
+        max.overlaps = Inf
+    ) +
+    scale_y_log10() +
+    scale_color_manual(values = c("grey60", "red")) +
+    labs(x = "Prevalence (Fraction of Samples)",
+         y = "Mean Relative Abundance") +
+    theme_bw() +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none"
+    )
+# p_abund_prev
+
+ggsave(
+    glue("{wkdir}/figures/Viral/",
+        "Virus-prevalence-vs-mean-rel-abund_{Sys.Date()}.png"),
+    p_abund_prev,
+    width = 5, height = 4.5
+)
+
+
+
+```
+
+
+![](../figures/Viral/Virus-prevalence-vs-mean-rel-abund_2024-11-03.png)
+
+
+```{r}
+
+
+ps <- readRDS(
+    glue("{palm_interim}/",
+        "phyloseq_count_matrix_BWA-dlist-GRCh38-dna-rna",
+        "_decontaminated_2024-11-03.rds"
+    )
+)
+ps
+
+prev_stats <- microbiome::prevalence(ps) %>%
+    as.data.frame() %>%
+    setNames("prev") %>%
+    rownames_to_column("taxon") %>%
+    glimpse()
+
+rel_abund_df <- ps %>% 
+    # microbiome::transform("compositional") %>% 
+    microbiome::abundances() %>% 
+    t() %>% 
+    as.data.frame() %>% 
+    glimpse()
+
+taxon_iqr <- rel_abund_df %>%
+    purrr::map(~IQR(., na.rm = TRUE)) %>% 
+    unlist()
+
+rel_abund_summary <- data.frame(
+  taxon = colnames(rel_abund_df),
+  prevalence = prev_stats$prev,
+  mean = colMeans(rel_abund_df),
+  ci95 = taxon_iqr) %>%
+  glimpse()
+
+# Get taxa annotations from phyloseq object
+taxa_annots <- tax_table(ps) %>%
+    as.data.frame() %>%
+    rownames_to_column("taxon") %>%
+    # Get finest resolution annotation (last non-NA value in each row)
+    mutate(finest_annot = apply(., 1, function(x) {
+        non_na <- x[!is.na(x)]
+        if(length(non_na) > 1) {
+            return(non_na[length(non_na)])
+        } else {
+            return(x[1]) # Return taxon ID if no other annotations
+        }
+    })) %>% 
+    glimpse()
+
+# Add annotations to abundance summary
+rel_abund_summary %<>%
+    left_join(taxa_annots %>% 
+    select(taxon, finest_annot), by = "taxon") %>%
+    mutate(is_top15 = rank(-mean) <= 100) %>% 
+    glimpse()
+
+# Create scatter plot with labels
+p_abund_prev <- ggplot(rel_abund_summary, aes(x = prevalence, y = mean)) +
+    geom_point(alpha = 0.6) +
+    geom_text_repel(
+        # data = subset(rel_abund_summary, is_top15),
+        aes(label = finest_annot),
+        size = 3,
+        box.padding = 0.5,
+        max.overlaps = Inf
+    ) +
+    scale_y_log10() +
+    scale_color_manual(values = c("grey60", "red")) +
+    labs(x = "Prevalence (Fraction of Samples)",
+         y = "Mean Relative Abundance") +
+    theme_bw() +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none"
+    )
+p_abund_prev
+
+# View(rel_abund_summary)
+
+ggsave(
+    glue("{wkdir}/figures/Viral/",
+        "Virus-prevalence-vs-absolute-counts_{Sys.Date()}.png"),
+    p_abund_prev,
+    width = 5, height = 5
+)
+
+# remove taxa that are in every sample
+oddly_abundant_taxa <- c("u101227", "u103829", "u110641")
+# Remove taxa that are present in every sample
+ps <- prune_taxa(!taxa_names(ps) %in% oddly_abundant_taxa, ps)
+
+# meta(ps) %>% glimpse
+abund_df <- abundances(ps) %>% as.data.frame()
+colnames(abund_df)
+
+# When dividing a dataframe by a vector, R performs element-wise division:
+# - Each column in the dataframe is divided by the corresponding element in the vector
+# - The vector is recycled if needed to match the dataframe dimensions
+# - In this case, each sample's abundances are divided by that sample's total clean reads
+total_clean_read_normmed <- sweep(abund_df, 2, meta(ps)$clean_read_counts_numeric, "/")
+
+meta(ps) %>% as.data.frame() %>% 
+    filter(sample_id == "PP-91097-BLM0T1") %>%
+    pull(clean_read_counts_numeric)
+
+
+# # Checking that normalization worked
+# abund_df$`PP-91097-BLM0T1`
+# # abund_df$`PP-91097-BLM0T1` / 33369892
+# total_clean_read_normmed$`PP-91097-BLM0T1`
+
+
+# Convert normalized matrix back to phyloseq object format
+otu_table_norm <- otu_table(total_clean_read_normmed, taxa_are_rows = TRUE)
+# Replace abundance table in phyloseq object while keeping all other components
+ps <- phyloseq(otu_table_norm, tax_table(ps), sample_data(ps))
+
+saveRDS(
+    ps,
+    glue("{palm_interim}/",
+        "phyloseq_count_matrix_BWA-dlist-GRCh38-dna-rna",
+        "_decontaminated-outlier-removed-&_cleanread-normed_{Sys.Date()}.rds"
+    )
+)
+
+```
+
+
+![](../figures/Viral/Virus-prevalence-vs-absolute-counts_2024-11-04.png)
+
+
+```{r}
+sessionInfo()
+
+```

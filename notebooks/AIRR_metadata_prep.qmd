@@ -1,0 +1,259 @@
+---
+title: "AIRR metadata prep"
+editor: source
+author: "Joe Boktor"
+date: '2025-03-24'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+NOTE THAT THIS SCRIPT IS DEPRECATED - AND IS NOT USED IN THE CURRENT ANALYSIS. USE THE R SCRIPT IN `notebooks/R_scripts/process-metadata_v4_release.R` INSTEAD.
+
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(fastICA)
+library(parallelDist)
+library(mclust)
+library(seqinr)
+library(progress)
+library(transport)
+library(immunarch)
+library(nlme)
+library(broom.mixed)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb/")
+imm_plots_dir <- glue("{wkdir}/figures/AIRR/immunarch/")
+arcasHLA_interim <- glue("{wkdir}/data/interim/airr/arcasHLA")
+
+```
+
+
+
+Quantifying the number of reads per sample using BAM flagstat files and checking in on failed samples. 
+
+```{r, eval=FALSE}
+read_flagstat_tsv <- function(file_path) {
+    # Read raw TSV file
+    df <- readr::read_tsv(
+        file_path,
+        col_names = c("value", "qc_failed", "metric"),
+        show_col_types = FALSE
+    ) %>%
+        dplyr::mutate(
+            sample_id = basename(file_path) %>%
+                tools::file_path_sans_ext() %>%
+                stringr::str_remove("_flagstat")
+        ) %>%
+        dplyr::select(-qc_failed) %>%
+        dplyr::select(sample_id, metric, value)
+    
+    return(df)
+}
+
+base_flagstat_dir <- glue("{pdmbs_dir}/workflow/RNASEQ/flagstats/01_BAM")
+
+flagstat_files <- list.files(
+    base_flagstat_dir,
+    pattern = "_flagstat.tsv",
+    full.names = TRUE
+)
+
+future::plan("multisession", workers = 30)
+
+flagstat_df <- flagstat_files %>%
+    furrr::future_map_dfr(~ read_flagstat_tsv(.) %>% 
+        dplyr::filter(metric %in% c("total (QC-passed reads + QC-failed reads)", "mapped %"))
+        )
+
+flagstat_df %>% glimpse
+
+problematic_samples <- c(
+  "PP-59174-BLM0T1",
+  "PP-55714-BLM0T1",
+  "PP-55349-SVM6T1",
+  "PP-54198-SVM6T1",
+  "PP-52829-BLM0T1",
+  "PP-51551-SVM12T1",
+  "PP-51200-BLM0T1",
+  "PP-51186-SVM12T1",
+  "PP-50901-BLM0T1",
+  "PP-41523-SVM24T1",
+  "PP-4067-BLM0T1",
+  "PP-3710-SVM36T1",
+  "PP-3659-SVM6T1",
+  "PP-3654-SVM36T1",
+  "PP-3617-SVM12T1",
+  "PP-3603-BLM0T1",
+  "PP-3600-SVM6T1",
+  "PP-3580-SVM6T1",
+  "PP-3580-SVM12T1",
+  "PP-3464-SVM24T1",
+  "PP-3188-BLM0T1",
+  "PP-3165-BLM0T1",
+  "PP-3109-SVM12T1",
+  "PP-3055-SVM36T1",
+  "PP-3004-SVM36T1",
+  "PD-PDXW222GG2-BLM0T1",
+  "PD-PDVW790ELA-SVM18T1",
+  "PD-PDVH048WXT-SVM18T1",
+  "PD-PDNF936JW4-BLM0T1",
+  "PD-PDCH154ZHF-SVM18T1"
+)
+
+p <- flagstat_df %>% 
+    mutate(problematic = sample_id %in% problematic_samples) %>%
+    filter(metric == "total (QC-passed reads + QC-failed reads)") %>%
+    mutate(value = as.numeric(value)) %>%
+    ggplot(aes(x = fct_reorder(sample_id, value), y = value)) +
+    geom_point(aes(color = problematic, 
+        alpha = problematic, size = problematic)) +
+    scale_color_manual(values = c("grey", "red")) +
+    scale_alpha_manual(values = c(0.3, 1)) +
+    scale_size_manual(values = c(1, 2)) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggsave(
+    p,
+    filename = glue("{wkdir}/figures/RNASEQ/flagstats/problematic_samples_{Sys.Date()}.png"),
+    width = 12, height = 6
+)
+
+future::plan("multisession", workers = 30)
+flagstat_df_full <- flagstat_files %>%
+    furrr::future_map_dfr(~ read_flagstat_tsv(.))
+
+saveRDS(
+    flagstat_df_full,
+    glue(
+        "{wkdir}/data/interim/airr/sample_qc/01_BAM/",
+        "flagstats_summary_{Sys.Date()}.rds")
+)
+ 
+rnaseq_bam01_flagstats <- flagstat_df_full %>% 
+    filter(metric == "total (QC-passed reads + QC-failed reads)") %>% 
+    mutate(value = as.numeric(value)) %>% 
+    dplyr::select(-metric) %>% 
+    dplyr::rename(raw_total_reads = value)
+
+saveRDS(
+    rnaseq_bam01_flagstats,
+    glue("{wkdir}/data/interim/airr/sample_qc/01_BAM/",
+    "rnaseq_bam01_total_reads.rds")
+)
+
+```
+
+Reading in metadata
+
+```{r}
+metadata_df <- readRDS(
+    glue("{wkdir}/data/interim/metadata/2023-07-14_phyloseq-metadata.rds"))$RNASEQ %>% 
+    mutate(case_control_other_latest = factor(case_control_other_latest, 
+        levels = c("Control", "Case"))) %>%
+    filter(case_control_other_latest != "Other") %>%
+    glimpse()
+
+# Loading in total reads from BAM flagstat files
+rnaseq_bam01_flagstats <- readRDS(
+    glue("{wkdir}/data/interim/airr/sample_qc/01_BAM/",
+    "rnaseq_bam01_total_reads.rds")
+)
+```
+
+
+
+Aggregating metadata and saving.
+
+```{r}
+full_meta_df <- metadata_df %>% 
+    left_join(rnaseq_bam01_flagstats, by = c("sample_id")) %>% 
+    left_join(genotypes_cleaned_annot_meta) %>% 
+    left_join(decon_meta) %>%
+    left_join(pca_mhc_df) %>% 
+    # Numeric binning of raw total reads
+    mutate(raw_total_reads_binned = cut(raw_total_reads,
+        breaks = quantile(raw_total_reads, probs = seq(0, 1, 0.1), na.rm = TRUE),
+        include.lowest = TRUE,
+        labels = paste0(1:10)
+    ) %>% as.numeric()
+    ) %>%
+    mutate(
+        tcell_reads_x_cell = raw_total_reads * x_cell_t_cell,
+        tcell_reads_epic = raw_total_reads * epic_t_cell,
+        tcell_reads_abis = raw_total_reads * abis_t_cell
+    ) %>%
+    glimpse()
+
+mds_tests <- full_meta_df %>%
+    dplyr::select(matches("mds_updrs.*_summary_score")) %>%
+    colnames()
+
+key_meta_df <- full_meta_df %>% 
+    dplyr::select(
+        sample_id, case_control_other_latest,
+        ethnicity, race,
+        visit_month, age_at_baseline, sex, study, participant_id,
+        raw_total_reads, DRB1_grouped, DRB1_risk,
+        all_of(mds_tests),
+        contains("x_cell"), contains("epic_"), contains("abis")
+    ) %>% 
+    glimpse()
+
+# Join raw read depth to sample metadata
+key_meta_df <- full_meta_df %>% 
+    dplyr::select(
+        sample_id, case_control_other_latest,
+        ethnicity, race,
+        visit_month, age_at_baseline, sex, study, participant_id,
+        raw_total_reads, DRB1_grouped, DRB1_risk,
+        all_of(mds_tests),
+        contains("x_cell"), contains("epic")
+    ) %>% 
+    glimpse()
+
+saveRDS(
+    key_meta_df,
+    glue("{wkdir}/data/interim/airr/core_meta_df_{Sys.Date()}.rds")
+)
+saveRDS(
+    full_meta_df,
+    glue("{wkdir}/data/interim/airr/full_meta_df_{Sys.Date()}.rds")
+)
+
+```

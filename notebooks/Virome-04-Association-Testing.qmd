@@ -1,0 +1,192 @@
+---
+title: "Parkinson's Disease Blood Virome: Community Composition Analyses"
+editor: source
+author: "Joe Boktor"
+date: '2024-07-01'
+bibliography: references.bib
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    grid:
+      sidebar-width: 300px
+      body-width: 900px
+      margin-width: 300px
+      gutter-width: 1.5rem
+---
+
+
+#  Analysis Setup
+
+```{r}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(glue)
+# microbiome analysis
+library(phyloseq)
+library(microbiome)
+library(vegan)
+library(Seurat)
+library(Matrix)
+library(broom.mixed)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggside)
+library(ggpubr)
+library(ggrepel)
+
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+palmdb_data <- glue("{ref_dir}/PalmDB")
+palm_interim <- glue("{wkdir}/data/interim/PalmDB_mapping")
+dir.create(palm_interim, showWarnings = FALSE)
+palmddb_res <- glue("{pdmbs_dir}/workflow/RNASEQ/palmdb_bwa_dlist")
+
+# options(future.globals.maxSize= 6291456000)
+# future::plan("multisession", workers = 8)
+```
+
+# Differential Abundance Analysis
+
+```{r}
+
+# ------------------------------------------------------------
+# Differential Abundance Analysis
+
+ps <- readRDS(
+    glue("{palm_interim}/",
+        "phyloseq_count_matrix_BWA-dlist-GRCh38-dna-rna",
+        "_decontaminated-outlier-removed-&_cleanread-normed_2024-11-04.rds"
+    )
+)
+ps
+
+# library(Maaslin2)
+
+ps_clr <- ps %>% microbiome::transform("clr")
+ps_df <- psmelt(ps_clr) %>% glimpse()
+ps_df <- ps_df %>% filter(case_control_other_latest != "Other")
+ps_df %>% glimpse
+otu_list <- ps_df$OTU %>% unique()
+
+
+meta(ps) %>% glimpse
+
+disease_effect_lme <- otu_list %>% 
+    purrr::map( ~ {{
+            nlme::lme(Abundance ~ case_control_other_latest + study,
+              random = ~1|participant_id,
+              data = ps_df %>% filter(OTU == .x)
+        ) %>%
+            broom.mixed::tidy() %>%
+            mutate(OTU = .x)
+    }}) %>%
+    bind_rows()
+
+
+# View(disease_effect_lme)
+p_disease_volc <- disease_effect_lme %>%
+    filter(term == "case_control_other_latestControl") %>%
+    mutate(p_adj = p.adjust(p.value, method = "BH")) %>%
+    ggplot(aes(x = estimate, y = -log10(p_adj))) +
+    geom_vline(xintercept = c(-0.2, 0.2), linetype = "dashed", color = "gray50") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +
+    geom_point(aes(color = abs(estimate) > 0.2 & -log10(p_adj) > -log10(0.05))) +
+    geom_text_repel(
+        data = . %>% filter(abs(estimate) > 0.2 & -log10(p_adj) > -log10(0.05)),
+        aes(label = OTU),
+        size = 3,
+        max.overlaps = 15
+    ) +
+    scale_color_manual(values = c("gray50", "red")) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    labs(x = "Effect Size (CLR)", y = "-log10(adj. p-value)")
+
+ggsave(
+    filename = glue("{wkdir}/figures/Viral/",
+    "disease-effect-volcano_{Sys.Date()}.png"),
+    p_disease_volc,
+    width = 5, height = 4
+)
+
+
+disease_effect_lme %>%
+    filter(term == "case_control_other_latestControl") %>%
+    mutate(p_adj = p.adjust(p.value, method = "BH")
+
+
+ps_df  %>%
+    filter(OTU == "u100215") %>% View
+
+ps_df  %>%
+    filter(OTU == "u26064") %>% View
+
+
+p_u100215 <- ps_df %>%
+    filter(OTU == "u100215") %>% 
+    # filter(study != "BioFIND") %>%
+    ggplot(aes(x = case_control_other_latest, y = Abundance)) +
+    geom_point(
+        position = position_jitter(width = 0.2, height = 0),
+        alpha = 0.2
+    ) +
+    geom_boxplot(outlier.alpha = 0, alpha = 0.2) +
+    facet_wrap(~study) +
+    labs(y = "CLR Abundance", x = NULL, title = "u100215") +
+    theme_bw()
+
+ggsave(
+    filename = glue("{wkdir}/figures/Viral/",
+    "u100215-abundance-by-study_{Sys.Date()}.png"),
+    p_u100215,
+    width = 5, height = 3.5
+)
+
+p_u26064 <- ps_df %>%
+    filter(OTU == "u26064") %>% 
+    ggplot(aes(x = case_control_other_latest, y = Abundance)) +
+    geom_point(
+        position = position_jitter(width = 0.2, height = 0),
+        alpha = 0.2
+    ) +
+    geom_boxplot(outlier.alpha = 0, alpha = 0.2) +
+    facet_wrap(~study) +
+    labs(y = "CLR Abundance", x = NULL, title = "u26064") +
+    theme_bw()
+
+ggsave(
+    filename = glue("{wkdir}/figures/Viral/",
+    "u26064-abundance-by-study_{Sys.Date()}.png"),
+    p_u26064,
+    width = 5, height = 3.5
+)
+
+```

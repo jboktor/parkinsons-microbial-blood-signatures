@@ -3,7 +3,7 @@
 # Packages for xgboost
 # library(glue)
 library(ModelMetrics)
-library(OpenMPController) # for Kaggle backend
+# library(OpenMPController) # for Kaggle backend
 library(xgboost)
 library(parallel)
 library(doParallel)
@@ -23,7 +23,7 @@ library(janitor)
 library(remotes)
 library(glmnet)
 # lightgbm and catboost for parsnip
-# remotes::install_github("curso-r/treesnip", dependencies = T) 
+# remotes::install_github("curso-r/treesnip", dependencies = T)
 # library(treesnip)
 
 
@@ -32,18 +32,19 @@ library(glmnet)
 
 
 
-#_______________________________________________________________________________
+# _______________________________________________________________________________
 #                           ML Functions
-#_______________________________________________________________________________
+# _______________________________________________________________________________
 
-prep_ml_input <- function(obj){
-  all_abund <- abundances(obj) %>%
-    t() %>% as.data.frame() %>% 
-    rownames_to_column("participant_id")
-  all_meta <- meta(obj) %>% 
+prep_ml_input <- function(obj) {
+  all_abund <- microbiome::abundances(obj) %>%
+    t() %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column("participant_id")
+  all_meta <- microbiome::meta(obj) %>%
     dplyr::select(participant_id, diagnosis_latest)
-  ml_input <- inner_join(all_meta, all_abund) %>% 
-    as_tibble() %>% 
+  ml_input <- dplyr::inner_join(all_meta, all_abund) %>%
+    tibble::as_tibble() %>%
     dplyr::select(-participant_id)
   return(ml_input)
 }

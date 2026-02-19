@@ -3,6 +3,7 @@
 
 source("notebooks/R_scripts/_load_packages.R")
 source("notebooks/R_scripts/_plot-functions.R")
+source("notebooks/R_scripts/_misc_functions.R")
 idvars <- c("participant_id", "visit_name", "visit_month")
 
 # Define list filtering function
@@ -15,7 +16,6 @@ remove_idvars <- function(l) {
 #_______________________________________________________________________________
 
 ## Medical History  ----
-
 medical_history <-
   read.csv(file = "data/input/metadata/2021_v2-5release_0510/clinical/PD_Medical_History.csv",
            stringsAsFactors = F,
@@ -239,12 +239,12 @@ records_wo_visit <- longitudinal_data %>%
   filter(visit_name == "LOG") %>%
   dplyr::select(-c("visit_name", "visit_month")) %>%
   mutate_all(na_if, "") %>%
-  remove_empty_cols() %>%
+  remove_empty("cols") %>%
   distinct()
 
 static_start_data <- longitudinal_data %>%
   filter(visit_name == "M0") %>%
-  mutate_all(na_if, "") %>% remove_empty_cols() %>%
+  mutate_all(na_if, "") %>% remove_empty("cols") %>%
   dplyr::select(-c("visit_name", "visit_month")) %>%
   distinct()
 static_start_data2repair <- static_start_data %>%
@@ -318,8 +318,8 @@ demographic_vars <- list("demographic_vars" =
                              colnames(case_control)
                            )))
 
+dir.create("data/interim/metadata/", showWarnings=FALSE, recursive = TRUE)
 saveRDS(dem_v2, file = glue("data/interim/metadata/{Sys.Date()}_demographics.rds"))
-
 # Combining data ----
 
 sample_info <- sampdat %>%
@@ -365,7 +365,6 @@ metadata_categories_df <-
   ) %>%
   drop_na(metadata) %>%
   distinct()
-
 
 saveRDS(metadata_categories, file = glue("data/interim/metadata/{Sys.Date()}_metadata_categories.rds"))
 saveRDS(metadata_categories_df, file = glue("data/interim/metadata/{Sys.Date()}_metadata_categories_dataframe.rds"))

@@ -1,0 +1,546 @@
+---
+title: "Bulk RNA-seq cell-type deconvolution"
+editor: source
+author: "Joe Boktor"
+date: '2025-04-08'
+eval: false
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+## Analysis setup
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(progress)
+library(nlme)
+library(broom.mixed)
+library(immunedeconv)
+library(limma)
+library(GSVA)
+library(msigdbr)
+# library(org.Hs.eg.db)
+# library(AnnotationDbi)
+library(AnnotationHub)
+library(ensembldb)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb/")
+imm_plots_dir <- glue("{wkdir}/figures/AIRR/immunarch/")
+v4_metapath <- glue("{wkdir}/data/input/metadata/2023_v4release_1027")
+v4_1027_dir <- glue("{wkdir}/data/input/metadata/2023_v4release_1027")
+
+deconv_outdir <- glue("{wkdir}/data/interim/celltype_deconvolution")
+dir.create(deconv_outdir, showWarnings = FALSE, recursive = TRUE)
+deconv_fig_dir <- glue("{wkdir}/figures/celltype_deconvolution")
+dir.create(deconv_fig_dir, showWarnings = FALSE, recursive = TRUE)
+
+```
+
+
+## Deconvolving cell-type proportions
+
+Loading the AMP-PD bulk RNA-seq dataset (2022_v3 release_1115) for cell-type deconvolution analysis.
+
+```{r}
+txn_v3_dir <- glue("{wkdir}/data/input/",
+    "amp-pd-transcriptomics_2022_v3release_1115"
+)
+txn_v4_dir <- glue("{wkdir}/data/input/",
+    "amp-pd-transcriptomics_2023_v4release_1027"
+)
+
+genes_df_v3 <- data.table::fread(glue("{txn_v3_dir}/matrix.genes.tsv"))
+genes_df_v4 <- data.table::fread(glue("{txn_v4_dir}/matrix.genes.tsv"))
+
+genes_df <- merge(genes_df_v3, genes_df_v4, by = "Geneid", all = TRUE) %>% 
+    dplyr::mutate(across(where(is.numeric), ~replace_na(., 0)))
+
+dim(genes_df)
+knitr::kable(genes_df[1:5, 1:5])
+
+```
+
+
+
+
+|Geneid             | BF-1001-SVM0_5T1| BF-1002-SVM0_5T1| BF-1003-SVM0_5T1| BF-1004-SVM0_5T1|
+|:------------------|----------------:|----------------:|----------------:|----------------:|
+|ENSG00000000003.14 |          2.03457|          1.79487|          1.42528|          1.89073|
+|ENSG00000000005.5  |          0.00000|          0.00000|          0.00000|          0.00000|
+|ENSG00000000419.12 |         14.58600|         10.17110|          8.24272|         11.11830|
+|ENSG00000000457.13 |          7.04129|          6.48869|          5.86899|          6.90118|
+|ENSG00000000460.16 |          5.31800|          4.40200|          2.80261|          3.38784|
+
+
+Converting ENSEMBL IDs to gene symbols.
+
+
+```{r}
+hub <- AnnotationHub()
+edb <- hub[["AH73881"]] # EnsDb.Hsapiens.v86
+
+orgs <- subset(hub, hub$rdataclass == "OrgDb")
+orgdb <- AnnotationHub::query(orgs, "Homo sapiens")[[1]]
+orgdb
+columns(orgdb)
+
+k <- genes_df$Geneid %>% str_before_first(., "\\.")
+gene_id_map <- mapIds(orgdb,
+    keys = k,
+    column = "SYMBOL", keytype = "ENSEMBL",
+    multiVals = "asNA"
+)
+
+# Convert the named vector to a data frame
+gene_id_map_df <- data.frame(
+    Geneid = genes_df$Geneid,
+    ENSEMBL = names(gene_id_map),
+    SYMBOL = unname(gene_id_map),
+    stringsAsFactors = FALSE
+) %>%
+    glimpse()
+
+# Display the first few rows
+head(gene_id_map_df)
+
+gene_id_map_df %>%
+    dplyr::filter(!is.na(SYMBOL)) %>%
+    janitor::get_dupes(SYMBOL) %>%
+    dplyr::arrange(desc(SYMBOL)) %>%
+    head()
+
+gene_mat <- gene_id_map_df %>%
+    left_join(genes_df) %>%
+    glimpse()
+
+# samples are normalized by TPM (column sums are roughly 1 million)
+gene_mat[, 4:10] %>% colSums()
+gene_mat[1:5, 1:5]
+
+gene_mat_df <- gene_mat %>%
+    dplyr::select(-c(Geneid, ENSEMBL)) %>%
+    dplyr::filter(!is.na(SYMBOL)) %>%
+    dplyr::group_by(SYMBOL) %>%
+    dplyr::summarise(across(where(is.numeric), sum)) %>%
+    dplyr::ungroup() %>%
+    tibble::column_to_rownames(var = "SYMBOL") %>%
+    as.matrix()
+
+# This is the TPM normalized gene expression matrix excluding all non-coding and lnc RNAs
+gene_mat_df[1:5, 1:5]
+saveRDS(gene_mat_df, file = glue(
+    "{deconv_outdir}/",
+    "formatted_gene_matrix_{Sys.Date()}.rds"
+))
+
+```
+
+
+Based on the benchmark analysis of the immunedeconv package, we will use EPIC, ABIS, and xCell for cell-type deconvolution. These methods appear to preform well on B-cell, CD4+ and CD8+ T-cell deconvolution.
+
+![Figure](https://oup.silverchair-cdn.com/oup/backfile/Content_public/Journal/bioinformatics/35/14/10.1093_bioinformatics_btz363/3/bioinformatics_35_14_i436_f1.jpeg?Expires=1747088714&Signature=k0xSJbLqAe1ZKkD1fF~8-m9a9LRKOwWsuiyMAj-7L5fBiLpiJdbR20zFDx2qvG5d6TGu9xFzgIlQvYQXHRJYu8MzScRp6PbsqulVR6qXGZyFV97TEUcIQL1ZqPhvhX4tOFW3g0Lo90d8Xh6lZxGRnccJpiffGZCUVH8O-b6cd-E8A6T3KYGTx0PbTRTS9v3w6da9c41gTdv-p4C4vSJ860ptoogwYQru8eX4KlUqZebwzNpEnQP9mJm32mL8nLtLb58Oko92n0YyHvGNC8h2MlLFz22sKrhcG~EzGrkMc8h00G4L2WUSMy71VmdTbpCzyvmJrssTQIMlVe14iROgvw__&Key-Pair-Id=APKAIE5G5CRDK6RD3PGA)
+
+
+```{r}
+gene_mat_df <- readRDS(glue(
+    "{deconv_outdir}/",
+    "formatted_gene_matrix_2025-06-23.rds"
+))
+gene_mat_df[1:5, 1:5]
+# gmat_tst <- gene_mat_df[, 1:20]
+
+# deconvolution_methods
+decon_list <- list()
+decon_list[["epic"]] <- immunedeconv::deconvolute(gene_mat_df, "epic", tumor = FALSE)
+decon_list[["abis"]] <- immunedeconv::deconvolute(gene_mat_df, "abis", tumor = FALSE)
+decon_list[["xcell"]] <- immunedeconv::deconvolute(gene_mat_df, "xcell", tumor = FALSE)
+# decon_list[["quantiseq"]] <- immunedeconv::deconvolute(gene_mat_df, "quantiseq", tumor = FALSE)
+
+saveRDS(decon_list, file = glue(
+    "{deconv_outdir}/",
+    "deconvoluted_cell_types_{Sys.Date()}.rds"
+))
+```
+
+
+
+Visualizing ABIS deconvolution results.
+
+```{r}
+decon_list <- readRDS(glue(
+    "{deconv_outdir}/",
+    "deconvoluted_cell_types_2025-06-23.rds"
+))
+
+decon_list[["abis"]]$cell_type %>% unique()
+decon_df_long_abis <- decon_list[["abis"]] %>% 
+    pivot_longer(!cell_type, names_to = "sample_id", values_to = "value") %>% 
+    glimpse()
+
+abis_mat <- decon_list[["abis"]] %>% column_to_rownames(var = "cell_type") %>% t()
+sid_order_abis <- seriate_matrix_rows(abis_mat, seriate_method = "HC_average")
+# min(decon_df_long$value)
+
+p_abis <- decon_df_long_abis %>% 
+    mutate(value = ifelse(value < 0, 0, value)) %>% 
+    mutate(sample_id = factor(sample_id, levels = sid_order_abis)) %>% 
+    ggplot(aes(x = sample_id, y = value, fill = cell_type)) +
+    geom_col(position = "stack") +
+    scale_fill_viridis_d(option = "turbo") +
+    # scale_fill_d3(palette = "category20") +
+    theme_bw() +
+    labs(x = "Sample", y = "Relative Abundance (%)", fill = "ABIS Cell Type") +
+    theme(
+        axis.text.x = element_blank(),
+        panel.grid = element_blank(),
+        axis.ticks.x = element_blank()
+    )
+
+ggsave(
+    filename = glue(
+        "{deconv_fig_dir}/",
+        "abis_cell_type_distribution_{Sys.Date()}.png"
+    ),
+    plot = p_abis,
+    width = 14,
+    height = 7
+)
+
+```
+
+Visualizing EPIC deconvolution results.
+
+```{r}
+decon_df_long_epic <- decon_list[["epic"]] %>% 
+    pivot_longer(!cell_type, names_to = "sample_id", values_to = "value") %>% 
+    glimpse()
+min(decon_df_long_epic$value)
+
+epic_mat <- decon_list[["epic"]] %>% column_to_rownames(var = "cell_type") %>% t()
+sid_order_epic <- seriate_matrix_rows(epic_mat, seriate_method = "HC_average")
+
+p_epic <- decon_df_long_epic %>% 
+    filter(cell_type != "uncharacterized cell") %>% 
+    mutate(value = ifelse(value < 0, 0, value)) %>% 
+    mutate(value = value * 100) %>% 
+    mutate(sample_id = factor(sample_id, levels = sid_order_epic)) %>% 
+    ggplot(aes(x = sample_id, y = value, fill = cell_type)) +
+    geom_col(position = "stack") +
+    scale_fill_viridis_d(option = "turbo") +
+    theme_bw() +
+    labs(x = "Sample", y = "Relative Abundance (%)", fill = "EPIC Cell Type") +
+    theme(
+        axis.text.x = element_blank(),
+        panel.grid = element_blank(),
+        axis.ticks.x = element_blank()
+    )
+
+ggsave(
+    filename = glue(
+        "{deconv_fig_dir}/",
+        "epic_cell_type_distribution_{Sys.Date()}.png"
+    ),
+    plot = p_epic,
+    width = 14,
+    height = 7
+)
+
+```
+
+Visualizing XCell deconvolution results.
+
+```{r}
+decon_df_long_xcell <- decon_list[["xcell"]] %>% 
+    pivot_longer(!cell_type, names_to = "sample_id", values_to = "value") %>% 
+    glimpse()
+# min(decon_df_long_xcell$value)
+
+xcell_leaf_nodes <- cell_type_tree$leaves
+leaf_names <- sapply(xcell_leaf_nodes, function(node) node$name) %>% 
+    unname()
+
+xcell_mat <- decon_list[["xcell"]] %>% 
+    filter(cell_type %in% c("T cell CD8+", "T cell CD4+ memory", "T cell CD4+ naive")) %>%
+    column_to_rownames(var = "cell_type") %>% t()
+sid_order_xcell <- seriate_matrix_rows(xcell_mat, seriate_method = "HC_average")
+
+p_xcell <- decon_df_long_xcell %>% 
+    filter(!grepl("score", cell_type)) %>% 
+    filter(!grepl("fibroblast", cell_type)) %>% 
+    filter(!grepl("progenitor", cell_type)) %>% 
+    filter(!grepl("endothelial", cell_type)) %>% 
+    filter(!grepl("stem cell", cell_type)) %>% 
+    filter(cell_type %in% leaf_names) %>% 
+    mutate(sample_id = factor(sample_id, levels = sid_order_xcell)) %>% 
+    ggplot(aes(x = sample_id, y = value, fill = cell_type)) +
+    geom_col(position = "stack") +
+    scale_fill_viridis_d(option = "turbo") +
+
+    theme_bw() +
+    labs(x = "Sample", y = "Relative Abundance (%)", fill = "xCell Cell Type") +
+    theme(
+        axis.text.x = element_blank(),
+        panel.grid = element_blank(),
+        axis.ticks.x = element_blank()
+    )
+
+ggsave(
+    filename = glue(
+        "{deconv_fig_dir}/",
+        "xcell_cell_type_distribution_{Sys.Date()}.png"
+    ),
+    plot = p_xcell,
+    width = 18,
+    height = 7
+)
+
+```
+
+
+```{r}
+p_tcell_stacked_bars <- p_abis %>% insert_bottom( p_epic) %>% insert_bottom(p_xcell)
+
+ggsave(
+    filename = glue(
+        "{deconv_fig_dir}/",
+        "tcell_stacked_bars_{Sys.Date()}.png"
+    ),
+    plot = p_tcell_stacked_bars,
+    width = 15,
+    height = 14
+)
+
+```
+
+Summing T-cell proportions across all methods and comparing distributions.
+
+```{r}
+summarize_tcell_props <- function(decon_df_long, decon_method, cell_group = "T cell") {
+    decon_df_long %>%
+        mutate(value = case_when(
+            value < 0 ~ 0,
+            TRUE ~ value
+        )) %>% 
+        filter(grepl(cell_group, cell_type)) %>%
+        group_by(sample_id) %>%
+        summarise(value = sum(value)) %>%
+        ungroup() %>%
+        mutate(method = decon_method) %>%
+        glimpse()
+}
+
+
+names(decon_list)
+t_cell_distr <- list()
+for (decon_method in names(decon_list)) {
+    t_cell_distr[[decon_method]] <- decon_list[[decon_method]] %>%
+        map_result_to_celltypes(c("T cell"), decon_method)
+}
+# names(t_cell_distr)
+
+t_cell_distr_epic <- t_cell_distr[["epic"]] %>%
+    as.data.frame() %>%
+    pivot_longer(everything(), names_to = "sample_id", values_to = "value") %>%
+    mutate(method = "epic")
+t_cell_distr_xcell <- t_cell_distr[["xcell"]] %>%
+    as.data.frame() %>%
+    pivot_longer(everything(), names_to = "sample_id", values_to = "value") %>%
+    mutate(method = "xcell")
+
+tcell_props_df <- bind_rows(
+    summarize_tcell_props(decon_df_long_abis, "abis") %>%
+        mutate(value = value / 100),
+    t_cell_distr_epic,
+    t_cell_distr_xcell
+    # Not accurate for EPIC and xCell due to hierarchical cell type classification
+    # summarize_tcell_props(decon_df_long_epic, "epic"),
+    # summarize_tcell_props(decon_df_long_xcell, "xcell")
+) %>%
+    glimpse()
+
+p_tcell_props_dist <- tcell_props_df %>%
+    ggplot(aes(x = method, y = value)) +
+    geom_line(aes(group = sample_id), alpha = 0.1, linewidth = 0.2) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.75, width = 0.4) +
+    theme_bw() +
+    labs(x = "Method", y = "T-cell Proportion")
+
+ggsave(
+    filename = glue(
+        "{deconv_fig_dir}/",
+        "tcell_props_distribution_{Sys.Date()}.png"
+    ),
+    plot = p_tcell_props_dist,
+    width = 5,
+    height = 5
+)
+
+```
+
+
+
+Aggregating across cell types of interest and across methods to store with metadata.
+
+```{r}
+cois <- c("B cell", "T cell", "T cell CD4+", "T cell CD8+")
+
+tmp_xcell <- decon_list[["xcell"]] %>%
+  map_result_to_celltypes(cois, "xcell") %>%
+  rownames_to_column("cell_type") %>%
+  gather("sample", "estimate", -cell_type) %>%
+  mutate(method = "xCell")
+
+tmp_epic <- decon_list[["epic"]] %>%
+  map_result_to_celltypes(cois, "epic") %>%
+  rownames_to_column("cell_type") %>%
+  gather("sample", "estimate", -cell_type) %>%
+  mutate(method = "EPIC")
+
+tmp_abis <- cois %>% purrr::map(
+    ~ summarize_tcell_props(decon_df_long_abis, "abis", .x) %>% 
+    mutate(cell_type = .x)
+    ) %>% 
+    bind_rows() %>% 
+    dplyr::rename(estimate = value, sample = sample_id) %>% 
+    glimpse()
+
+tmp_total <- bind_rows(tmp_xcell, tmp_epic, tmp_abis) %>%
+  glimpse()
+
+deconv_meta <- tmp_total %>% 
+  dplyr::mutate(cell_type_method = glue("{method} {cell_type}")) %>%
+  dplyr::select(sample_id = sample, cell_type_method, estimate) %>%
+  pivot_wider(names_from = cell_type_method, values_from = estimate) %>%
+  janitor::clean_names() %>%
+  dplyr::glimpse()
+
+library(GGally)
+p_method_cor <- ggpairs(deconv_meta, columns = c(3, 7, 11)) 
+ggsave(
+    filename = glue(
+        "{deconv_fig_dir}/",
+        "tcell_props_corr_mat_{Sys.Date()}.png"
+    ),
+    plot = p_method_cor,
+    width = 7,
+    height = 6
+)
+
+saveRDS(
+    deconv_meta,
+    file = glue(
+        "{deconv_outdir}/",
+        "deconvoluted_cell_types_metadata_{Sys.Date()}.rds"
+    )
+)
+
+```
+
+
+## Quantifying inflammation gene programs 
+
+```{r}
+# loading gene expression matrix
+gene_mat_df <- readRDS(glue(
+    "{deconv_outdir}/",
+    "formatted_gene_matrix_2025-06-23.rds"
+))
+
+# log-transform gene exp.
+log_tpm <- log2(gene_mat_df + 0.1)
+
+# prepping relavent metadata
+cohort_meta <- read.csv(glue("{v4_metapath}/amp_pd_participants.csv")) %>%
+  dplyr::select(participant_id, study) %>% 
+  glimpse()
+
+meta <- bind_rows(
+    read_csv(glue("{v4_1027_dir}/rnaseq_WB-RWTS-VHBS_sample_inventory.csv")),
+    read_csv(glue("{v4_1027_dir}/rnaseq_WB-RWTS_sample_inventory.csv"))) %>% 
+    dplyr::select(sample_id, participant_id) %>% 
+    left_join(cohort_meta) %>% 
+    filter(sample_id %in% colnames(log_tpm)) %>% 
+    glimpse()
+
+# reordering gene exp. matrix to match metadata
+log_tpm <- log_tpm[ , meta$sample_id ] # reorder
+clean_expr <- limma::removeBatchEffect(log_tpm, batch = meta$study)
+
+log_tpm[1:5, 1:5]
+clean_expr[1:5, 1:5]
+
+# bind_cols(
+#     "log_tpm" = log_tpm["IL6",], 
+#     "batch_corrected" = clean_expr["IL6",]) %>% 
+#     ggplot(aes(x = log_tpm, y = batch_corrected)) +
+#     geom_point() +
+#     theme_bw() +
+#     labs(x = "log(TPM + 0.1)", y = "batch-corrected log(TPM + 0.1)")
+
+
+#  helper to fetch + z-score
+score_set <- function(category, subcat = NULL, set_name, method = "ssgsea") {
+  genes <- msigdbr(species = "Homo sapiens",
+                   category = category,
+                   subcategory = subcat) %>% 
+           filter(gs_name == set_name) %>% 
+           pull(gene_symbol) %>% unique()
+  gsva(clean_expr, list(tmp = genes), method = method)[1, ] %>%        # vector
+    scale() %>% as.numeric()                                           # z-score
+}
+
+# Compute scores
+scores <- tibble(
+  sample_id = colnames(clean_expr),
+  GEP_GO_IFN         = score_set("C5", "BP",  "GOBP_RESPONSE_TO_TYPE_I_INTERFERON"),
+  GEP_HALLMARK_INF   = score_set("H",  NULL,  "HALLMARK_INFLAMMATORY_RESPONSE"),
+  GEP_TH17_SIG       = score_set("C7",  NULL, "GSE14308_TH17_VS_NAIVE_CD4_TCELL_UP"),
+  GEP_REACTOME_CYTO  = score_set("C2", "CP:REACTOME", "REACTOME_CYTOKINE_SIGNALING_IN_IMMUNE_SYSTEM")
+)
+
+saveRDS(scores,
+    glue("{deconv_outdir}/",
+        "inflammation_gene_program_scores_{Sys.Date()}.rds"
+    )
+)
+
+```
+
+
+
+## Session info
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,181 @@
+---
+title: "SourceTracker analysis data processing"
+editor: source
+eval: false
+author: "Joe Boktor"
+date: '2022-12-29'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    column: page
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+
+Samples to include in human body site deconvolution:
+PMID:
+
+```{r}
+pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
+library(janitor)
+library(progress)
+
+```
+
+
+```{r}
+# read in metadata
+hmp_manifest <-
+  readr::read_tsv("data/input/metadata/HMP/hmp_manifest_19484f718e.tsv",
+    col_names = T
+  )
+# keep only HMP download paths
+hmp_manifest_processed <- hmp_manifest %>%
+  mutate(
+    urls = stringr::word(urls, 1, sep = ","),
+    sample_name = gsub(".tar.bz2", "", basename(urls))
+  )
+
+unwanted_dups <- 
+  c(
+    "91319e642fdd8a6e3b059cfb05ab9545",
+    "91319e642fdd8a6e3b059cfb05ab9c37",
+    "91319e642fdd8a6e3b059cfb05ab9eeb",
+    "91319e642fdd8a6e3b059cfb05ab77fd"
+    )
+
+# N. of unique sample names
+hmp_manifest_processed %>% dim()
+hmp_manifest_processed$sample_name %>% unique() %>% length()
+
+hmp_manifest_processed %<>% 
+# removing HMP V1 files
+  filter(!grepl("hmwgsqc/v1", urls), 
+  # removing duplicate samples
+  file_id %nin% unwanted_dups
+  )
+  
+hmp_manifest_processed %>% dim()
+hmp_manifest_processed$sample_name %>% unique() %>% length()
+
+# format for TERRA workflow
+hmp_manifest_formated <- hmp_manifest_processed %>% 
+  relocate(sample_name) %>% 
+  rename(
+    sample_id2 = sample_id,
+    "entity:sample_id" = sample_name
+    )
+write.table(hmp_manifest_formated, 
+  file = "data/input/metadata/HMP/hmp_manifest_filtered-TERRA-formatted.tsv", 
+  sep="\t", quote = FALSE, row.names = FALSE
+  )
+write.table(hmp_manifest_formated$urls, 
+  file = "data/input/metadata/HMP/hmp_manifest_filtered-URLS-ONLY.tsv", 
+  sep="\t", quote = FALSE, row.names = FALSE, col.names = FALSE
+  )
+
+```
+
+Download files into google storage bucket
+
+```{r, eval=FALSE}
+slurm_out <- glue("{wkdir}/.cluster_runs/gcs_upload_HMP2")
+dir.create(slurm_out, recursive = TRUE, showWarnings = FALSE)
+
+for (i in seq_len(nrow(hmp_manifest_processed))) {
+  url <- hmp_manifest_processed[i, ]$urls
+  filesize_mb <- ceiling(hmp_manifest_processed[i, ]$size / 1e6)
+  file_exists <- shell_do(
+    glue(
+      "gsutil ls gs://shotgun-metagenomic-data/HMP2/{basename(url)} | wc -l"
+    ),
+    stdout_path = TRUE
+  )
+  if (file_exists == "1") {
+    next
+  }
+  jobname <- glue("gcs_{gsub('.tar.bz2', '', basename(url) )}")
+  cat("\n Processing: ", basename(url), "\n")
+  # pause if there are more than 9,999 slurm jobs submitted
+  check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --ntasks=1",
+      " --nodes=1",
+      " --mem-per-cpu={filesize_mb*3}MB",
+      " --time=3-12:00:00",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " notebooks/shell_scripts/upload_gcs_HMP.sh",
+      " -p {url}",
+      " -f {basename(url)}"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(10)
+}
+```
+
+
+Extract downloads with errors and re-run
+
+```{r}
+
+run_status <- list()
+slurm_out <- glue("{wkdir}/.cluster_runs/gcs_upload_HMP2")
+stderr_paths <- list.files(slurm_out, full.names = TRUE) %>% keep(grepl(".err", .))
+pb <- progress_bar$new(total = length(stderr_paths))
+
+for (url in stderr_paths) {
+  pb$tick()
+  print(url)
+  stderr <- read.table(url, sep = "\t")
+  if (stderr$V1 %>% grepl("Operation completed over 1 objects", .) %>% any()) {
+    run_status[[url]] <- "SUCCESS"
+  } else {
+    run_status[[url]] <- "ERROR"
+  }
+}
+
+cat(
+  "Workflow status:",
+  "\n SUCCESS:",
+  run_status %>% keep(grepl("SUCCESS", .)) %>% length(),
+  "\n ERROR:",
+  run_status %>% keep(grepl("ERROR", .)) %>% length(),
+  "\n"
+)
+
+```
+
+
+Required data for analysis
+1. Sample Biomass prior to mixing and library prep
+2. Cohort 
+3. Sequencing Run
+4. Library Prep Lot
+5. Sequencing Location
+6. Flow Cell
+
+
+Read in sample sequencing metadata, previously extracted from BAM file headers. 
+
+```{r}
+
+
+
+
+
+as.integer(file_exists) == 0
+
+```

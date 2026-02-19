@@ -2,44 +2,91 @@
 # Caltech - Mazmanian Lab
 # Dec 2021
 
-source("src/_load_packages.R")
-base::load("data/Phyloseq_Objects/Phyloseq_all_outliers_removed.RData") #phyloseq_objs
-dat.obj <- refDB_phyloseq_orm[["UHGG"]]$Species
+pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+wgs_wkdir <- paste0(pdmbs_dir, "/workflow/WGS")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
+library(phyloseq)
+library(microbiome)
+library(gt)
+library(gtsummary)
+library(webshot2)
 
-metadat <- meta(dat.obj) %>% 
-  select(study, case_control_other_latest, sex, age_at_baseline)
+figures_dir <- glue("{wkdir}/figures/sample_summary")
+ps <- readRDS(
+  glue(
+    "{wkdir}/data/processed/phyloseq_objects/raw/",
+    "2023-07-14_WGS_RefSeqPlusPF_All_phyloseq.rds"
+  )
+)
+rnaseq_samples <- sample_names(ps)
 
-metadat %>%
+# for (seq_method in c("WGS", "RNASEQ")) {
+sample_metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/2023-07-14_phyloseq-metadata.rds")
+)
+
+sample_metadata %<>% purrr::map(
+  ~ select(.,
+  sample_id, participant_id, study, diagnosis_at_baseline,
+  case_control_other_at_baseline, age_at_baseline,
+  case_control_other_latest,
+  diagnosis_latest,
+  ethnicity, sex, race
+  ))
+# core_meta <- sample_metadata[["WGS"]] %>% select(-sample_id)
+
+
+seq_method <- "RNASEQ"
+sample_metadata[[seq_method]] %>%
+  select(study, case_control_other_latest, sex, age_at_baseline) %>%
   tbl_summary() %>%
-  bold_labels() %>% 
+  bold_labels() %>%
   as_gt() %>%
-  gt::gtsave(filename = "figures/misc/summary-stats-table.png")
-
-
-
-meta(dat.obj) %>% 
+  gt::gtsave(
+    filename = glue(
+      "{figures_dir}/{seq_method}_summary-stats-table.png"
+    )
+  )
+sample_metadata[[seq_method]] %>%
   select(diagnosis_latest, case_control_other_latest) %>%
-  filter(case_control_other_latest == "Case") %>% 
-  tbl_summary(by = case_control_other_latest, 
-              statistic =  all_categorical() ~ "{n} / {N} ({p}%)") %>% 
+  filter(case_control_other_latest == "Case") %>%
+  tbl_summary(by = case_control_other_latest,
+              statistic =  all_categorical() ~ "{n} / {N} ({p}%)") %>%
   as_gt() %>%
-  gt::gtsave(filename = "figures/misc/summary-stats-table_group-status_Case.png")
+  gt::gtsave(
+    filename =
+    glue("{figures_dir}/{seq_method}_group-status_Case.png")
+)
 
-
-meta(dat.obj) %>% 
+sample_metadata[[seq_method]] %>%
   select(diagnosis_latest, case_control_other_latest) %>%
-  filter(case_control_other_latest == "Control") %>% 
-  tbl_summary(by = case_control_other_latest, 
-              statistic =  all_categorical() ~ "{n} / {N} ({p}%)") %>% 
+  filter(case_control_other_latest == "Control") %>%
+  tbl_summary(by = case_control_other_latest,
+              statistic =  all_categorical() ~ "{n} / {N} ({p}%)") %>%
   as_gt() %>%
-  gt::gtsave(filename = "figures/misc/summary-stats-table_group-status_Control.png")
+    gt::gtsave(
+      filename =
+        glue("{figures_dir}/{seq_method}_group-status_Control.png")
+    )
 
 
-meta(dat.obj) %>% 
+sample_metadata[[seq_method]] %>%
   select(diagnosis_latest, case_control_other_latest) %>%
-  filter(case_control_other_latest == "Other") %>% 
-  tbl_summary(by = case_control_other_latest, 
-              statistic =  all_categorical() ~ "{n} / {N} ({p}%)") %>% 
+  filter(case_control_other_latest == "Other") %>%
+  tbl_summary(by = case_control_other_latest,
+              statistic =  all_categorical() ~ "{n} / {N} ({p}%)") %>%
   as_gt() %>%
-  gt::gtsave(filename = "figures/misc/summary-stats-table_group-status_Other.png")
+    gt::gtsave(
+      filename =
+        glue("{figures_dir}/{seq_method}_group-status_Other.png")
+    )
 
+
+# sample_metadata[[seq_method]] %>%
+#   select(diagnosis_latest, case_control_other_latest) %>%
+#   # filter(case_control_other_latest == "Other") %>%
+#   tbl_summary(by = case_control_other_latest,
+#               statistic =  all_categorical() ~ "{n} / {N} ({p}%)") %>%
+#   as_gt()

@@ -1,0 +1,187 @@
+---
+title: "Adaptive Immune Receptor Repertoire in Parkinson's Disease: Repertoire Distance Analysis"
+editor: source
+author: "Joe Boktor"
+date: '2025-07-10'
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+---
+
+Environment setup
+
+```{r setup, message=FALSE, warning=FALSE}
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+
+# Additional libraries
+library(data.table)
+
+# Plotting libraries
+library(ggsci)
+library(ggrepel)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+library(gt)
+library(gtsummary)
+library(immunarch)
+library(nlme)
+
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+imm_plots_dir <- glue("{wkdir}/figures/AIRR/immunarch")
+```
+
+Loading metadata and TCRB data
+
+```{r, eval=FALSE}
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-17.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  glimpse()
+
+key_meta_df <- metadata %>% 
+  dplyr::select(
+    sample_id, participant_id, case_control_other_latest, 
+    age_at_baseline, sex, abis_t_cell, ethnicity, race, visit_month, study,
+    aligned_reads, est_tcell_reads_abis, DRB1_grouped, DRB1_risk
+  ) %>% 
+  glimpse()
+
+trust4_reports_tcrb <- readRDS(
+  glue("{wkdir}/data/interim/airr/trust4_reports_tcrb_clean_df_2025-07-08.rds")
+) %>% 
+  glimpse()
+```
+
+
+
+### Calculating Immunarch verlap metrics in parallel (Public Overlap, Jaccard, Tversky, Cosine, Morisita)
+
+```{r}
+# Function to calculate overlap for a single method
+calculate_overlap <- function(method, immdata_path, wkdir, metrics_dir) {
+    require(immunarch)
+    require(glue)
+
+    # Load the immdata object
+    immdata <- readRDS(immdata_path)
+
+    message(glue("Calculating {method} overlap metrics"))
+    metric_data <- repOverlap(
+        immdata$data,
+        .method = method,
+        .downsample = TRUE,
+        .verbose = TRUE
+    )
+    saveRDS(
+        metric_data,
+        glue("{metrics_dir}/rep-overlap-{method}_{Sys.Date()}.rds"
+        )
+    )
+}
+
+# Create parameter list for each method
+overlap_methods = c(
+#   "jaccard", "public", "overlap", "tversky", 
+#     "cosine", 
+    "morisita"
+)
+
+# Setup batchtools registry
+cluster_run <- glue("{get_time()}_Repertoire_Overlap_2025-07-08")
+message("\n\nRUNNING: ", cluster_run, "\n")
+breg <- makeRegistry(
+    file.dir = glue(
+        "{wkdir}/.cluster_runs/",
+        cluster_run
+    ),
+    seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+    template = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+    scheduler.latency = 0.1,
+    fs.latency = 1
+)
+
+# Create parameter list for each method
+immdata_path <- glue(
+    "{wkdir}/data/interim/airr/immunarch/",
+    "immunarch-obj_TCRB_2025-07-08.rds")
+
+batchtools_params <- data.frame(method = overlap_methods) %>% 
+    mutate(
+        immdata_path = immdata_path,
+        wkdir = wkdir,
+        metrics_dir = metrics_dir
+    )
+
+# Submit jobs
+jobs <- batchMap(
+    fun = calculate_overlap,
+    args = batchtools_params,
+    reg = breg
+)
+
+submitJobs(jobs,
+    resources = list(
+        walltime = "7-00:00:00",
+        memory = "200GB",
+        ncpus = 32,
+        max.concurrent.jobs = 9999
+    )
+)
+
+```
+
+# Calculating IRTransport Distance
+
+This approach is based on the IRTransport package which utilizes optimal transport of ..
+
+
+First, split each sample_id into a properly formmatted tsv file for IRTransport input
+
+```{r}
+irt_input_dir <- glue("{wkdir}/data/interim/irtransport/irt_input")
+irt_output_dir <- glue("{wkdir}/data/interim/irtransport/irt_output")
+dir.create(irt_input_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(irt_output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# trust4_reports_tcrb %>% glimpse()
+# trust4_reports_tcrb  %>% distinct() %>% glimpse()
+
+fmt_for_irt <- trust4_reports_tcrb %>% 
+    dplyr::select(sample_id, participant_id, cdr3b = CDR3aa, vb = v_gene, j_gene) %>% 
+    distinct() %>% 
+    glimpse()
+
+
+# future::plan(future::multisession, workers = 30)
+unique(trust4_reports_tcrb$sample_id) %>% 
+    discard(~file.exists(glue("{irt_input_dir}/{.}.tsv"))) %>% 
+    purrr::walk(
+        .f = function(x) {
+            df <- fmt_for_irt %>% 
+                dplyr::filter(sample_id == x)
+            write_tsv(df, file = glue("{irt_input_dir}/{x}.tsv"))
+        }
+    )
+
+# fmt_for_irt
+
+
+
+```

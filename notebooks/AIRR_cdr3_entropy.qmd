@@ -1,0 +1,396 @@
+---
+title: "Quantifying CDR3β sequence structure via Entropy and Normalized Mutual Information"
+editor: source
+author: "Joe Boktor"
+date: '2025-05-04'
+eval: false
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    fig-height: 8
+    fig-width: 14
+---
+
+This notebook will be following analysis defined in (Ishigaki et al., 2022) and implemented [here](https://github.com/immunogenomics/cdr3-QTL).
+
+## Analysis Setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor) 
+library(glue)
+library(furrr)
+library(tictoc)
+library(progress)
+library(entropy)
+library(data.table)
+library(seqinr)
+library(progress)
+library(nlme)
+library(broom.mixed)
+# plotting
+library(ggsci)
+library(scico)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+imm_plots_dir <- glue("{wkdir}/figures/AIRR/immunarch")
+entropy_dir <- glue("{wkdir}/data/interim/cdr3_entropy")
+entropy_plots_dir <- glue("{wkdir}/figures/AIRR/cdr3_entropy")
+# dir.create(entropy_dir, showWarnings = FALSE, recursive = TRUE)
+# dir.create(entropy_plots_dir, showWarnings = FALSE, recursive = TRUE)
+
+future::plan(multisession, workers = 8)
+```
+
+
+Utility functions
+
+```{r}
+# Function to align CDR3 AA sequences to IMGT, from https://github.com/immunogenomics/cdr3-QTL
+all_imgt_pos <- c(
+    "P104","P105","P106","P107","P108","P109","P110","P111",
+    "P111.1","P112.2","P112.1",
+    "P112","P113","P114","P115","P116","P117","P118")
+align_imgt <- function(CDR3){
+    AA <- unlist(strsplit(CDR3, ""));
+    N_AA_fow <- nchar(CDR3) %/% 2 + nchar(CDR3) %% 2;
+    N_AA_na <- 18 - nchar(CDR3);
+    AAmod <- c(
+        AA[1:(N_AA_fow)],
+        rep("NA",N_AA_na),
+        AA[(N_AA_fow + 1):nchar(CDR3)]
+    );
+    names(AAmod) <- all_imgt_pos
+    return(t(AAmod))
+}
+```
+
+
+Loading metadata
+```{r}
+# full_meta_df <- readRDS(
+#     glue("{wkdir}/data/interim/airr/full_meta_df_2025-06-09.rds")) %>% 
+#     glimpse()
+
+# mds_tests <- full_meta_df %>%
+#     dplyr::select(matches("mds_updrs.*_summary_score")) %>%
+#     colnames()
+
+# key_meta_df <- full_meta_df %>% 
+#     dplyr::select(
+#         sample_id, case_control_other_latest,
+#         ethnicity, race,
+#         visit_month, age_at_baseline, sex, study, participant_id,
+#         raw_total_reads, raw_total_reads_binned, DRB1_grouped, DRB1_risk,
+#         all_of(mds_tests),
+#         contains("x_cell"), contains("epic")
+#     ) %>% 
+#     glimpse()
+
+full_meta_df <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  glimpse()
+
+key_meta_df <- full_meta_df %>% 
+    dplyr::select(
+        sample_id, participant_id, case_control_other_latest, ethnicity, race,
+        visit_month, age_at_baseline, sex, study,
+        est_tcell_reads_abis, aligned_reads, pd_hla_risk_score, pd_hla_risk_score_z
+    ) %>%
+    glimpse()
+```
+
+Loading repertoire data
+
+```{r}
+trust4_reports <- fread(
+    glue("{wkdir}/data/interim/airr/2025-07-05_TRUST4-reports-all-10579.csv"),
+    header = TRUE) %>%
+    dplyr::select(-V1) %>%
+    glimpse()
+
+trust4_reports_tcrb <- trust4_reports %>%
+    filter(C == "TRBC") %>%
+    filter(V != "." & J != ".") %>%
+    filter(CDR3aa != "out_of_frame") %>%
+    filter(!grepl("_", CDR3aa)) %>%
+    filter(!grepl("\\?", CDR3aa)) %>%
+    mutate(CDR3aa_len = nchar(CDR3aa)) %>%
+    glimpse()
+
+trust4_reports_tcrb %>% glimpse()
+trust4_reports_tcrb$cid_full_length %>% table()
+
+# compiled repertoires by participant_id
+trust4_reports_tcrb_pid <- trust4_reports_tcrb %>%
+    dplyr::rename(count = "#count" ) %>%
+    left_join(key_meta_df %>% dplyr::select(participant_id, sample_id)) %>%
+    select(-c(frequency, cid, cid_full_length, CDR3aa_len, sample_id)) %>%
+    group_by(CDR3nt, CDR3aa, V, D, J, C, participant_id) %>%
+    dplyr::summarise(
+        count = sum(count)
+    ) %>%
+    ungroup() %>%
+    mutate(CDR3aa_len = nchar(CDR3aa)) %>%
+    filter(CDR3aa_len <= 27) %>% # for quality filtering
+    glimpse()
+
+```
+
+Grouping receptors across time-points reduces the data table size from 5,462,380 to 5,301,053 rows. Filtering out CDR3aa_len > 27 further reduces the size to 5,300,918 rows
+
+
+```{r}
+trust4_reports_tcrb_pid$CDR3aa_len %>% summary()
+
+p_cdr3_len <- trust4_reports_tcrb_pid %>%
+    filter(CDR3aa_len < 27) %>%
+    ggplot(aes(x = CDR3aa_len)) +
+    geom_histogram(binwidth = 1, color="black", fill="white") +
+    geom_vline(aes(xintercept = mean(CDR3aa_len)),
+        color = "blue", linetype = "dashed", size = 1
+    ) +
+    theme_bw() +
+    labs(x = "CDR3aa length", y = "Count")
+
+ggsave(
+    glue("{entropy_plots_dir}/cdr3_len_dist.png"),
+    p_cdr3_len,
+    width = 4,
+    height = 3
+)
+
+```
+
+
+![CDR3 sequence length distribution](../figures/AIRR/cdr3_entropy/cdr3_len_dist.png){width=50%}
+
+
+## Calculating Normalized Mutual Information
+
+Here we calculate the normalized mutual information (NMI) between two positions in the cdr3 sequence, for all possible positions. Each sequence length is (e.g. 15 aa.) is calculated at one at a time. We calculate normalized mutual information using the following formula:
+
+$$
+\begin{aligned}
+\text{MI} &= \sum_{i,j} P_{ij} \log \left( \frac{P_{ij}}{P_{i\cdot} P_{\cdot j}} \right) \\\\
+H_x &= - \sum_i P_{i\cdot} \log P_{i\cdot} \\\\
+H_y &= - \sum_j P_{\cdot j} \log P_{\cdot j} \\\\
+\text{NMI} &= \frac{2 \cdot \text{MI}}{H_x + H_y}
+\end{aligned}
+$$
+
+
+
+```{r}
+# takes in a data frame with two columns named X and Y
+# returns a data frame with the mutual information, Hx, Hy, and NMI
+quantify_nmi <- function(df) {
+    # make frequency table
+    freq <- table(df[, 1], df[, 2])
+    MI <- entropy::mi.empirical(freq, unit = c("log"))
+    Hx <- entropy::entropy.empirical(colSums(freq))
+    Hy <- entropy::entropy.empirical(rowSums(freq))
+    NMI <- 2 * MI / (Hx + Hy) # normalized mutual entropy
+    dump <- data.frame(MI, Hx, Hy, NMI)
+    return(dump)
+}
+
+trust4_reports_tcrb_pid %>% glimpse()
+
+# includes V, J, and CDR3aa
+for (cdr3_len in 12:18) {
+    print(paste0("Calculating for cdr3 length: ", cdr3_len))
+
+    # prepare matrix
+    filtered_df <- trust4_reports_tcrb_pid %>%
+        filter(CDR3aa_len == cdr3_len)
+    vjaa_df <- filtered_df %>%
+        dplyr::select(V, J, CDR3aa)
+    mat <- filtered_df %>%
+        pull(CDR3aa) %>%
+        as.character() %>%
+        sapply(., function(x) {
+            x <- as.character(x)
+            x <- strsplit(x, "")
+            x <- unlist(x)
+        }) %>% 
+        t() %>%
+        as.data.frame() %>%
+        rownames_to_column(var = "CDR3aa") %>%
+        left_join(vjaa_df, by = "CDR3aa") %>%
+        select(-CDR3aa) %>%
+        glimpse()
+    
+    # name columns with IMGT positions - by default it fills colnames with IMGT positions - if shorter than 18 it will fill with NA
+    imgt_vec <- align_imgt(filtered_df$CDR3aa[1])
+    imgt_pos <- imgt_vec[,!imgt_vec[1,]=="NA"] %>% names() # drop NA columns to get IMGT positions
+    default_names <- colnames(mat) %>% purrr::discard(. %in% c("V", "J"))
+    colname_map <- stats::setNames(default_names, imgt_pos)
+    mat %<>% dplyr::rename(!!!colname_map) %>%
+        glimpse()
+
+    res <- expand.grid(colnames(mat), colnames(mat)) %>%
+        dplyr::rename(i = Var1, k = Var2) %>%
+        mutate(res = furrr::future_map2(i, k, ~ quantify_nmi(mat[, c(.x, .y)]))) %>%
+        unnest(res) %>%
+        glimpse()
+
+    saveRDS(res, glue("{entropy_dir}/cdr3_entropy_res_k{cdr3_len}_nmi_{Sys.Date()}.rds"))
+}
+
+
+# # Slow loop over all positions - upper vectorized & parallelized version is much faster
+# # mutual information
+# res <- data.frame()
+# for (i in 1:15) {
+#     for (k in 1:15) {
+#         print(paste0(i, ":", k))
+#         d1 <- mat[, c(i, k)]
+#         d1 <- as.data.frame(d1)
+#         colnames(d1) <- c("X", "Y")
+#         d1 <- d1[d1$X != "NA" & d1$Y != "NA", ] # remove NA
+
+#         # make frequency table
+#         freq <- table(d1$X, d1$Y)
+
+#         MI <- entropy::mi.empirical(freq, unit = c("log"))
+#         Hx <- entropy::entropy.empirical(colSums(freq))
+#         Hy <- entropy::entropy.empirical(rowSums(freq))
+#         NMI <- 2 * MI / (Hx + Hy) # normalized mutual entropy
+
+#         dump <- data.frame(i, k, MI, Hx, Hy, NMI)
+#         res <- rbind(res, dump)
+#     }
+# }
+
+# res %>% glimpse()
+# saveRDS(res, glue("{entropy_dir}/cdr3_entropy_res_k15_nmi_{Sys.Date()}.rds"))
+
+```
+
+
+
+Visualizing normalized mutual information
+
+```{r}
+mi_res <- list.files(entropy_dir, full.names = TRUE, pattern = "2025-08-14") %>%
+    purrr::set_names(basename(.) %>% str_before_nth("_", -2)) %>%
+    purrr::map(readRDS) %>%
+    glimpse()
+names(mi_res)
+
+# list of antigen contact positions
+antigen_contact_pos <- c(107:116, 111.1, 112.1, 112.2)  %>% paste0("P", .)
+
+# Create pretty axis labels with red/bold for antigen contact positions
+make_axis_labels <- function(levels, highlight_vec) {
+  sapply(levels, function(lvl) {
+    if (lvl %in% highlight_vec) {
+      # Red and bold
+    #   sprintf("<b style='color:#d62728;'>%s</b>", lvl)
+      sprintf("<b style='color:#9f9fff;'>%s</b>", lvl)
+    } else {
+      lvl
+    }
+  })
+}
+
+
+for (cdr3_len in 12:18) {
+    plot_df <- mi_res[[glue("cdr3_entropy_res_k{cdr3_len}")]] %>%
+        glimpse()
+
+    all_levels <- levels(plot_df$i)
+    cdr3_pos_rank <- c(
+        "V gene", all_levels[str_detect(all_levels, "^P")], "J gene"
+    )
+    axis_labels <- make_axis_labels(cdr3_pos_rank, antigen_contact_pos)
+    names(axis_labels) <- cdr3_pos_rank
+
+    p_nmi <- plot_df %>%
+        mutate(i = case_when(
+            i == "V" ~ "V gene",
+            i == "J" ~ "J gene",
+            TRUE ~ i
+        )) %>%
+        mutate(k = case_when(
+            k == "V" ~ "V gene",
+            k == "J" ~ "J gene",
+            TRUE ~ k
+        )) %>%
+        mutate(i = factor(i, levels = cdr3_pos_rank)) %>%
+        mutate(k = factor(k, levels = cdr3_pos_rank)) %>%
+        ggplot(aes(x = i, y = k, fill = NMI)) +
+        geom_tile() +
+        scale_fill_scico(palette = "davos", direction = -1) +
+        scale_x_discrete(labels = axis_labels) +
+        scale_y_discrete(labels = axis_labels) +
+        coord_fixed() +
+        labs(x = NULL, y = NULL, fill = "Normalized\nMutual\nInformation", title = paste0("CDR3aa Length = ", cdr3_len)) +
+        theme_bw() +
+        theme(
+            axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1, size = 10),
+            axis.text.y = ggtext::element_markdown(size = 10),
+            panel.grid.minor = element_line(color = "gray90"),
+            # panel.grid.minor = element_blank(),
+            plot.title = element_text(hjust = 0.5)
+        )
+
+    ggsave(
+        glue("{entropy_plots_dir}/cdr3_entropy_heatmap_k{cdr3_len}_nmi.png"),
+        p_nmi,
+        width = 6,
+        height = 6
+    )
+}
+
+```
+
+::: {layout-ncol=3}
+![](../figures/AIRR/cdr3_entropy/cdr3_entropy_heatmap_k12_nmi.png){width=12, height=12}
+
+![](../figures/AIRR/cdr3_entropy/cdr3_entropy_heatmap_k13_nmi.png){width=12, height=12}
+
+![](../figures/AIRR/cdr3_entropy/cdr3_entropy_heatmap_k14_nmi.png){width=12, height=12}
+
+![](../figures/AIRR/cdr3_entropy/cdr3_entropy_heatmap_k15_nmi.png){width=12, height=12}
+
+![](../figures/AIRR/cdr3_entropy/cdr3_entropy_heatmap_k16_nmi.png){width=12, height=12}
+
+![](../figures/AIRR/cdr3_entropy/cdr3_entropy_heatmap_k17_nmi.png){width=12, height=12}
+
+![](../figures/AIRR/cdr3_entropy/cdr3_entropy_heatmap_k18_nmi.png){width=12, height=12}
+:::
+
+
+## **Conclusions:**
+
+- We are able to reproduce the results from (Ishigaki et al., 2022).
+
+- We calculated the normalized mutual information (NMI) between two positions in the cdr3 sequence, for all possible positions. Each sequence length is (e.g. 15 aa.) is calculated at one at a time.
+
+- We see that the NMI is generally lower and entropy is higher for the antigen contact positions. 
+
+- Positions (109-112) show very high entropy. These positions are generated via random recombination in the thymus.
+
+- Flanking regions (104-108 & 113-118)  are almost completely defined by germline V or J genes, respectively, and thus share pairwise structure with V and J gene identity.
+

@@ -2,7 +2,10 @@
 # Caltech - Mazmanian Lab
 
 source("src/_plot-functions.R")
-base::load("data/Analyses/community_composition/PERMANOVA_UHGG_Genus.RData")
+base::load(
+  glue("{wkdir}/data/Analyses/community_composition/PERMANOVA_UHGG_Genus.RData")
+)
+
 # permanova_df <- species_permanova_df # Delete me later
 refDB <- "UHGG"
 level <- "Genus"

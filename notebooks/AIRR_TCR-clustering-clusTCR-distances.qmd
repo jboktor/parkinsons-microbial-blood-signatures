@@ -1,0 +1,891 @@
+---
+title: "ClusTCR Distances"
+editor: source
+author: "Joe Boktor"
+date: '2025-09-08'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+# ClusTCR Statistics
+
+Environment setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(seqinr)
+library(progress)
+library(immunarch)
+library(nlme)
+library(broom)
+library(broom.mixed)
+library(parallelDist)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+library(scico)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+source(paste0(src_dir, "/R_scripts/_airr_analyze-permanova.R"))
+
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+gliph2_plots_dir <- glue("{wkdir}/figures/AIRR/gliph2/")
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+arcasHLA_interim <- glue("{wkdir}/data/interim/airr/arcasHLA")
+gliph2_input_dir <- glue("{wkdir}/data/input/gliph2/param_files")
+gliph2_res_dir <- glue("{wkdir}/data/interim/airr/gliph2/processing")
+clustcr_dir <- glue("{wkdir}/data/interim/clusTCR")
+clustcr_figs <- glue("{wkdir}/figures/clusTCR")
+tcr_cdr3_riskscore_complied <- 
+    glue("{wkdir}/data/interim/cdr3_qtl/scoring_cdr3-risk-scores_complied")
+cohort_subset_dir <- glue("{clustcr_dir}/results/cohort_subsets")
+
+```
+
+
+Loading in compiled clusTCR results dataframe
+```{r}
+clustcr_results_df <- readRDS(
+  glue("{clustcr_dir}/results/compiled_clustcr_results_df_2025-08-24.rds"))
+clustcr_results_df %>% glimpse()
+
+clustcr_results_df_filtered <- clustcr_results_df %>% 
+  filter(unique_donors_per_clust >= 10) %>% 
+  filter(motif_length >= 9) %>% 
+  glimpse()
+clustcr_results_df_filtered %>% glimpse()
+clustcr_results_df_filtered$cluster_id %>% unique() %>% length()
+```
+
+## Calculating euclidean distance between samples based on cluster membership matrices
+
+```{r}
+clust_mat_weighted <- readRDS(
+  glue("{clustcr_dir}/results/clust_mat_weighted_2025-08-15.rds")) %>% 
+  tibble::column_to_rownames(var = "sample_id") %>% 
+  as.matrix()
+clust_mat_binary <- readRDS(
+  glue("{clustcr_dir}/results/clust_mat_binary_2025-08-15.rds")) %>% 
+  tibble::column_to_rownames(var = "sample_id") %>% 
+  as.matrix()
+
+dim(clust_mat_weighted)
+dim(clust_mat_binary)
+
+colnames(clust_mat_weighted) %>% head()
+rownames(clust_mat_weighted) %>% head()
+colnames(clust_mat_binary) %>% head()
+
+# Calculating PCA of cluster membership matrices
+variance_threshold <- 0.85  # Retain PCs that explain 85% of variance
+# For weighted data
+pca_w <- prcomp(clust_mat_weighted)
+cumulative_var_weighted <- cumsum(pca_w$sdev^2 / sum(pca_w$sdev^2))
+n_pcs_weighted <- which(cumulative_var_weighted >= variance_threshold)[1]
+
+# For binary data
+pca_b <- prcomp(clust_mat_binary)
+cumulative_var_binary <- cumsum(pca_b$sdev^2 / sum(pca_b$sdev^2))
+n_pcs_binary <- which(cumulative_var_binary >= variance_threshold)[1]
+
+cat("Final number of PCs - Weighted:", n_pcs_weighted, "\n")
+cat("Final number of PCs - Binary:", n_pcs_binary, "\n")
+
+# Extract the selected principal components
+pca_scores_weighted <- pca_w$x[, 1:n_pcs_weighted, drop = FALSE]
+pca_scores_binary <- pca_b$x[, 1:n_pcs_binary, drop = FALSE]
+
+# Euclidean distance matrix ----
+clustcr_mat_w_eucdist <- parallelDist::parDist(
+  pca_scores_weighted, method = "euclidean", threads = 16)
+saveRDS(clustcr_mat_w_eucdist, 
+  glue("{clustcr_dir}/results/clustcr_mat_w_eucdist_pca_{Sys.Date()}.rds"))
+
+clustcr_mat_b_eucdist <- parallelDist::parDist(
+  pca_scores_binary, method = "euclidean", threads = 16)
+saveRDS(clustcr_mat_b_eucdist, 
+  glue("{clustcr_dir}/results/clustcr_mat_b_eucdist_pca_{Sys.Date()}.rds"))
+
+# #--------------------------------
+# # Euclidean distance matrix ----
+# clustcr_mat_w_eucdist <- parallelDist::parDist(
+#   clust_mat_weighted, method = "euclidean", threads = 16)
+# saveRDS(clustcr_mat_w_eucdist, 
+#   glue("{clustcr_dir}/results/clustcr_mat_w_eucdist_{Sys.Date()}.rds"))
+
+# clustcr_mat_b_eucdist <- parallelDist::parDist(
+#   clust_mat_binary, method = "euclidean", threads = 16)
+# saveRDS(clustcr_mat_b_eucdist, 
+#   glue("{clustcr_dir}/results/clustcr_mat_b_eucdist_{Sys.Date()}.rds"))
+
+```
+
+Visualizing distance matrices
+
+```{r}
+clustcr_mat_w_eucdist <- readRDS(
+  glue("{clustcr_dir}/results/clustcr_mat_w_eucdist_pca_2025-08-15.rds"))
+
+clustcr_mat_b_eucdist <- readRDS(
+  glue("{clustcr_dir}/results/clustcr_mat_b_eucdist_pca_2025-08-15.rds"))
+
+w_sid_order <- seriate_dist_obj(clustcr_mat_w_eucdist, seriate_method = "OLO")
+b_sid_order <- seriate_dist_obj(clustcr_mat_b_eucdist, seriate_method = "OLO")
+
+# Create long format data frame with seriated order
+dist_df_seriated <- clustcr_mat_w_eucdist %>%
+  as.matrix() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "row_id") %>% 
+  pivot_longer(
+    cols = -row_id,
+    names_to = "col_id",
+    values_to = "distance"
+  ) %>%
+  mutate(
+    row_id = factor(row_id, levels = w_sid_order),
+    col_id = factor(col_id, levels = w_sid_order)
+  ) %>% 
+  arrange(row_id, col_id) %>% 
+  filter(row_id %nin% low_vol_samples$sample_id) %>% 
+  filter(col_id %nin% low_vol_samples$sample_id) %>% 
+  glimpse()
+
+# Create the seriated heatmap
+pheat_distmat_w <- dist_df_seriated %>% 
+  ggplot(aes(x = col_id, y = row_id, fill = distance)) +
+  geom_tile() +
+  scale_fill_scico(
+    palette = "devon",
+    direction = -1
+  ) +
+  labs(
+    title = "Sample Distance Matrix Heatmap",
+    subtitle = "Euclidean distances between samples (OLO seriation)",
+    x = "Samples",
+    y = "Samples",
+    fill = "Distance"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold"),
+    panel.grid = element_blank()
+  ) +
+  coord_fixed()
+
+tic()
+ggsave(
+  glue("{clustcr_figs}/clusTCR_EucDist_weighted_heatmap_OLO_{Sys.Date()}.png"),
+  pheat_distmat_w,
+  width = 10,
+  height = 10
+)
+toc()
+
+# Create long format data frame with seriated order
+dist_df_seriated_b <- clustcr_mat_b_eucdist %>%
+  as.matrix() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "row_id") %>% 
+  pivot_longer(
+    cols = -row_id,
+    names_to = "col_id",
+    values_to = "distance"
+  ) %>%
+  mutate(
+    row_id = factor(row_id, levels = b_sid_order),
+    col_id = factor(col_id, levels = b_sid_order)
+  ) %>% 
+  filter(row_id %nin% low_vol_samples$sample_id) %>% 
+  filter(col_id %nin% low_vol_samples$sample_id) %>% 
+  glimpse()
+
+# Create the seriated heatmap
+pheat_distmat_b <- dist_df_seriated_b %>% 
+  ggplot(aes(x = col_id, y = row_id, fill = distance)) +
+  geom_tile() +
+  scale_fill_scico(
+    palette = "devon",
+    direction = -1
+  ) +
+  labs(
+    title = "Sample Distance Matrix Heatmap",
+    subtitle = "Euclidean distances between samples (OLO seriation)",
+    x = "Samples",
+    y = "Samples",
+    fill = "Distance"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold"),
+    panel.grid = element_blank()
+  ) +
+  coord_fixed()
+
+tic()
+ggsave(
+  glue("{clustcr_figs}/clusTCR_EucDist_binary_heatmap_OLO_{Sys.Date()}.png"),
+  pheat_distmat_b,
+  width = 10,
+  height = 10
+)
+toc()
+
+```
+
+
+
+### Generating cluster membership matrices - V2 on trimmed clusters (top/bottom 10% of Selection scores & top/bottom 10% of CDR3 risk scores)
+
+```{r}
+# taking sig clusters from chi2 test
+chi2_results_df <- readRDS(
+  glue("{clustcr_dir}/results/chi2_results/chi2_results_df_2025-09-08.rds")) %>% 
+  glimpse()
+sig_cids <- chi2_results_df %>% 
+  filter(chi2_p_value <= 0.05) %>% 
+  pull(cluster_id) %>% 
+  unique()
+
+clustcr_filter_summarized <- clustcr_results_df %>% 
+  filter(unique_donors_per_clust >= 10) %>% 
+  filter(motif_length >= 9) %>% 
+  dplyr::group_by(sample_id, cluster_id) %>%
+  dplyr::summarize(count = sum(count)) %>% 
+  glimpse()
+
+# filter names of remaining cluster_sscore
+remaining_cids <- clustcr_filter_summarized$cluster_id %>% unique()
+```
+
+
+```{r}
+cluster_sscore <- clustcr_results_df %>% 
+  dplyr::select(cluster_id, Q_data, risk_score_p2_glrm_strat) %>% 
+  group_by(cluster_id) %>% 
+  dplyr::summarize(
+    avg_risk_score = mean(risk_score_p2_glrm_strat, na.rm = TRUE),
+    avg_selection_score = mean(log10(Q_data), na.rm = TRUE)) %>% 
+  glimpse()
+
+cids_of_interest <- cluster_sscore %>% 
+  filter(cluster_id %in% remaining_cids) %>%
+  mutate(quantile_bin_ss = ntile(avg_selection_score, 10)) %>%
+  mutate(quantile_bin_rs = ntile(avg_risk_score, 10)) %>%
+  filter(quantile_bin_ss == 1 | quantile_bin_ss == 10 | 
+    quantile_bin_rs == 1 | quantile_bin_rs == 10 | 
+    (cluster_id %in% sig_cids)) %>%
+  pull(cluster_id) %>% 
+  unique()
+
+sid_count_sum <- clustcr_filter_summarized %>%
+  filter(cluster_id %in% cids_of_interest) %>% 
+  dplyr::group_by(sample_id) %>% 
+  dplyr::summarize(sid_total_count = sum(count)) %>% 
+  glimpse()
+
+clust_mat_weighted <- clustcr_filter_summarized %>% 
+  filter(cluster_id %in% cids_of_interest) %>% 
+  left_join(sid_count_sum, by = "sample_id") %>% 
+  mutate(norm_count = count / sid_total_count) %>% 
+  dplyr::select(sample_id, cluster_id, norm_count) %>% 
+  pivot_wider(
+    id_cols = sample_id,
+    names_from = cluster_id,
+    values_from = norm_count,
+    values_fill = 0
+  )
+
+clust_mat_binary <- clustcr_filter_summarized %>% 
+  filter(cluster_id %in% cids_of_interest) %>% 
+  mutate(present = 1) %>% 
+  dplyr::select(sample_id, cluster_id, present) %>% 
+  pivot_wider(
+    id_cols = sample_id,
+    names_from = cluster_id,
+    values_from = present,
+    values_fill = 0
+  )
+
+dim(clust_mat_weighted)
+dim(clust_mat_binary)
+
+# Saving data filtered for extreme Selection Scores or CDR3 risk scores
+saveRDS(
+  clust_mat_weighted, 
+  glue("{clustcr_dir}/results/clust_mat_weighted_SSxRS_{Sys.Date()}.rds")
+)
+saveRDS(
+  clust_mat_binary, 
+  glue("{clustcr_dir}/results/clust_mat_binary_SSxRS_{Sys.Date()}.rds")
+)
+
+```
+
+```{r}
+# latest version is actually 2025-08-26
+clust_mat_weighted <- readRDS(
+  glue("{clustcr_dir}/results/clust_mat_weighted_SSxRS_2025-08-17.rds")) %>% 
+  tibble::column_to_rownames(var = "sample_id") %>% 
+  as.matrix()
+clust_mat_binary <- readRDS(
+  glue("{clustcr_dir}/results/clust_mat_binary_SSxRS_2025-08-17.rds")) %>% 
+  tibble::column_to_rownames(var = "sample_id") %>% 
+  as.matrix()
+
+dim(clust_mat_weighted)
+dim(clust_mat_binary)
+
+# Calculating PCA of cluster membership matrices
+variance_threshold <- 0.85  # Retain PCs that explain 85% of variance
+# For weighted data
+pca_w <- prcomp(clust_mat_weighted)
+cumulative_var_weighted <- cumsum(pca_w$sdev^2 / sum(pca_w$sdev^2))
+n_pcs_weighted <- which(cumulative_var_weighted >= variance_threshold)[1]
+
+# For binary data
+pca_b <- prcomp(clust_mat_binary)
+cumulative_var_binary <- cumsum(pca_b$sdev^2 / sum(pca_b$sdev^2))
+n_pcs_binary <- which(cumulative_var_binary >= variance_threshold)[1]
+
+cat("Final number of PCs - Weighted:", n_pcs_weighted, "\n")
+cat("Final number of PCs - Binary:", n_pcs_binary, "\n")
+
+# Extract the selected principal components
+pca_scores_weighted <- pca_w$x[, 1:n_pcs_weighted, drop = FALSE]
+pca_scores_binary <- pca_b$x[, 1:n_pcs_binary, drop = FALSE]
+
+# Euclidean distance matrix ----
+clustcr_mat_w_eucdist <- parallelDist::parDist(
+  pca_scores_weighted, method = "euclidean", threads = 16)
+saveRDS(clustcr_mat_w_eucdist, 
+  glue("{clustcr_dir}/results/clustcr_mat_w_eucdist_pca_SSxRS_{Sys.Date()}.rds"))
+
+clustcr_mat_b_eucdist <- parallelDist::parDist(
+  pca_scores_binary, method = "euclidean", threads = 16)
+saveRDS(clustcr_mat_b_eucdist, 
+  glue("{clustcr_dir}/results/clustcr_mat_b_eucdist_pca_SSxRS_{Sys.Date()}.rds"))
+
+saveRDS(
+  pca_scores_weighted,
+  glue("{clustcr_dir}/results/pca_scores_weighted_SSxRS_{Sys.Date()}.rds")
+)
+saveRDS(
+  pca_scores_binary,
+  glue("{clustcr_dir}/results/pca_scores_binary_SSxRS_{Sys.Date()}.rds")
+)
+
+```
+
+
+### Generating cluster membership matrices - V3 only PD altered clusters
+
+```{r}
+sid_count_sum <- clustcr_filter_summarized %>%
+  # filter(cluster_id %in% sig_cids) %>% 
+  dplyr::group_by(sample_id) %>% 
+  dplyr::summarize(sid_total_count = sum(count)) %>% 
+  glimpse()
+
+clust_mat_weighted <- clustcr_filter_summarized %>% 
+  filter(cluster_id %in% sig_cids) %>% 
+  left_join(sid_count_sum, by = "sample_id") %>% 
+  mutate(norm_count = count / sid_total_count) %>% 
+  dplyr::select(sample_id, cluster_id, norm_count) %>% 
+  pivot_wider(
+    id_cols = sample_id,
+    names_from = cluster_id,
+    values_from = norm_count,
+    values_fill = 0
+  )
+
+clust_mat_binary <- clustcr_filter_summarized %>% 
+  filter(cluster_id %in% sig_cids) %>% 
+  mutate(present = 1) %>% 
+  dplyr::select(sample_id, cluster_id, present) %>% 
+  pivot_wider(
+    id_cols = sample_id,
+    names_from = cluster_id,
+    values_from = present,
+    values_fill = 0
+  )
+dim(clust_mat_weighted)
+dim(clust_mat_binary)
+
+# Saving data filtered for extreme Selection Scores or CDR3 risk scores
+saveRDS(
+  clust_mat_weighted, 
+  glue("{clustcr_dir}/results/clust_mat_weighted_Chi2SigOnly_{Sys.Date()}.rds")
+)
+saveRDS(
+  clust_mat_binary, 
+  glue("{clustcr_dir}/results/clust_mat_binary_Chi2SigOnly_{Sys.Date()}.rds")
+)
+
+```
+
+
+```{r}
+clust_mat_weighted <- readRDS(
+  glue("{clustcr_dir}/results/clust_mat_weighted_Chi2SigOnly_2025-08-19.rds")) %>% 
+  tibble::column_to_rownames(var = "sample_id") %>% 
+  as.matrix()
+clust_mat_binary <- readRDS(
+  glue("{clustcr_dir}/results/clust_mat_binary_Chi2SigOnly_2025-08-19.rds")) %>% 
+  tibble::column_to_rownames(var = "sample_id") %>% 
+  as.matrix()
+
+dim(clust_mat_weighted)
+dim(clust_mat_binary)
+
+# Calculating PCA of cluster membership matrices
+variance_threshold <- 0.85  # Retain PCs that explain 85% of variance
+# For weighted data
+pca_w <- prcomp(clust_mat_weighted)
+cumulative_var_weighted <- cumsum(pca_w$sdev^2 / sum(pca_w$sdev^2))
+n_pcs_weighted <- which(cumulative_var_weighted >= variance_threshold)[1]
+
+# For binary data
+pca_b <- prcomp(clust_mat_binary)
+cumulative_var_binary <- cumsum(pca_b$sdev^2 / sum(pca_b$sdev^2))
+n_pcs_binary <- which(cumulative_var_binary >= variance_threshold)[1]
+
+cat("Final number of PCs - Weighted:", n_pcs_weighted, "\n")
+cat("Final number of PCs - Binary:", n_pcs_binary, "\n")
+
+# Extract the selected principal components
+pca_scores_weighted <- pca_w$x[, 1:n_pcs_weighted, drop = FALSE]
+pca_scores_binary <- pca_b$x[, 1:n_pcs_binary, drop = FALSE]
+
+# Euclidean distance matrix ----
+clustcr_mat_w_eucdist <- parallelDist::parDist(
+  pca_scores_weighted, method = "euclidean", threads = 16)
+saveRDS(clustcr_mat_w_eucdist, 
+  glue("{clustcr_dir}/results/clustcr_mat_w_eucdist_pca_Chi2SigOnly_{Sys.Date()}.rds"))
+
+clustcr_mat_b_eucdist <- parallelDist::parDist(
+  pca_scores_binary, method = "euclidean", threads = 16)
+saveRDS(clustcr_mat_b_eucdist, 
+  glue("{clustcr_dir}/results/clustcr_mat_b_eucdist_pca_Chi2SigOnly_{Sys.Date()}.rds"))
+
+saveRDS(
+  pca_scores_weighted,
+  glue("{clustcr_dir}/results/pca_scores_weighted_Chi2SigOnly_{Sys.Date()}.rds")
+)
+saveRDS(
+  pca_scores_binary,
+  glue("{clustcr_dir}/results/pca_scores_binary_Chi2SigOnly_{Sys.Date()}.rds")
+)
+
+```
+
+
+Visualizing PCA
+
+```{r}
+pca_scores_binary <- readRDS(
+  glue("{clustcr_dir}/results/pca_scores_binary_SSxRS_2025-08-18.rds")
+)
+# pca_scores_binary <- readRDS(
+#   glue("{clustcr_dir}/results/pca_scores_binary_Chi2SigOnly_2025-08-19.rds")
+# )
+
+pca_scores_binary %>% glimpse()
+
+pca_df <- pca_scores_binary %>%
+  as.data.frame() %>%
+  rownames_to_column("sample_id") %>%
+  left_join(metadata, by = "sample_id") %>%
+  filter(sample_id %nin% low_vol_samples$sample_id) %>%
+  filter(case_control_other_latest == "Case") %>%
+  glimpse()
+
+# Create PCA plot with metadata
+var_of_interest <- "moca_total_score"
+# pca_plot <- 
+pca_df %>% 
+  ggplot(aes(x = PC1, y = PC2, color = .data[[var_of_interest]])) +
+  geom_point(alpha = 0.7, size = 2) +
+  labs(
+    title = "PCA of TCR Repertoire Clusters",
+    x = "Principal Component 1",
+    y = "Principal Component 2"
+  ) +
+  # Add confidence ellipses if you want to show group separation
+  # stat_ellipse(aes(color = .data[[var_of_interest]]), type = "norm", level = 0.95) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 11),
+    legend.title = element_text(size = 11)
+  )
+
+# Display the plot
+pca_plot
+
+# Save the plot
+ggsave(
+  filename = glue("{clustcr_figs}/pca_plot_binary_Chi2SigOnly_{Sys.Date()}.png"),
+  plot = pca_plot,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+```
+
+
+
+
+Clustering PD samples using DBSCAN
+
+```{r}
+clustcr_mat_w_eucdist <- readRDS(
+  glue("{clustcr_dir}/results/clustcr_mat_w_eucdist_pca_SSxRS_2025-08-18.rds"))
+clustcr_mat_b_eucdist <- readRDS(
+  glue("{clustcr_dir}/results/clustcr_mat_b_eucdist_pca_SSxRS_2025-08-18.rds"))
+clustcr_mat_w_eucdist_input <- clustcr_mat_w_eucdist %>% 
+  as.matrix() %>% as.data.frame()
+clustcr_mat_b_eucdist_input <- clustcr_mat_b_eucdist %>% 
+  as.matrix() %>% as.data.frame()
+
+all(rownames(clustcr_mat_b_eucdist_input) == rownames(clustcr_mat_w_eucdist_input))
+
+# filtering out PD only samples from distance matrices
+pd_sids <- metadata %>%
+  filter(sample_id %nin% low_vol_samples$sample_id) %>%
+  filter(sample_id %in% rownames(clustcr_mat_b_eucdist_input)) %>% 
+  filter(case_control_other_latest == "Case") %>% 
+  pull(sample_id) %>% 
+  unique()
+
+# filtering and converting back into dist object
+clustcr_mat_b_eucdist_pd <- clustcr_mat_b_eucdist_input[pd_sids, pd_sids] %>% as.dist()
+clustcr_mat_w_eucdist_pd <- clustcr_mat_w_eucdist_input[pd_sids, pd_sids] %>% as.dist()
+
+library(dbscan)
+dbscan::kNNdistplot(clustcr_mat_w_eucdist_pd, k =  8)
+abline(h = 0.25, lty = 2) # optimal eps looks like 0.25 (at k = 8)
+
+dbscan::kNNdistplot(clustcr_mat_b_eucdist_pd, k =  3)
+abline(h = 12, lty = 2) # optimal eps looks like 14 (at k = 8)
+
+# dbscan package
+w_db <- dbscan::dbscan(clustcr_mat_w_eucdist_pd, 0.15, 10)
+b_db <- dbscan::dbscan(clustcr_mat_b_eucdist_pd, 12, 5)
+
+w_db$cluster %>% table()
+b_db$cluster %>% table()
+
+
+
+## Trying Distmatrix on only Chi2SigOnly clusters
+clustcr_mat_w_eucdist <- readRDS(
+  glue("{clustcr_dir}/results/clustcr_mat_w_eucdist_pca_Chi2SigOnly_2025-08-19.rds"))
+clustcr_mat_b_eucdist <- readRDS(
+  glue("{clustcr_dir}/results/clustcr_mat_b_eucdist_pca_Chi2SigOnly_2025-08-19.rds"))
+clustcr_mat_w_eucdist_input <- clustcr_mat_w_eucdist %>% 
+  as.matrix() %>% as.data.frame()
+clustcr_mat_b_eucdist_input <- clustcr_mat_b_eucdist %>% 
+  as.matrix() %>% as.data.frame()
+all(rownames(clustcr_mat_b_eucdist_input) == rownames(clustcr_mat_w_eucdist_input))
+
+# filtering out PD only samples from distance matrices
+pd_sids <- metadata %>%
+  filter(sample_id %nin% low_vol_samples$sample_id) %>%
+  filter(sample_id %in% rownames(clustcr_mat_b_eucdist_input)) %>% 
+  filter(case_control_other_latest == "Case") %>% 
+  pull(sample_id) %>% 
+  unique()
+
+# filtering and converting back into dist object
+clustcr_mat_b_eucdist_pd <- clustcr_mat_b_eucdist_input[pd_sids, pd_sids] %>% as.dist()
+clustcr_mat_w_eucdist_pd <- clustcr_mat_w_eucdist_input[pd_sids, pd_sids] %>% as.dist()
+
+library(dbscan)
+dbscan::kNNdistplot(clustcr_mat_w_eucdist_pd, k =  8)
+abline(h = 0.05, lty = 2) # optimal eps looks like 0.05 (at k = 8)
+
+dbscan::kNNdistplot(clustcr_mat_b_eucdist_pd, k =  8)
+abline(h = 8, lty = 2) # optimal eps looks like 8 (at k = 8)
+
+# dbscan package
+w_db <- dbscan::dbscan(clustcr_mat_w_eucdist_pd, 0.03, 10)
+b_db <- dbscan::dbscan(clustcr_mat_b_eucdist_pd, 7, 10)
+
+w_db$cluster %>% table()
+b_db$cluster %>% table()
+
+
+
+
+
+
+
+
+pub_ovov <- readRDS(
+    glue("{metrics_dir}/rep-overlap-overlap_2025-07-08.rds")
+)
+pub_ovpub <- readRDS(
+    glue("{metrics_dir}/rep-overlap-public_2025-07-08.rds")
+)
+pub_mh <- readRDS(
+    glue("{metrics_dir}/rep-overlap-morisita_2025-07-20.rds")
+)
+
+
+# pub_mh %>% glimpse()
+pub_mh %>% rownames() %>% head()
+pub_mh %>% colnames() %>% head()
+pub_mh[1:10, 1:10]
+
+pub_mh_dist <- as.dist(1 - pub_mh)
+
+dbscan::kNNdistplot(pub_mh_dist, k =  5)
+abline(h = 0.6, lty = 2) # optimal eps looks like 0.6 (at k = 5)
+mh_db <- dbscan::dbscan(pub_mh_dist, 0.6, 10)
+mh_db$cluster %>% table()
+
+
+# # clustcr_mat_w_eucdist
+# str(clustcr_mat_b_eucdist)
+# rownames(clustcr_mat_b_eucdist)
+
+
+# Doesn't really seem to produce meaningful clusters
+
+```
+
+
+
+Visualizing distance matrices - V2
+
+```{r}
+clustcr_mat_w_eucdist <- readRDS(
+  glue("{clustcr_dir}/results/clustcr_mat_w_eucdist_pca_SSxRS_2025-08-18.rds"))
+clustcr_mat_b_eucdist <- readRDS(
+  glue("{clustcr_dir}/results/clustcr_mat_b_eucdist_pca_SSxRS_2025-08-18.rds"))
+
+w_sid_order <- seriate_dist_obj(clustcr_mat_w_eucdist, seriate_method = "OLO")
+b_sid_order <- seriate_dist_obj(clustcr_mat_b_eucdist, seriate_method = "OLO")
+
+# Create long format data frame with seriated order
+dist_df_seriated <- clustcr_mat_w_eucdist %>%
+  as.matrix() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "row_id") %>% 
+  pivot_longer(
+    cols = -row_id,
+    names_to = "col_id",
+    values_to = "distance"
+  ) %>%
+  as.data.table() %>% 
+  mutate(
+    row_id = factor(row_id, levels = w_sid_order),
+    col_id = factor(col_id, levels = w_sid_order)
+  ) %>% 
+  arrange(row_id, col_id) %>% 
+  filter(row_id %nin% low_vol_samples$sample_id) %>% 
+  filter(col_id %nin% low_vol_samples$sample_id) %>% 
+  glimpse()
+
+# Create the seriated heatmap
+pheat_distmat_w <- dist_df_seriated %>% 
+  ggplot(aes(x = col_id, y = row_id, fill = distance)) +
+  geom_tile() +
+  scale_fill_scico(
+    palette = "devon",
+    direction = 1
+  ) +
+  labs(
+    title = "Sample Distance Matrix Heatmap",
+    subtitle = "Euclidean distances between samples (OLO seriation)",
+    x = "Samples",
+    y = "Samples",
+    fill = "Distance"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold"),
+    panel.grid = element_blank()
+  ) +
+  coord_fixed()
+
+tic()
+ggsave(
+  glue("{clustcr_figs}/clusTCR_EucDist_weighted_heatmap_SSxRS_OLO_{Sys.Date()}.png"),
+  pheat_distmat_w,
+  width = 10,
+  height = 10
+)
+toc()
+
+# Create long format data frame with seriated order
+dist_df_seriated_b <- clustcr_mat_b_eucdist %>%
+  as.matrix() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "row_id") %>% 
+  pivot_longer(
+    cols = -row_id,
+    names_to = "col_id",
+    values_to = "distance"
+  ) %>%
+  as.data.table() %>% 
+  mutate(
+    row_id = factor(row_id, levels = b_sid_order),
+    col_id = factor(col_id, levels = b_sid_order)
+  ) %>% 
+  filter(row_id %nin% low_vol_samples$sample_id) %>% 
+  filter(col_id %nin% low_vol_samples$sample_id) %>% 
+  glimpse()
+
+# Create the seriated heatmap
+pheat_distmat_b <- dist_df_seriated_b %>% 
+  ggplot(aes(x = col_id, y = row_id, fill = distance)) +
+  geom_tile() +
+  scale_fill_scico(
+    palette = "devon",
+    direction = 1
+  ) +
+  labs(
+    title = "Sample Distance Matrix Heatmap",
+    subtitle = "Euclidean distances between samples (OLO seriation)",
+    x = "Samples",
+    y = "Samples",
+    fill = "Distance"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold"),
+    panel.grid = element_blank()
+  ) +
+  coord_fixed()
+
+tic()
+ggsave(
+  glue("{clustcr_figs}/clusTCR_EucDist_binary_heatmap_SSxRS_OLO_{Sys.Date()}.png"),
+  pheat_distmat_b,
+  width = 10,
+  height = 10
+)
+toc()
+
+```
+
+
+
+Visualizing cluster membership matrices as heatmap
+
+```{r}
+clustcr_results_df <- readRDS(
+  glue("{clustcr_dir}/results/compiled_clustcr_results_df_2025-08-24.rds"))
+
+clustcr_filter_summarized <- clustcr_results_df %>% 
+  filter(unique_donors_per_clust >= 10) %>% 
+  filter(motif_length >= 8) %>% 
+  dplyr::group_by(sample_id, cluster_id) %>%
+  dplyr::summarize(count = sum(count)) %>% 
+  glimpse()
+
+clust_mat_binary <- clustcr_filter_summarized %>% 
+  mutate(present = 1) %>% 
+  dplyr::select(sample_id, cluster_id, present) %>% 
+  glimpse()
+# getting rank for samples and clusters
+sid_order <- clustcr_filter_summarized %>%
+  dplyr::group_by(sample_id) %>% 
+  dplyr::summarize(sid_total_count = sum(count)) %>% 
+  pull(sample_id)
+cid_order <- clust_mat_binary %>% 
+  group_by(cluster_id) %>% 
+  dplyr::summarize(cluster_total_count = sum(present)) %>% 
+  arrange(desc(cluster_total_count)) %>% 
+  pull(cluster_id)
+clust_mat_binary %>% glimpse()
+
+clust_mat_binary_sorted <- clust_mat_binary %>% 
+  as.data.table() %>% 
+  mutate(sample_id = factor(sample_id, levels = sid_order)) %>% 
+  mutate(cluster_id = factor(cluster_id, levels = rev(cid_order))) %>% 
+  glimpse()
+
+p_cluster_heatmap <- clust_mat_binary_sorted %>% 
+  filter(sample_id %nin% low_vol_samples$sample_id) %>% 
+  mutate(present = as.character(present)) %>% 
+  ggplot(aes(x = sample_id, y = cluster_id, fill = present)) +
+  geom_tile() +
+  scale_fill_manual(values = c("1" = "black")) +
+  # scale_fill_manual(values = c("1" = "#434343"), na.value = "#f1f1f1") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+ggsave(
+  glue("{clustcr_figs}/clusTCR_cluster_membership_heatmap_binary_{Sys.Date()}.png"),
+  width = 10,
+  height = 10,
+  dpi = 1200
+)
+
+```
+
+

@@ -5,12 +5,23 @@
 #SBATCH --time=4:00:00   # walltime
 #SBATCH --ntasks=1 # number of processor cores (i.e. tasks)
 #SBATCH --nodes=1   # number of nodes
-#SBATCH --mem-per-cpu=50G   # memory per CPU core
+#SBATCH --mem-per-cpu=20G   # memory per CPU core
 #SBATCH -J "ReadQC"   # job name
 # Notify at the beginning, end of job and on failure.
-#SBATCH --mail-user=<jboktor>@caltech.edu   # email address
+#SBATCH --mail-user=jboktor@caltech.edu   # email address
 #SBATCH --mail-type=FAIL
 #SBATCH --output=/central/scratch/jbok/slurmdump/ReadQC_%j.out
+#SBATCH --error=/central/scratch/jbok/slurmdump/ReadQC_%j.err
+
+# This scripts concuts bbduk read quality trimming on a per-file basis
+# forward, reverse, and singleton reads are processed independently
+# This script requires an input directory, a gziped fastq file, 
+# and an output directory 
+# ie.
+# sbatch bbduk_readQC.sh \
+# -i path/to/rawfastqfiles \
+# -s SY-PDYV487GW8_single.fq.gz |
+# -o path/to/cleanfastqfiles
 
 
 while getopts i:s:o: option
@@ -31,10 +42,7 @@ source activate pdbm
 SAMPLE_IN="${INPUTDIR}$SAMPLEID"
 SAMPLE_OUT="${OUTPUTDIR}$SAMPLEID"
 SAMPLE_NAME=`echo ${SAMPLEID} | sed 's/.fq.gz//'`
-
 echo "PROCESSING SAMPLE: "$SAMPLEID
-
-# move to stats output directory 
 cd /central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/clean_fastqs_stats/
 
 # This command conducts the following:
@@ -45,12 +53,6 @@ cd /central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/clean_fastqs_stats/
 # remove reads with an average PHRED Q<10
 # # maq=10
 
-bbduk.sh qtrim=rl trimq=10 maq=10 overwrite=true \
+bbduk.sh qtrim=rl trimq=10 maq=10 overwrite=true -Xmx15g \
     in=${SAMPLE_IN} \
     out=${SAMPLE_OUT} >& "${SAMPLE_NAME}_bbduk_stdout.txt"
-
-# bbduk.sh qtrim=rl trimq=10 maq=10 overwrite=true \
-#     in1=${SAMPLE_IN}_1.fq.gz \
-#     in2=${SAMPLE_IN}_2.fq.gz \
-#     out1=${SAMPLE_OUT}_1.fq.gz \
-#     out2=${SAMPLE_OUT}_2.fq.gz >& "${SAMPLEID}_bbduk_stdout.txt"

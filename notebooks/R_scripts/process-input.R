@@ -4,7 +4,8 @@
 
 source("notebooks/R_scripts/_load_packages.R")
 source("notebooks/R_scripts/_misc_functions.R")
-sample_info <- readRDS("data/interim/metadata/2022-11-04_static_metdata.rds")
+
+phymeta <- readRDS("data/interim/metadata/2023-07-14_phyloseq-metadata.rds")
 
 #_______________________________________________________________________________
 #              Merge Kraken Reports and create phyloseq objects

@@ -1,0 +1,534 @@
+---
+title: "Adaptive Immune Receptor Repertoire in Parkinson's Disease: Optimal Transport and Probabilistic Modeling Approaches for Latent Space Embeddings"
+editor: source
+author: "Joe Boktor"
+date: '2023-12-07'
+bibliography: references.bib
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    grid:
+      sidebar-width: 300px
+      body-width: 900px
+      margin-width: 300px
+      gutter-width: 1.5rem
+---
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(fastICA)
+library(parallelDist)
+library(mclust)
+library(seqinr)
+library(progress)
+library(transport)
+library(immunarch)
+library(nlme)
+library(broom.mixed)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+source(paste0(src_dir, "/R_scripts/_airr_analyze-permanova.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+imm_plots_dir <- glue("{wkdir}/figures/AIRR/immunarch")
+
+```
+
+
+Setting paths to ImmuneML results
+
+```{r}
+imml_root <- glue("{wkdir}/data/interim/airr/ImmuneML")
+imml_input_dir <- glue("{imml_root}/data_input")
+imml_input_rep <- glue("{imml_input_dir}/repertoires")
+imml_results_dir <- glue("{imml_root}/results")
+# dir.create(imml_input_rep, showWarnings = FALSE, recursive = TRUE)
+# dir.create(imml_results_dir, showWarnings = FALSE, recursive = TRUE)
+
+```
+
+
+Reading in metadata
+
+```{r}
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  glimpse()
+  
+```
+
+
+
+TODO HACK FIXME
+
+```{r}
+library(broom)
+metadata %>% glimpse()
+# For each participant and each disease metric, calculate slopes and quality of fit
+# For each participant, fit a linear model and extract the slope and R²
+
+# code_upd2hy_hoehn_and_yahr_stage
+# mds_updrs_part_iii_summary_score
+# mds_updrs_part_iv_summary_score
+# upsit_total_score
+# rbd_info_source
+
+slopes_df <- metadata %>%
+  filter(!is.na(mds_updrs_part_iii_summary_score), !is.na(visit_month)) %>%
+  group_by(participant_id) %>%
+  do({
+    fit = lm(mds_updrs_part_iii_summary_score ~ visit_month, data = .)
+    tidy_fit = broom::tidy(fit)
+    glance_fit = broom::glance(fit)
+    data.frame(
+      slope = tidy_fit$estimate[tidy_fit$term == "visit_month"],
+      intercept = tidy_fit$estimate[tidy_fit$term == "(Intercept)"],
+      r.squared = glance_fit$r.squared,
+      n = nrow(.)
+    )
+  }) %>%
+  ungroup()
+
+# View the results
+head(slopes_df)
+# slopes_df %>% View
+
+# slopes_df$slope %>% hist()
+# slopes_df$r.squared %>% hist()
+
+# slopes_df %>% 
+#     ggplot(aes(x = r.squared, y = slope)) +
+#     geom_point()
+
+# categorize each metric sample as reliably increasing, decreasing, highly variable, or not stagnant
+metric_type <- slopes_df %>% 
+    mutate(metric_type = case_when(
+        slope > 0.2 & r.squared > 0.3 ~ "increasing",
+        slope < -0.2 & r.squared > 0.3 ~ "decreasing",
+        r.squared < 0.3 ~ "highly variable",
+        TRUE ~ "stagnant"
+    )) %>% 
+    mutate(metric_type = factor(metric_type, levels = c("increasing", "decreasing", "highly variable", "stagnant"))) %>% 
+    select(participant_id, metric_type) %>% 
+    glimpse()
+
+# table(metadata$case_control_other_latest, metadata$upsit_total_score)
+# table(metadata$study, metadata$mds_updrs_part_ii_summary_score)
+
+metadata %>% 
+    left_join(metric_type, by = "participant_id") %>% 
+    filter(!is.na(metric_type)) %>%
+    ggplot(aes(x = visit_month, y = mds_updrs_part_iii_summary_score, color = metric_type)) +
+    facet_grid(metric_type~case_control_other_latest) +
+    scale_color_aaas() +
+    geom_line(aes(group = participant_id), alpha = 0.3)
+    # geom_smooth(aes(group = participant_id), alpha = 0.1, method = "lm", se = FALSE, linewidth = 0.5)
+
+
+```
+
+
+
+
+
+
+
+# Saving data for ImmuneML
+
+Saving TCRB repertoire data for individual samples
+
+```{r}
+tcrb_df <- fread(
+    glue("{wkdir}/data/interim/airr/tcrb_soNNia_2025-08-20.csv")) %>%
+    glimpse()
+
+tcrb_df %>% glimpse()
+
+clonotype_volume_df <- tcrb_df %>% 
+  group_by(sample_id) %>% 
+  dplyr::summarize(
+      clonal_volume = sum(`#count`),
+      clonal_count = n()
+      ) %>%
+  glimpse()
+
+clonotype_volume_pid_df <- tcrb_df %>% 
+  group_by(participant_id) %>% 
+  dplyr::summarize(clonal_volume = sum(`#count`)) %>%
+  glimpse()
+
+clonotype_volume_pid_df$clonal_volume %>% summary()
+clonotype_volume_pid_df %>% 
+    filter(clonal_volume < 600) %>% 
+    glimpse()
+
+```
+
+
+```{r}
+# set.seed(123)
+# rnd_sids <- tcrb_df$sample_id %>% sample(100)
+tcrb_df %>% glimpse()
+
+airr_fmt_tcrb <- tcrb_df %>% 
+    mutate(D = gsub("\\.", "", D)) %>% 
+    mutate(sequence_id = "", sequence = "", rev_comp = "", 
+        productive = "T", sequence_alignment = "", germline_alignment = "",
+        junction = "", junction_aa = "", v_cigar = "", d_cigar = "", j_cigar = "",
+        locus = "TRB", vj_in_frame = "T", stop_codon = "F", 
+        region_types = "RegionType.IMGT_CDR3", frame_types = "IN") %>% 
+    dplyr::select(
+        sample_id, # to be removed later
+        sequence_id,
+        sequence,
+        rev_comp,
+        productive,
+        v_call = V,
+        d_call = D,
+        j_call = J,
+        sequence_alignment,
+        germline_alignment,
+        junction,
+        junction_aa,
+        v_cigar,
+        d_cigar,
+        j_cigar,
+        cdr3_aa = CDR3aa,
+        cdr3 = CDR3nt,
+        locus,
+        duplicate_count = `#count`,
+        vj_in_frame,
+        stop_codon,
+        v_genes = v_gene,
+        j_genes = j_gene,
+        region_types,
+        frame_types
+    ) %>% 
+    glimpse()
+
+airr_fmt_tcrb_list <- split(airr_fmt_tcrb, airr_fmt_tcrb$sample_id) %>% 
+    purrr::map( ~ .x %>% dplyr::select(-sample_id))
+
+# Save each dataframe in the list to a TSV file in parallel
+# future::plan(multisession, workers = 15)  # Use parallel processing
+
+# future_walk2(
+purrr::walk2(
+  airr_fmt_tcrb_list, 
+  names(airr_fmt_tcrb_list),
+  function(df, sample_name) {
+    imml_input_rep <- "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/airr/ImmuneML/data_input/sample_repertoires"
+    output_path <- glue::glue("{imml_input_rep}/{sample_name}.tsv")
+    # write_csv(df, output_path)
+    write_tsv(df, output_path)
+  }
+)
+
+
+# summarize counts across donors (participant_id)
+airr_fmt_tcrb %>% glimpse()
+airr_fmt_tcrb_pids <- airr_fmt_tcrb %>% 
+    left_join(metadata %>% select(sample_id, participant_id)) %>%
+    select(-sample_id) %>% 
+    group_by(across(-any_of("duplicate_count"))) %>% 
+    dplyr::summarize(duplicate_count = sum(duplicate_count)) %>% 
+    glimpse()
+
+airr_fmt_tcrb_list_pids <- split(
+    airr_fmt_tcrb_pids, airr_fmt_tcrb_pids$participant_id) %>% 
+    purrr::map( ~ .x %>% dplyr::select(-participant_id))
+length(airr_fmt_tcrb_list_pids)
+
+# future_walk2(
+purrr::walk2(
+  airr_fmt_tcrb_list_pids, 
+  names(airr_fmt_tcrb_list_pids),
+  function(df, sample_name) {
+    imml_input_rep <- "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/airr/ImmuneML/data_input/participant_repertoires"
+    output_path <- glue::glue("{imml_input_rep}/{sample_name}.tsv")
+    write_tsv(df, output_path)
+  }
+)
+
+```
+
+
+Saving metadata for analysis
+
+```{r}
+full_pid_meta <- metadata %>%
+    dplyr::select(participant_id, study, case_control_other_latest, 
+        age_at_baseline, sex, ethnicity, race) %>%
+    distinct() %>%
+    mutate(filename = glue("{participant_id}.tsv"), .before = everything()) %>%
+    mutate(subject_id = participant_id) %>%
+    filter(participant_id %in% unique(tcrb_df$participant_id)) %>%
+    mutate(ID = subject_id) %>% # for deepRC
+    glimpse()
+
+# Save metadata for ImmuneML analysis
+readr::write_csv(full_pid_meta,
+    glue("{imml_root}/metadata/metadata_all_pids.csv")
+    )
+readr::write_csv(full_pid_meta %>% filter(study == "PDBP"),
+    glue("{imml_root}/metadata/metadata_pid_pdbp.csv")
+    )
+readr::write_csv(full_pid_meta %>% filter(study == "PPMI"),
+    glue("{imml_root}/metadata/metadata_pid_ppmi.csv")
+    )
+readr::write_csv(full_pid_meta %>% filter(study == "BioFIND"), 
+    glue("{imml_root}/metadata/metadata_pid_biofind.csv")
+    )
+readr::write_csv(full_pid_meta %>% filter(study == "HBS"), 
+    glue("{imml_root}/metadata/metadata_pid_hbs.csv")
+    )
+
+
+# For LOSO Models
+readr::write_csv(full_pid_meta %>% filter(study != "PDBP"),
+    glue("{imml_root}/metadata/metadata_pid_pdbp_loso.csv")
+    )
+readr::write_csv(full_pid_meta %>% filter(study != "PPMI"),
+    glue("{imml_root}/metadata/metadata_pid_ppmi_loso.csv")
+    )
+readr::write_csv(full_pid_meta %>% filter(study != "BioFIND"), 
+    glue("{imml_root}/metadata/metadata_pid_biofind_loso.csv")
+    )
+readr::write_csv(full_pid_meta %>% filter(study != "HBS"), 
+    glue("{imml_root}/metadata/metadata_pid_hbs_loso.csv")
+    )
+
+```
+
+
+# Running Exact Clonotype Matching Model
+
+Exploratory Data Analysis using ImmuneML
+
+```{r}
+exploratory_analysis <- slurm_shell_do(
+    glue(
+        "mamba activate immuneml && ",
+        "immune-ml exploratory_analysis_pids.yaml",
+        " {imml_input_dir}/exploratory_analysis_results_all_pids/"
+    ),
+    memory = "25GB",
+    ncpus = 4,
+    walltime = 360 # 6 hrs
+)
+
+cmd <- glue(
+    "mamba activate immuneml &&",
+    " immune-ml",
+    " {imml_input_dir}/exploratory_analysis_pids.yaml",
+    " {imml_results_dir}/exploratory_analysis_results_all_pids/"
+    )
+
+easy_batch(
+    cluster_name = "ImmuneML-Exploratory",
+    log_dir = glue("{wkdir}/.cluster_runs"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+    walltime = "6:00:00", 
+    memory = "50GB",
+    fun = shell_do,
+    params = list(
+        command_string = cmd,
+        stdout_path = "", 
+        stderr_path = ""
+        )
+)
+
+```
+
+
+Training a small model as test
+```{r}
+# Training Emerson Model on PDBP
+# glue(
+#     "cd {imml_results_dir}/pubclone_probabilistic_classifier && ",
+#     "immune-ml {imml_root}/configs/pubclone_probabilistic_classifier.yaml ."
+# )
+
+# For Tranfer-study Models
+for (study in c("PDBP", "PPMI", "BioFIND", "HBS")) {
+# for (study in c("PDBP", "HBS")) {
+
+    pubclone_study_model <- glue("{imml_results_dir}/pubclone_probabilistic_classifier/{study}-S2S")
+    dir.create(pubclone_study_model, showWarnings = FALSE, recursive = TRUE)
+    
+    cmd <- glue(
+        "mamba activate immuneml &&",
+        " cd {pubclone_study_model} &&",
+        " immune-ml {imml_root}/configs/pubclone_probabilistic_classifier_{study}-S2S.yaml ."
+        )
+
+    easy_batch(
+        cluster_name = glue("ImmuneML-Transfer-Study-{study}"),
+        log_dir = glue("{wkdir}/.cluster_runs"),
+        template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+        walltime = "24:00:00", 
+        memory = "100GB",
+        ncpus = 16,
+        fun = shell_do,
+        params = list(
+            command_string = cmd,
+            stdout_path = "", 
+            stderr_path = ""
+            )
+    )
+
+    pubclone_loso_model <- glue("{imml_results_dir}/pubclone_probabilistic_classifier/{study}-LOSO")
+    dir.create(pubclone_loso_model, showWarnings = FALSE, recursive = TRUE)
+    
+    cmd <- glue(
+        "mamba activate immuneml &&",
+        " cd {pubclone_loso_model} &&",
+        " immune-ml {imml_root}/configs/pubclone_probabilistic_classifier_{study}-LOSO.yaml ."
+        )
+
+    easy_batch(
+        cluster_name = glue("ImmuneML-LOSO-{study}"),
+        log_dir = glue("{wkdir}/.cluster_runs"),
+        template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+        walltime = "12:00:00", 
+        memory = "50GB",
+        ncpus = 16,
+        fun = shell_do,
+        params = list(
+            command_string = cmd,
+            stdout_path = "", 
+            stderr_path = ""
+            )
+    )    
+}
+
+
+# TESTING Model predictions on other cohorts
+study <- "BioFIND"
+pubclone_study_model <- glue("{imml_results_dir}/pubclone_probabilistic_classifier/{study}-S2S")
+# dir.create(pubclone_loso_model, showWarnings = FALSE, recursive = TRUE)
+
+glue(
+    "cd {pubclone_study_model} && ",
+    "immune-ml {imml_root}/configs/pubclone_probabilistic_classifier_BioFIND-S2S-test.yaml ."
+)
+
+# # TESTING DeepRC Model ----
+# deeprc_model_test <- glue("{imml_results_dir}/DeepRC_BioFIND-S2S_TESTING")
+# dir.create(deeprc_model_test, showWarnings = FALSE, recursive = TRUE)
+
+# glue(
+#     "cd {deeprc_model_test} && ",
+#     "immune-ml {imml_root}/configs/DeepRC_BioFIND-S2S.yaml ."
+# )
+
+#--------------------------------
+# DEEPRC Models ----
+
+# for (study in c("PDBP", "PPMI", "BioFIND", "HBS")) {
+for (study in c("BioFIND")) {
+    pubclone_study_model <- glue("{imml_results_dir}/DeepRC/{study}-S2S")
+    dir.create(pubclone_study_model, showWarnings = FALSE, recursive = TRUE)
+    
+    cmd <- glue(
+        "mamba activate immuneml &&",
+        " cd {pubclone_study_model} &&",
+        " immune-ml {imml_root}/configs/DeepRC_{study}-S2S.yaml ."
+        )
+
+    easy_batch(
+        cluster_name = glue("ImmuneML-DeepRC-Transfer-Study-{study}"),
+        log_dir = glue("{wkdir}/.cluster_runs"),
+        template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.gpu.tmpl"),
+        walltime = "12:00:00", 
+        memory = "10GB",
+        ncpus = 16,
+        ngpus = 1,
+        fun = shell_do,
+        params = list(
+            command_string = cmd,
+            stdout_path = "", 
+            stderr_path = ""
+            )
+    )
+
+    # pubclone_loso_model <- glue("{imml_results_dir}/DeepRC/{study}-LOSO")
+    # dir.create(pubclone_loso_model, showWarnings = FALSE, recursive = TRUE)
+    
+    # cmd <- glue(
+    #     "mamba activate immuneml &&",
+    #     " cd {pubclone_loso_model} &&",
+    #     " immune-ml {imml_root}/configs/DeepRC_{study}-LOSO.yaml ."
+    #     )
+
+    # easy_batch(
+    #     cluster_name = glue("ImmuneML-DeepRC-LOSO-{study}"),
+    #     log_dir = glue("{wkdir}/.cluster_runs"),
+    #     template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.gpu.tmpl"),
+    #     walltime = "12:00:00", 
+    #     memory = "10GB",
+    #     ncpus = 16,
+    #     ngpus = 1,
+    #     fun = shell_do,
+    #     params = list(
+    #         command_string = cmd,
+    #         stdout_path = "", 
+    #         stderr_path = ""
+    #         )
+    # )    
+}
+
+
+
+```
+
+
+
+
+Running Sloppy Clonotype/Kmer Model
+
+
+
+
+```{r}
+tst <- read_tsv(
+    glue("{home_dir}/software/immuneML/quickstart_results/machine_learning_analysis/result/datasets/d1/repertoires/0a0eb76ac35b46dfb96760dc7b0a6e27.tsv")
+) %>% glimpse()
+tst$p_gen
+
+```

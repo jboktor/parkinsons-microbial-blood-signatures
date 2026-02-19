@@ -1,0 +1,932 @@
+---
+title: "Downloading AIRR-data"
+editor: source
+author: "Joe Boktor"
+date: '2023-12-04'
+eval: false
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    column: page
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+```{r, eval=FALSE}
+#| warning: false
+#| message: false
+
+library(googleCloudStorageR)
+library(gargle)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(tidyverse)
+library(jsonlite)
+library(stringr)
+# plotting
+library(ggsci)
+library(scico)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+library(gghalves)
+library(ggdist)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+load_dot_env(glue("{wkdir}/.env"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+v4_metapath <- glue("{wkdir}/data/input/metadata/2023_v4release_1027")
+hla_plots_dir <- glue("{wkdir}/figures/AIRR/arcasHLA")
+
+arcasHLA_interim <- glue("{wkdir}/data/interim/airr/arcasHLA")
+dir.create(arcasHLA_interim, recursive = TRUE, showWarnings = FALSE)
+v4_clincial <- glue("{v4_metapath}/clinical")
+hla_dir <- glue("{wkdir}/data/interim/airr/arcasHLA/analysis_cleaned")
+pca_dir <- glue("{hla_dir}/pca_data")
+
+# c3_pheno_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_phenotypes")
+# dir.create(c3_pheno_dir, showWarnings = FALSE, recursive = TRUE)
+
+future::plan(multisession, workers = 30)
+
+```
+
+Loading metadata
+
+```{r, eval=FALSE}
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>%
+  mutate(case_control_other_latest = 
+    factor(case_control_other_latest, levels = c("Control", "Case"))) %>% 
+  glimpse()
+
+```
+
+
+```{r, eval=FALSE}
+# Function to read the JSON file and transform it into table format
+process_genotype_json <- function(file_path) {
+  sid <- str_extract(basename(file_path), "^[^\\.]+")
+  json_data <- fromJSON(file_path)
+  
+  df <- json_data %>%
+    as.data.frame() %>%
+    t() %>%
+    as.data.frame() %>%
+    dplyr::rename("1" = V1, "2" = V2)
+
+  df <- df %>%
+    rownames_to_column("Gene") %>%
+    pivot_wider(
+      names_from = Gene,
+      values_from = c("1", "2"),
+      names_glue = "{Gene}{.value}"
+    ) %>%
+    mutate(sample_id = sid) %>%
+    relocate(sample_id, .before = everything())
+  
+  # Return the formatted data frame
+  return(df)
+}
+
+process_genes_json <- function(file_path) {
+  json_data <- fromJSON(file_path)
+  sid <- str_extract(basename(file_path), "^[^\\.]+")
+  
+  # Convert JSON to a dataframe
+  df <- json_data %>% 
+    as.data.frame() %>% 
+    t() %>% 
+    as.data.frame() %>% 
+    rownames_to_column(var = "Gene") %>%
+    dplyr::rename(reads = V1, equivalence_classes = V2, relative_abundance = V3) %>%
+    mutate(sample_id = sid) %>%
+    relocate(sample_id, .before = everything())
+  
+  # Return the formatted dataframe
+  return(df)
+}
+
+```
+
+```{r, eval=FALSE}
+arcas_hla_dir <- glue("{pdmbs_dir}/workflow/RNASEQ/AIRR/arcasHLA")
+genotype_df <- list.files(arcas_hla_dir,
+    full.names = TRUE,
+    pattern = "genotype.json"
+    ) %>%
+    future_map_dfr(process_genotype_json)
+
+saveRDS(genotype_df, glue("{arcasHLA_interim}/genotype_df_{Sys.Date()}.rds"))
+
+genes_df <- list.files(arcas_hla_dir,
+    full.names = TRUE,
+    pattern = "genes.json"
+    ) %>%
+    future_map_dfr(process_genes_json)
+
+saveRDS(genes_df, glue("{arcasHLA_interim}/genes_df_{Sys.Date()}.rds"))
+
+```
+
+Quick check to see that all intended samples have been run through the pipeline
+
+```{r}
+genotype_df <- readRDS(glue("{arcasHLA_interim}/genotype_df_2025-07-06.rds")) %>%
+    glimpse()
+genes_df <- readRDS(glue("{arcasHLA_interim}/genes_df_2025-07-06.rds")) %>%
+    glimpse()
+
+v4_1027_dir <- glue("{wkdir}/data/input/metadata/2023_v4release_1027")
+sample_inv <- bind_rows(
+    read_csv(glue("{v4_1027_dir}/rnaseq_WB-RWTS-VHBS_sample_inventory.csv")),
+    read_csv(glue("{v4_1027_dir}/rnaseq_WB-RWTS_sample_inventory.csv"))) %>% 
+    glimpse()
+
+# quickly checking all participants are present
+rnaseq_pids <- sample_inv$participant_id %>% unique()
+run_pids <- dplyr::select(genotype_df, sample_id) %>% 
+  left_join(sample_inv) %>% 
+  pull(participant_id) %>% 
+  unique()
+
+setdiff(rnaseq_pids, run_pids) 
+intersect(rnaseq_pids, run_pids) %>% length()
+# rnaseq_pids == run_pids # TRUE
+```
+
+
+```{r, eval=FALSE}
+case_control <- read.csv(glue("{v4_metapath}/amp_pd_case_control.csv"),
+           stringsAsFactors = FALSE, header = TRUE) %>%
+           filter(case_control_other_latest %in% c("Case", "Control")) %>% 
+    dplyr::select(participant_id, case_control_other_latest) %>% 
+    glimpse()
+
+key_meta_df <- sample_inv %>% 
+    dplyr::select(sample_id, participant_id) %>%
+    left_join(case_control) %>%
+    glimpse()
+
+genotype_meta_df <- genotype_df %>% left_join(key_meta_df) %>%
+    glimpse()
+genes_meta_df <- genes_df %>% left_join(key_meta_df) %>% 
+  glimpse()
+
+# metadata_df <- readRDS(
+#     glue("{wkdir}/data/interim/metadata/2023-07-14_phyloseq-metadata.rds"))$RNASEQ %>% 
+#     mutate(case_control_other_latest = factor(case_control_other_latest, 
+#         levels = c("Control", "Case"))) %>%
+#     # filter(case_control_other_latest != "Other") %>%
+#     glimpse()
+# key_meta_df <- metadata_df %>% select(sample_id, participant_id)
+```
+
+
+Identify any missing samples (all complete)
+
+```{r, eval=FALSE}
+# rna_seq_samples <- read_tsv(
+#   glue("{wkdir}/data/input/metadata/2021_v2-5release_0510/rma_seq_samples.tsv")
+# )
+
+# # select a single sample per participant of remaining samples to run
+# rna_seq_samples_final_wf <- rna_seq_samples %>% 
+#   filter(participant_id %in% missing_pids) %>% 
+#   group_by(participant_id) %>% 
+#   slice_sample(n = 1) %>% 
+#   glimpse()
+
+# write_tsv(rna_seq_samples_final_wf, 
+#   glue("{wkdir}/data/interim/metadata/2024-12-17_rna_seq_samples_final_wf.tsv")
+# )
+
+```
+
+
+# Examining HLA genotype consistency across samples from the same participant as a function of read depth
+
+```{r}
+genotype_meta_df_long  <- genotype_meta_df %>% 
+  pivot_longer(cols = -c(sample_id, participant_id), names_to = "gene_chr", values_to = "HLA") %>% 
+  mutate(Gene = str_sub(gene_chr, end = -2)) %>% 
+  glimpse()
+
+genes_genotypes_df_all <- genes_meta_df %>% 
+  group_by(participant_id, Gene) %>% 
+  left_join(genotype_meta_df_long) %>% 
+  glimpse()
+
+
+# Trying to determine if there is a number cutoff that should be established to remove noisey mappinbg
+hla_pid_genecounts <- genotype_meta_df_long %>% 
+  select(participant_id, Gene, HLA) %>% 
+  distinct() %>% 
+  group_by(participant_id, Gene) %>% 
+  summarise(hla_allele_count = n()) %>% 
+  glimpse()
+
+reads_per_hla_pid <- genes_genotypes_df_all %>% 
+  group_by(participant_id, Gene) %>% 
+  summarise(avg_reads = mean(reads), min_reads = min(reads), max_reads = max(reads)) %>% 
+  glimpse()
+
+sid_counts <- genes_genotypes_df_all %>% 
+  ungroup() %>% 
+  select(participant_id, sample_id) %>% 
+  distinct() %>% 
+  group_by(participant_id) %>% 
+  summarise(sid_count = n()) %>% 
+  glimpse()
+
+sid_counts$sid_count %>% table()
+
+hla_stat_summary_df <- hla_pid_genecounts %>% 
+  left_join(reads_per_hla_pid) %>% 
+  left_join(sid_counts) %>% 
+  glimpse()
+
+# hla_stat_summary_df %>% 
+#   arrange(desc(hla_allele_count)) %>% 
+#   filter(hla_allele_count > 2) %>% 
+#   View()
+
+# genotype_meta_df_long %>% 
+#   filter(participant_id == "PD-PDMM132XYE" & Gene == "C")
+
+p_arcas_summary_reads <- hla_stat_summary_df %>% 
+  ggplot(aes(x = hla_allele_count, y = min_reads)) +
+  geom_point(aes(color = Gene),
+    alpha = 0.5, size = 0.2, position = position_jitter(width = 0.3, height = 0.3)) +
+  theme_bw() +
+  scale_color_viridis_d(option = "turbo") +
+  scale_y_log10() +
+  facet_wrap(~sid_count) +
+  guides(color = guide_legend(override.aes = list(size = 3))) +
+  labs(
+    title = "HLA allele count and minimum reads per participant",
+    x = "HLA allele count",
+    y = "Minimum reads allocated to HLA allele across samples"
+  )
+
+ggsave(
+  glue("{wkdir}/figures/AIRR/arcasHLA/unique_hla_alleles_vs_minreads_facet_{Sys.Date()}.png"),
+  p_arcas_summary_reads,
+  width = 10,
+  height = 8
+)
+
+hla_stat_summary_df %>% glimpse()
+
+inconsistencies_df <- hla_stat_summary_df %>% 
+  filter(sid_count > 1) %>% 
+  filter(hla_allele_count > 2) %>% 
+  group_by(hla_allele_count, Gene) %>% 
+  summarise(nsamples_winconsistencies = n())
+inconsistencies_df %>% DT::datatable()
+
+p_gene_reads <- genes_genotypes_df_all %>% 
+  ggplot(aes(x = fct_reorder(Gene, -reads), y = reads)) +
+  geom_point(alpha = 0.3, size = 0.3, position = position_jitter(width = 0.3, height = 0)) +
+  scale_y_log10() +
+  geom_boxplot(outlier.alpha = 0, alpha = 0.7) +
+  theme_bw() +
+  labs(
+    title = "Reads per HLA gene",
+    x = NULL,
+    y = "Reads"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  glue("{wkdir}/figures/AIRR/arcasHLA/gene_reads_boxplot_{Sys.Date()}.png"),
+  p_gene_reads,
+  width = 11,
+  height = 5
+)
+
+# unique(inconsistencies_df$Gene)
+# genes_genotypes_df_all %>% 
+#   group_by(Gene) %>% 
+#   summarise(mean_gene_reads = mean(reads)) %>%
+#   DT::datatable()
+
+```
+
+Collate HLA data to participant level
+
+```{r, eval=FALSE}
+genes_genotypes_df <- genes_meta_df %>% 
+  group_by(participant_id, Gene) %>% 
+  slice_max(order_by = reads, n = 1, with_ties = FALSE) %>% 
+  left_join(genotype_meta_df_long) %>% 
+  glimpse()
+
+genotypes_cleaned <- genes_genotypes_df %>%
+  ungroup() %>% 
+  filter(!is.na(gene_chr)) %>% # removes HLAs that didn't make the cut into genotype table
+  select(participant_id, gene_chr, HLA) %>% 
+  pivot_wider(names_from = gene_chr, values_from = HLA, values_fill = NA_character_) %>% 
+  glimpse()
+
+saveRDS(genotypes_cleaned, 
+  glue("{arcasHLA_interim}/genotypes_cleaned_{Sys.Date()}.rds")
+  )
+
+```
+
+
+
+
+
+| **HLA Allele** | **Population (Sample)** | **Study Type** | **P-Value** | **Effect Size (OR)** | **Replication / Notes** |
+|----------------|--------------------------|----------------|-------------|-----------------------|--------------------------|
+| [HLA-DRB1*15:01](https://pubmed.ncbi.nlm.nih.gov/37597517/)<br> | European ancestry (GWAS, meta) | GWAS, meta-analysis | 2×10^–7 to <0.0001 | OR ~1.18–1.3 | Replicated in large cohorts; presents α-syn peptides; mouse model data supports risk role |
+| [HLA-DRB1*03:01](https://pubmed.ncbi.nlm.nih.gov/22807207/)<br> | Chinese Han (567 PD, 746 controls) | Case–control | 3.95×10^–5 | OR ~2.05 | Population-specific risk allele; not seen in Europeans |
+| [HLA-DRB1*13](https://pubmed.ncbi.nlm.nih.gov/22807207/)<br> | South India (105 PD, 100 controls) | Case–control | <0.001 | OR ~4.04 | Single study; not replicated |
+| [HLA-B*07:02](https://pubmed.ncbi.nlm.nih.gov/22807207/)<br> | European ancestry | GWAS | 9×10^–11 | OR ~1.3; homozygous ~1.94 | Part of DR15 haplotype; replicated |
+| [HLA-DQB1*06:03](https://pubmed.ncbi.nlm.nih.gov/22807207/)<br> | South India | Case–control | 0.003 | OR ~2.65 | Reported in 1 study; part of DRB1*13 haplotype |
+| [HLA-DQB1*02:01](https://pubmed.ncbi.nlm.nih.gov/22807207/)<br> | South India | Case–control | 0.02 | OR ~2.66 | Not widely studied elsewhere |
+| [HLA-DQA1*01:04:01](https://pubmed.ncbi.nlm.nih.gov/22807207/)<br> | South India | Case–control | 0.01 | OR ~4.51 | Rare; unreplicated |
+| [HLA-DRB1*01:01](https://pubmed.ncbi.nlm.nih.gov/22807207/)<br> | Multi-ancestry (meta, 1.48M individuals) | GWAS, meta-analysis | 0.007 | OR ~1.05 | Small but robust effect; replicated |
+| [HLA-DQB1*03:04](https://pubmed.ncbi.nlm.nih.gov/22807207/),<br>[HLA-A*11:01](https://pubmed.ncbi.nlm.nih.gov/22807207/) | Immunological response context | Functional T-cell assays | – | – | No genetic association; linked to α-syn peptide response in PD T-cells |
+
+
+
+
+
+
+| HLA Allele           | Population (Sample)                        | Study Type                | P-Value           | Effect Size (OR)       | Replication / Notes                                                                                               |
+|----------------------|---------------------------------------------|---------------------------|--------------------|-------------------------|--------------------------------------------------------------------------------------------------------------------|
+| [HLA-DRB1*04:04](https://www.pnas.org/doi/10.1073/pnas.2302720120) | European ancestry (GWAS, meta)             | GWAS, meta-analysis       | 4×10^–5 to 1.5×10^–11 | OR ~0.65–0.84           | Strong protective effect; replicated; has His13, weak α-syn binding                                              |
+| [HLA-DRB1*04:01](https://www.pnas.org/doi/10.1073/pnas.2302720120) | European ancestry                          | Case–control, meta        | 0.0002 to 2.4×10^–8 | OR ~0.70–0.92           | Common allele; consistent protective association                                                                  |
+| [HLA-DRB1*04:07](https://www.pnas.org/doi/10.1073/pnas.2302720120) | Multi-ancestry                             | GWAS meta-analysis        | 7.3×10^–4 to 2.7×10^–5 | OR ~0.79                | Less common DR4 allele; similar protective motif                                                                  |
+| [HLA-DRB1*04:06](https://pubmed.ncbi.nlm.nih.gov/22807207/) | Chinese Han                                | Case–control              | 5.0×10^–5          | OR ~0.12                | Strong protective effect in Asians; rare in Europeans                                                             |
+| [HLA-DRB1*04:02](https://pubmed.ncbi.nlm.nih.gov/22807207/) / [*04:03](https://pubmed.ncbi.nlm.nih.gov/22807207/) | Multi-ancestry                        | GWAS fine-mapping         | ~0.01–0.02         | OR ~0.89–0.92           | Protective trend consistent with DR4 alleles                                                                      |
+| [HLA-DQA1*03:01](https://pubmed.ncbi.nlm.nih.gov/22807207/) | European ancestry                          | GWAS, meta-analysis       | 0.0001 to 2.5×10^–20 | OR ~0.75–0.89           | Part of DR4-DQ8 haplotypes; consistent protective role                                                            |
+| [HLA-DQB1*03:02](https://pubmed.ncbi.nlm.nih.gov/22807207/) | European ancestry                          | GWAS, meta-analysis       | 2.6×10^–14         | OR ~0.91                | Co-inherited with DRB1*04; consistent protective effect                                                           |
+| [HLA-C*03:04](https://pubmed.ncbi.nlm.nih.gov/22807207/) | European ancestry                          | GWAS                      | 8×10^–6            | OR ~0.72                | Class I allele; significant independent signal                                                                    |
+| [HLA-DRB1*10](https://pubmed.ncbi.nlm.nih.gov/22807207/) | South India                                | Case–control              | 0.003              | OR ~0.34                | Local study; needs replication                                                                                    |
+| [HLA-DRB1*15](https://pubmed.ncbi.nl
+
+
+
+
+### References
+
+- [Hamza, T. et al. (2010). *Nat. Genet.* – First GWAS identifying HLA region (rs3129882 in HLA-DRA) as a PD risk locus](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2910472/)
+- [Ahmed, I. et al. (2012). *Mov. Disord.* – Detailed HLA-DRB1 analysis; found DRB1*04 protective (meta OR≈0.86) and highlighted rs660895-G (tagging DRB1*04)](https://pubmed.ncbi.nlm.nih.gov/22807207/)
+- [Wissemann, W. et al. (2013). *Am. J. Hum. Genet.* – Fine-mapping of PD-HLA: identified DRB1*15:01 haplotype as risk and DRB1*04:04, C*03:04 as protective](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3786679/)
+- [Sun, C. et al. (2012). *PLoS ONE* – Chinese Han study: DRB1*03:01 risk (OR≈2.0) and DRB1*04:06 protective (OR≈0.12)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3406013/)
+- [Yu, E. et al. (2021). *NPJ Parkinson’s Dis.* – HLA fine-mapping in Europeans: confirmed protective DRB1*04 variants and noted the PD risk is driven by specific amino acids (e.g. 11V, 13H) in HLA-DRB1](https://www.nature.com/articles/s41531-021-00203-z)
+- [Naito, T. et al. (2021). *Mov. Disord.* – Trans-ethnic GWAS: pinpointed HLA-DRβ1 position 13 (Histidine vs Arginine) as the key determinant of PD risk, explaining DRB1*04 vs *15:01 effects](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8576141/)
+- [Hollenbach, J. et al. (2019). *PNAS* – Multi-ancestry analysis in AD and PD: found HLA-DRB1*04:01/*04:04 significantly protective in both diseases](https://www.pnas.org/doi/10.1073/pnas.1907982116)
+- [He, R. et al. (2024). *Front. Aging Neurosci.* – Chinese study of rs660895 (HLA-DRB1 region): G allele associated with lower PD risk (OR~0.72) and slower disease progression](https://www.frontiersin.org/articles/10.3389/fnagi.2024.1327843/full)
+- [Hill-Burns, E. et al. (2011). *PLoS ONE* – Conditional haplotype analysis: multiple independent HLA associations and additive risk from multiple alleles](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0027109)
+- [Sulzer, D. et al. (2017). *Nature* – Functional link: T cells from PD patients reacted to α-synuclein peptides presented by HLA-DRB1*15:01 and DRB5*01:01](https://www.nature.com/articles/nature22815)
+
+
+
+```{r}
+gdf <- readRDS(
+    glue("{wkdir}/data/interim/airr/arcasHLA/genotypes_cleaned_2025-07-06.rds")) %>% 
+  glimpse()
+
+# Basic sample demographic metadta
+dem <- read.csv(glue("{v4_clincial}/Demographics.csv"),
+           stringsAsFactors = FALSE, header = TRUE) %>%
+  dplyr::select(-c(visit_name, visit_month, GUID)) %>%
+  dplyr::mutate_if(is.character, ~na_if(., "Unknown")) %>%
+  glimpse()
+
+cohort_meta <- read.csv(glue("{v4_metapath}/amp_pd_participants.csv"),
+           stringsAsFactors = FALSE, header = TRUE) %>%
+  dplyr::select(participant_id, study) %>% 
+  glimpse()
+
+pid_meta <- key_meta_df %>% 
+  left_join(dem) %>% 
+  left_join(cohort_meta) %>% 
+  glimpse()
+
+```
+
+
+
+```{r}
+# gdata_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_hla_genotypes")
+# dir.create(gdata_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Define a function to trim after second colon
+format_hla_allele <- function(x) {
+    # Count the number of colons
+    colon_count <- stringr::str_count(x, "\\:")
+    #   message(colon_count)f
+
+    if (colon_count > 1) {
+        res <- strex::str_before_last(x, ":") %>% gsub("\\:|\\*", "_", .)
+        return(res)
+    } else {
+        res <- gsub("\\:|\\*", "_", x)
+        return(res)
+    }
+}
+
+format_hla_allele_vec <- Vectorize(format_hla_allele)
+
+remove_genotypes_hwe <- c()
+remove_genotypes_freq <- c()
+genotype_df_list_all <- list()
+genotype_df_list <- list()
+genotype_df_list_only_lowfreq_removed <- list()
+all_freq_df <- tibble()
+all_hwe_df <- tibble()
+mhc_genes <- c("A", "B", "C", "DPA1", "DPB1", "DQA1", "DQB1", "DRB1")
+for (gene in mhc_genes) {
+    message(glue("Processing {gene}..."))
+    gcopies <- paste0(gene, 1:2)
+
+    # Extract and clean allele names
+    alleles_df <- gdf %>%
+        dplyr::select(participant_id, all_of(gcopies)) %>%
+        dplyr::mutate_at(
+            vars(contains(gcopies)),
+            ~ replace_na(., "") %>% format_hla_allele_vec()
+        ) %>%
+        dplyr::mutate_at(
+            vars(contains(gcopies)),
+            ~ paste0("HLA_", .x)
+        )
+
+    # Get unique allele names across both columns
+    allele1_values <- unique(alleles_df[[gcopies[1]]])
+    allele2_values <- unique(alleles_df[[gcopies[2]]])
+    all_alleles <- unique(c(allele1_values, allele2_values)) %>% 
+      discard(~ . == "HLA_") # remove empty strings
+
+    # Create empty result dataframe
+    result_df <- data.frame(participant_id = alleles_df$participant_id)
+
+    # Fill in counts for each allele
+    for (allele in all_alleles) {
+        result_df[[allele]] <- 0
+        # Check allele1
+        result_df[[allele]] <- result_df[[allele]] +
+            ifelse(alleles_df[[gcopies[1]]] == allele, 1, 0)
+        # Check allele2
+        result_df[[allele]] <- result_df[[allele]] +
+            ifelse(alleles_df[[gcopies[2]]] == allele, 1, 0)
+    }
+
+    # Add row sum
+    # message("Row sum table:")
+    print(table(rowSums(result_df[, -1])))
+    
+    allele_freqs <- result_df %>%
+        dplyr::select(-c(participant_id)) %>%
+        colSums()
+    # need at least 5 unique donors with the genotype to be included (5*2 for both alleles)
+    # maf <- 10 / nrow(result_df)
+    freq <- allele_freqs / (2 * nrow(result_df))
+    freq_df <- data.frame(allele = names(freq), freq = unname(freq)) %>% 
+      mutate(gene = gene)
+    all_freq_df <- bind_rows(all_freq_df, freq_df)
+    remove_genotypes_lowfreq <- c(
+        remove_genotypes_freq,
+        names(freq)[freq < 0.01]
+        # names(freq)[freq < maf],
+    )
+    remove_genotypes_highfreq <- c(
+        remove_genotypes_freq,
+        names(freq)[freq > 0.99]
+    )
+
+    df <- result_df %>%
+        column_to_rownames(var = "participant_id") %>%
+        as.matrix()
+
+    hwe_p <- apply(df, 2, function(x) {
+        x <- as.numeric(x)
+        # observed data
+        a0 <- length(x[x == 0])
+        a1 <- length(x[x == 1])
+        a2 <- length(x[x == 2])
+
+        freq <- sum(x) / (2 * length(x))
+        # expedted data
+        P_a0 <- (1 - freq)^2
+        P_a1 <- 2 * (1 - freq) * freq
+        P_a2 <- freq^2
+
+        chitest <- chisq.test(c(a0, a1, a2), p = c(P_a0, P_a1, P_a2)) # simulate.p.value = TRUE, B = 2000
+        chitest$p.value
+    })
+
+    hwe_df <- data.frame(allele = names(hwe_p), hwe_p = unname(hwe_p)) %>% 
+      mutate(gene = gene)
+    all_hwe_df <- bind_rows(all_hwe_df, hwe_df)
+
+    remove_genotypes_hwe <- c(remove_genotypes_hwe, 
+      names(hwe_p[hwe_p <= 1e-04])
+    )
+    
+    genotype_df_list_all[[gene]] <- result_df %>%
+        column_to_rownames(var = "participant_id") %>% 
+        glimpse()
+    
+    genotype_df_list_only_lowfreq_removed[[gene]] <- genotype_df_list_all[[gene]] %>% 
+        dplyr::select(-any_of(c(remove_genotypes_lowfreq))) %>% 
+        glimpse()
+    
+    genotype_df_list[[gene]] <- genotype_df_list_only_lowfreq_removed[[gene]] %>% 
+        dplyr::select(-any_of(c(remove_genotypes_highfreq, remove_genotypes_hwe))) %>% 
+        glimpse()
+      
+}
+
+message(glue(
+    "\n\nFLAG: Low frequency genotypes: \n",
+    "{paste(remove_genotypes_lowfreq, collapse = ', ')}"
+))
+
+message(glue(
+    "\n\nFLAG: High frequency genotypes: \n",
+    "{paste(remove_genotypes_highfreq, collapse = ', ')}"
+))
+
+message(glue(
+    "\n\nFLAG: Hardy-Weinberg Non-independence:\n",
+    " {paste(remove_genotypes_hwe, collapse = ', ')}"
+))
+
+
+```
+
+
+```{r}
+#' This is the genotype data that will be integrated into metadata 
+#' and used in downstream cdr3 qtl analyses 
+all_mhc_genotypes_lowfreq_removed <- genotype_df_list_only_lowfreq_removed %>% 
+  purrr::reduce(bind_cols) %>% 
+  glimpse()
+
+saveRDS(all_mhc_genotypes_lowfreq_removed, 
+  glue("{hla_dir}/MHC_all_cleaned_lowfreqtrim-only_{Sys.Date()}.rds")
+)
+
+# Unfiltered genotype data - used for HLA-risk score
+all_mhc_genotypes <- genotype_df_list_all %>% 
+  purrr::reduce(bind_cols) %>% 
+  glimpse()
+
+saveRDS(all_mhc_genotypes, 
+  glue("{hla_dir}/MHC_all_cleaned_unfiltered_{Sys.Date()}.rds")
+)
+
+# Aggregate genotypes into class I and class II
+# This has more stringent filtering and is used for PCA
+mhc1_alleles <- c("A", "B", "C")
+mhc2_alleles <- c("DPA1", "DPB1", "DQA1", "DQB1", "DRB1")
+
+mhc1_genotypes <- mhc1_alleles %>% 
+  purrr::map(~ genotype_df_list[[.x]]) %>% 
+  bind_cols() %>% 
+  glimpse()
+mhc2_genotypes <- mhc2_alleles %>% 
+  purrr::map(~ genotype_df_list[[.x]]) %>% 
+  bind_cols() %>% 
+  glimpse()
+all_mhc_genotypes <- bind_cols(mhc1_genotypes, mhc2_genotypes) %>% glimpse()
+
+```
+
+
+Performing PCA on genotype data
+
+```{r}
+#PCA
+pca_mhc1 <- prcomp(as.matrix(mhc1_genotypes), scale = TRUE)
+pca_mhc1_df <- pca_mhc1$x %>% as.data.frame()
+pca_mhc2 <- prcomp(as.matrix(mhc2_genotypes), scale = TRUE)
+pca_mhc2_df <- pca_mhc2$x %>% as.data.frame()
+pca_mhc_all <- prcomp(as.matrix(all_mhc_genotypes), scale = TRUE)
+pca_mhc_all_df <- pca_mhc_all$x %>% as.data.frame()
+
+collect_cumvar <- function(pca_obj, df_tag) {
+  data.frame("cumprop" = summary(pca_obj)$importance["Cumulative Proportion", ]) %>% 
+    tibble::rownames_to_column(var = "PC") %>% 
+    dplyr::mutate(PC_num = PC %>% gsub("PC", "", .) %>% as.numeric()) %>% 
+    dplyr::mutate(MHC = df_tag)
+}
+
+mhc1_cumvar <- collect_cumvar(pca_mhc1, "MHCI")
+mhc2_cumvar <- collect_cumvar(pca_mhc2, "MHCII")
+mhc_all_cumvar <- collect_cumvar(pca_mhc_all, "MHC_all")
+
+# how many PCs are needed to explain at least 80% of the variance?
+list(mhc1_cumvar, mhc2_cumvar, mhc_all_cumvar) %>% purrr::map(
+  ~ {{filter(., cumprop >= 0.8) %>% slice_min(PC_num) %>% pull(PC)}}
+)
+
+p_mhc_cumulative_variance <- bind_rows(mhc1_cumvar,mhc2_cumvar, mhc_all_cumvar) %>% 
+  ggplot(aes(x = PC_num, y = cumprop, color = MHC)) +
+  geom_line(aes(group = MHC), size = 1.5) +
+  theme_bw() +
+  scale_color_d3() +
+  labs(x = "Principal Component Dimension", y = "Cumulative Proportion of Variance")
+
+ggsave(
+  glue("{hla_plots_dir}/PCA/mhc_pca_cumulative_variance.png"),
+  plot = p_mhc_cumulative_variance,
+  width = 10,
+  height = 6
+)
+
+# Saving filtered Genotype data
+saveRDS(all_mhc_genotypes, 
+  glue("{hla_dir}/MHC_all_cleaned_{Sys.Date()}.rds")
+)
+saveRDS(mhc1_genotypes, 
+  glue("{hla_dir}/MHCI_cleaned_{Sys.Date()}.rds")
+)
+saveRDS(mhc2_genotypes, 
+  glue("{hla_dir}/MHCII_cleaned_{Sys.Date()}.rds")
+)
+
+# Save MHC PCA metadata
+saveRDS(pca_mhc1, glue("{pca_dir}/pca_MHCI_{Sys.Date()}.rds"))
+saveRDS(pca_mhc2, glue("{pca_dir}/pca_MHCII_{Sys.Date()}.rds"))
+saveRDS(pca_mhc_all, glue("{pca_dir}/pca_MHC_all_{Sys.Date()}.rds"))
+
+pca_mhc1_final_df <- pca_mhc1_df %>% 
+  dplyr::rename_all(~paste0("MHC_I_", .))
+pca_mhc2_final_df <- pca_mhc2_df %>% 
+  dplyr::rename_all(~paste0("MHC_II_", .))
+pca_mhc_all_final_df <- pca_mhc_all_df %>% 
+  dplyr::rename_all(~paste0("MHC_all_", .))
+
+pca_mhc_combined_final_df <- bind_cols(
+  pca_mhc1_final_df[, 1:10],
+  pca_mhc2_final_df[, 1:10],
+  pca_mhc_all_final_df[, 1:10]) %>% glimpse()
+
+saveRDS(pca_mhc1_final_df, glue("{pca_dir}/df_pca_MHCI_{Sys.Date()}.rds"))
+saveRDS(pca_mhc2_final_df, glue("{pca_dir}/df_pca_MHCII_{Sys.Date()}.rds"))
+saveRDS(pca_mhc_all_final_df, glue("{pca_dir}/df_pca_MHC_all_{Sys.Date()}.rds"))
+saveRDS(pca_mhc_combined_final_df, glue("{pca_dir}/df_pca_MHC_all_combined_{Sys.Date()}.rds"))
+
+```
+
+
+
+![Cumulative Explained Variance by MHC Class](../figures/AIRR/arcasHLA/PCA/mhc_pca_cumulative_variance.png)
+
+**Key Takeaway**
+
+- MHC I and II have similar cumulative explained variance with 80% variance explained by 30 and 24 components, respectively.
+
+- The combined binary matrix requires 50 PCs to explain 80% of the variance. 
+
+- Each of the first few PCs explain only a small portion of the variance. (3-5%)
+
+
+```{r}
+# pid_meta <- full_meta_df %>%
+#     select(participant_id, case_control_other_latest, ethnicity, race, sex, study) %>%
+#     distinct() %>%
+#     glimpse()
+
+plot_mhc_pca <- function(pca_obj, colorvar, pca_dim1, pca_dim2) {
+    pca_df <- pca_obj$x %>% as.data.frame()
+    var_explained <- pca_obj$sdev^2 / sum(pca_obj$sdev^2)
+    percent_var <- round(100 * var_explained, 1)
+
+    pca_df %>%
+        rownames_to_column(var = "participant_id") %>%
+        left_join(pid_meta, by = "participant_id") %>%
+        drop_na({{ colorvar }}) %>%
+        dplyr::slice_sample(prop = 1) %>%
+        ggplot(aes(x = {{ pca_dim1 }}, y = {{ pca_dim2 }}, color = .data[[colorvar]])) +
+        stat_ellipse(type = "norm", level = 0.95) +
+        geom_point() +
+        scale_color_d3() +
+        coord_fixed() +
+        theme_bw() +
+        labs(
+            x = paste0("PC1 (", percent_var[1], "%)"),
+            y = paste0("PC2 (", percent_var[2], "%)")
+        )
+}
+
+# # sample execution
+# plot_mhc_pca(pca_mhc1, ethnicity, PC1, PC2)
+pca_obj_list <- list(pca_mhc1, pca_mhc2, pca_mhc_all)
+names(pca_obj_list) <- c("mhc1", "mhc2", "mhc_all")
+
+for (i in seq_along(pca_obj_list)) {
+  pca_obj <- pca_obj_list[[i]]
+  pca_obj_name <- names(pca_obj_list)[i]
+
+  for (var in c("ethnicity", "race", "study", "case_control_other_latest")) {
+    message(glue("Plotting {pca_obj_name} pca_{var}..."))
+    p <- plot_mhc_pca(pca_obj, var, PC1, PC2)
+    ggsave(glue("{hla_plots_dir}/PCA/{pca_obj_name}_pca_{var}.png"), 
+      plot = p, width = 10, height = 10)
+  }
+}
+
+```
+
+
+![PCA of MHC I & II](../figures/AIRR/arcasHLA/PCA/mhc_all_pca_case_control_other_latest.png)
+![PCA of MHC I](../figures/AIRR/arcasHLA/PCA/mhc1_pca_case_control_other_latest.png)
+![PCA of MHC II](../figures/AIRR/arcasHLA/PCA/mhc2_pca_case_control_other_latest.png)
+
+
+**Key Takeaways**
+
+- MHC I distributions seem more normal while MHC II distributions seem more structured with subclusters
+- There appears to be no distinct subclusters of samples by case/control status nor ethnicity, sex, or race.
+
+
+# Building an HLA-risk score 
+
+Here we will use the beta-coefficients from 
+(Yu E et al., 2021 | Fine mapping of the HLA locus in Parkinson’s disease in Europeans)[https://www.nature.com/articles/s41531-021-00231-5]
+
+
+- This is a European-only fine-mapping in 13,770 clinically diagnosed cases, 20,214 proxy-cases, and 490,861 controls from UK Biobank and 23andMe
+
+- Exactly four class-II alleles survived multiple-testing: DQA103:01, DQB103:02, DRB104:01 and DRB104:04, all showing protective odds-ratios (~0.86-0.89). 
+
+ - In Europeans, PD risk within the HLA locus is almost entirely driven by the DRB1*04 protective motif; no additional independent class-I or class-III effects remain after accounting for it, streamlining future mechanistic and translational studies.
+
+
+
+- We access the allele-level meta-analysis for 141 four-digit alleles in Supplementary Data 3 which lists the four that reach study-wide significance. 
+
+
+Here we filter these four significant alleles, their beta-coefficients, and their odds-ratios.
+
+
+
+
+```{r}
+# Read in HLA fine mapping data from Yu et al. 2021
+library(readxl)
+
+# In this table the first set of results are not adjusted for any additional covariates, subsequent rounds adjust for other various components - we will use the first set of results.
+
+hla_fine_mapping_path <- glue("{wkdir}/data/input/hla_fine_mapping/41531_2021_231_MOESM4_ESM.xlsx")
+hla_fine_mapping <- read_excel(hla_fine_mapping_path, sheet = 1, skip = 3) %>%
+  janitor::clean_names() %>% 
+  # fill in empty gene names 
+  tidyr::fill(gene, .direction = "down") %>%
+  mutate(hla_allele = paste0(gene, "_", allele)  %>% gsub("\\-|:", "_", .), .before = 1) %>% 
+  # this selects for results that are not adjusted for any additional covariates
+  dplyr::select(1:11) %>% 
+  drop_na(allele) %>% 
+  glimpse()
+
+sig_hla_alleles <- hla_fine_mapping %>% 
+  dplyr::filter(p_value_8 < 0.05/141) %>%
+  glimpse()
+
+sig_hla_alleles %>% 
+  dplyr::select(gene, allele, beta_coefficient = effect_6, p_value = p_value_8) %>% 
+  DT::datatable()
+
+```
+
+
+Harmonizing scores with our genotype data
+
+
+```{r}
+hla_dir <- glue("{wkdir}/data/interim/airr/arcasHLA/analysis_cleaned")
+
+# Loading biallelic HLA genotype count matrix
+hla_alleles_df <- readRDS(
+  glue("{hla_dir}/MHC_all_cleaned_unfiltered_2025-07-21.rds")) %>%
+  rownames_to_column(var = "participant_id") %>%
+  select(participant_id, any_of(allele_weights$hla_allele)) %>% 
+  glimpse()
+
+
+allele_weights <- sig_hla_alleles %>% 
+  transmute(hla_allele = hla_allele, beta = effect_6)  %>% 
+  glimpse()
+allele_weights
+
+hla_score <- hla_alleles_df %>%
+             pivot_longer(-participant_id, names_to="hla_allele", values_to="dosage") %>%
+             left_join(allele_weights) %>%
+             replace_na(list(beta = 0)) %>%
+             mutate(part = beta * dosage) %>%
+             group_by(participant_id) %>%
+             dplyr::summarise(pd_hla_risk_score = sum(part)) %>% 
+             mutate(pd_hla_risk_score_z  = scale(pd_hla_risk_score)[,1]) %>% 
+             glimpse()
+
+
+saveRDS(hla_score, glue("{hla_dir}/hla_risk_score_{Sys.Date()}.rds"))
+#' quick note about these scores - we only have protective scores so the largest values will be 0 
+#' the more negative - the more protective of a score overall
+
+```
+
+
+```{r}
+# simple visualization of the risk score
+hla_dir <- glue("{wkdir}/data/interim/airr/arcasHLA/analysis_cleaned")
+hla_score_df <- readRDS(glue("{hla_dir}/hla_risk_score_2025-07-21.rds")) %>% 
+  right_join(metadata) %>% 
+  glimpse()
+
+# generate a density plot of the risk score
+p_hla_score_density <- hla_score_df %>% 
+  filter(case_control_other_latest != "Other") %>% 
+  ggplot(aes(x = pd_hla_risk_score, color = case_control_other_latest)) +
+  # add a rug plot
+  geom_rug() +
+  geom_density() +
+  theme_bw() +
+  labs(x = "HLA Risk Score", y = "Density") +
+  scale_color_d3() +
+  theme(legend.position = "top")
+
+ggsave(
+  glue("{hla_plots_dir}/hla_risk_score/hla_risk_score_density.png"),
+  plot = p_hla_score_density,
+  width = 5,
+  height = 4
+)
+
+# in our dataset it seems that we have more protective HLA risk scores in controls than in PD - interesting - needs stats test
+p_hla_score_boxplot <- hla_score_df %>% 
+  filter(case_control_other_latest != "Other") %>% 
+  ggplot(aes(y = pd_hla_risk_score_z, x = case_control_other_latest)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(position = position_jitter(width = 0.2), alpha = 0.5) +
+  theme_bw() +
+  labs(y = "HLA Risk Score", x = NULL) +
+  scale_color_d3()
+
+ggsave(
+  glue("{hla_plots_dir}/hla_risk_score/hla_risk_score_boxplot.png"),
+  plot = p_hla_score_boxplot,
+  width = 5,
+  height = 5
+)
+
+
+  # facet_wrap(~grouping, nrow = 1, scales = "free") +
+  # stat_compare_means(comparisons = grp_comparisons) +
+  # stat_compare_means() +
+  # # stat_compare_means(method = "wilcox.test", label.y.npc = 0.9) +
+  # labs(x = NULL, y = "Unique Taxa per sample", color = "interval") +
+  #   guides(size = "none", fill = "none") +
+  #   scale_fill_d3() +
+  #   scale_y_log10() +
+  #   theme(
+  #     axis.text.x = element_text(angle = 45, hjust = 1),
+  #     legend.position = "top",
+  #     panel.border = element_blank()
+    )
+
+
+
+
+# Here I am curious to see if PD patients that have a more protective score (more negative) have more or less severe PD symptoms
+hla_score %>% 
+  left_join(metadata) %>%
+  filter(case_control_other_latest != "Other") %>% 
+  ggplot(aes(y = pd_hla_risk_score_z, x = mds_updrs_part_iii_summary_score, color = case_control_other_latest)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  theme_bw() +
+  scale_color_d3()
+  # labs(x = "HLA Risk Score", y = "Case/Control Status") +
+
+```
+
+
+```{r}
+sessionInfo()
+```

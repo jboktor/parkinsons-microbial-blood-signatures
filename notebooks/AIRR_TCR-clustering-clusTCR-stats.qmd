@@ -1,0 +1,1930 @@
+---
+title: "ClusTCR Statistics"
+editor: source
+author: "Joe Boktor"
+date: '2025-09-08'
+eval: false
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+# ClusTCR Statistics
+
+Environment setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(seqinr)
+library(progress)
+library(immunarch)
+library(nlme)
+library(broom)
+library(broom.mixed)
+library(parallelDist)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+library(scico)
+# library(glmmTMB)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+source(paste0(src_dir, "/R_scripts/_airr_analyze-permanova.R"))
+
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+gliph2_plots_dir <- glue("{wkdir}/figures/AIRR/gliph2/")
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+arcasHLA_interim <- glue("{wkdir}/data/interim/airr/arcasHLA")
+gliph2_input_dir <- glue("{wkdir}/data/input/gliph2/param_files")
+gliph2_res_dir <- glue("{wkdir}/data/interim/airr/gliph2/processing")
+clustcr_dir <- glue("{wkdir}/data/interim/clusTCR")
+clustcr_figs <- glue("{wkdir}/figures/clusTCR")
+tcr_cdr3_riskscore_complied <- 
+    glue("{wkdir}/data/interim/cdr3_qtl/scoring_cdr3-risk-scores_complied")
+cohort_subset_dir <- glue("{clustcr_dir}/results/cohort_subsets")
+
+```
+
+## Chi-squared test for PD enriched/depeleted clusters
+
+Loading in compiled clusTCR results dataframe
+```{r}
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  # left_join(clonotype_volume_df, by = "sample_id") %>% 
+  glimpse()
+
+metadata_categories_df <- readRDS(
+  glue("{wkdir}/data/interim/metadata/metadata_categories_dataframe_2025-07-21.rds")) %>% 
+  glimpse()
+
+clustcr_results_df <- readRDS(
+  glue("{clustcr_dir}/results/compiled_clustcr_results_df_2025-08-24.rds"))
+clustcr_results_df %>% glimpse()
+
+clustcr_results_df_filtered <- clustcr_results_df %>% 
+  filter(unique_donors_per_clust >= 10) %>% 
+  filter(motif_length >= 9) %>% 
+  glimpse()
+clustcr_results_df_filtered %>% glimpse()
+clustcr_results_df_filtered$cluster_id %>% unique() %>% length()
+```
+
+Executing Chi-squared test for PD enriched/depeleted clusters
+
+```{r}
+sample_groups_df <- clustcr_results_df_filtered %>%
+    dplyr::select(participant_id, case_control_other_latest) %>%
+    distinct() %>% glimpse()
+
+grp_n <- sample_groups_df$case_control_other_latest %>% table()
+case_n_base <- grp_n[["Case"]]
+ctrl_n_base <- grp_n[["Control"]]
+cidx_list <- unique(clustcr_results_df_filtered$cluster_id)
+
+# 1.  unique donors per (cluster × group) in one pass 
+per_cluster <- clustcr_results_df_filtered %>%
+  dplyr::distinct(cluster_id, participant_id, case_control_other_latest) %>%
+  dplyr::count(cluster_id, case_control_other_latest, name = "n") %>%
+  pivot_wider(names_from = case_control_other_latest,
+              values_from = n,
+              values_fill = 0) %>%
+  mutate(
+    remCase = case_n_base - Case,
+    remCtrl = ctrl_n_base - Control
+  ) %>% 
+  glimpse()
+
+per_cluster %>% glimpse()
+
+# per_cluster: data-frame with Case, Control, remCase, remCtrl columns
+future::plan(future::multisession, workers = 4)
+chi2_stats <- furrr::future_pmap_dfr(
+  per_cluster %>% select(Case, Control, remCase, remCtrl),
+  function(Case, Control, remCase, remCtrl) {
+    mat <- matrix(c(Case, Control, remCase, remCtrl), nrow = 2)
+    ## 1. χ² test (no Yates correction keeps it comparable to Fisher)
+    ct <- suppressWarnings(chisq.test(mat, correct = FALSE))
+    ## 2. Odds ratio for context
+    or <- ((Case + 0.5)  * (remCtrl + 0.5)) / ((Control + 0.5) * (remCase + 0.5))
+    list(
+      chi2_p_value = ct$p.value,
+      chi2_stat    = unname(ct$statistic),
+      odds_ratio   = or,
+      exp_case_cluster    = ct$expected[1],
+      exp_control_cluster = ct$expected[2]
+    )
+  }
+)
+future::plan(sequential)
+
+chi2_results_df <- bind_cols(per_cluster, chi2_stats) %>% 
+    mutate(adj_chi2_p_value = stats::p.adjust(chi2_p_value, method = "fdr")) %>%
+    arrange(chi2_p_value) %>% 
+    glimpse()
+
+chi2_results_df %>% 
+    slice_head(n = 10, by = chi2_p_value) %>% 
+    View()
+
+saveRDS(chi2_results_df, file = 
+  glue("{clustcr_dir}/results/chi2_results/chi2_results_df_{Sys.Date()}.rds"))
+
+
+```
+
+
+```{r}
+chi2_results_df <- readRDS(
+  glue("{clustcr_dir}/results/chi2_results/chi2_results_df_2025-09-08.rds")) %>% 
+  glimpse()
+
+cluster_sscore_filtered <- clustcr_results_df_filtered %>% 
+  dplyr::select(cluster_id, Q_data, risk_score_p2_glrm_strat) %>% 
+  group_by(cluster_id) %>% 
+  dplyr::summarize(
+    avg_risk_score = mean(risk_score_p2_glrm_strat, na.rm = TRUE),
+    avg_selection_score = mean(log10(Q_data), na.rm = TRUE)) %>% 
+  glimpse()
+
+cluster_stats_filtered <- clustcr_results_df_filtered %>% 
+  dplyr::select(cluster_id, motif, unique_donors_per_clust, unique_samples_per_clust, motif_length) %>% 
+  distinct() %>% 
+  left_join(cluster_sscore_filtered) %>% 
+  glimpse()
+
+# chi2_results_df %>% 
+#   slice_min(chi2_p_value, n = 50) %>% 
+#   View
+
+chi2_results_df <- chi2_results_df %>% 
+  left_join(cluster_stats_filtered) %>% 
+  glimpse()
+
+chi2_results_df %>% glimpse()
+
+p_chi2_volcano <- chi2_results_df %>% 
+  mutate(cluster_id = str_before_first(cluster_id, "_")) %>% 
+  # Add a column to identify significant points
+  mutate(
+    significant = case_when(
+      abs(log2(odds_ratio)) >= 0.5 & chi2_p_value <= 0.05 ~ case_when(
+        odds_ratio > 1 ~ "Enriched in Cases",
+        odds_ratio < 1 ~ "Enriched in Controls"
+      ),
+      TRUE ~ "Not Significant"
+    ),
+    # Create custom hover text
+    hover_text = sprintf(
+      "Cluster: %s\nP-value: %.2e\nOdds Ratio: %.2f\nUnique Donors: %d",
+      cluster_id, chi2_p_value, odds_ratio, unique_donors_per_clust
+    )
+  ) %>%
+  # Add a column to identify points to label
+  mutate(
+    label_text = case_when(
+      # Top 15 most significant enriched in cases
+      significant == "Enriched in Cases" & 
+        chi2_p_value <= (arrange(filter(., significant == "Enriched in Cases"), chi2_p_value) %>% 
+                         slice_head(n = 15) %>% 
+                         pull(chi2_p_value) %>% 
+                         max()) ~ cluster_id,
+      # Top 8 most significant enriched in controls
+      significant == "Enriched in Controls" & 
+        chi2_p_value <= (arrange(filter(., significant == "Enriched in Controls"), chi2_p_value) %>% 
+                         slice_head(n = 8) %>% 
+                         pull(chi2_p_value) %>% 
+                         max()) ~ cluster_id,
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  ggplot(aes(x = log2(odds_ratio), y = -log10(chi2_p_value), 
+             color = significant, text = hover_text)) +
+  geom_point(alpha = 0.5, aes(size = unique_donors_per_clust)) +
+  # Add ggrepel text labels
+  geom_label_repel(
+    aes(label = label_text),
+    size = 3,
+      force = 100,
+    max.overlaps = Inf,
+    box.padding = 0.5,
+    segment.color = "grey50",
+    show.legend = FALSE,
+    segment.curvature = 0.3,
+    segment.ncp = 3,
+    segment.angle = 10
+  ) +
+  scale_color_manual(
+    values = c(
+      "Enriched in Cases" = "#FF7F0F",
+      "Enriched in Controls" = "#1F77B4",
+      "Not Significant" = "grey50"
+    )
+  ) +
+  labs(
+    title = "Chi-squared test for PD enriched/depleted clusters",
+    x = expression(log[2]~"(Odds Ratio)"),
+    y = expression(-log[10]~"(P-value)"),
+    size = "Unique Donors per Cluster",
+    color = NULL
+
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    # legend.title = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12)
+  ) +
+  geom_hline(yintercept = -log10(0.05), 
+             linetype = "dashed", 
+             color = "darkgrey") +
+  geom_vline(xintercept = c(-0.5, 0.5), 
+             linetype = "dashed", 
+             color = "darkgrey") +
+  coord_cartesian(clip = "off")
+
+ggsave(
+  glue("{clustcr_figs}/clusTCR_chi2_volcano_odds_ratio_pvalue_{Sys.Date()}.png"),
+  p_chi2_volcano,
+  width = 9,
+  height = 6,
+  dpi = 600
+)
+
+
+# Examining relationship between odds ratio and selection score
+chi2_results_df %>% 
+  filter(chi2_p_value <= 0.05) %>% 
+  ggplot(aes(x = log2(odds_ratio), y = avg_selection_score)) +
+  geom_point(alpha = 0.5) +
+  theme_bw()
+
+chi2_results_df %>% 
+  filter(chi2_p_value <= 0.05) %>% 
+  ggplot(aes(x = log2(odds_ratio), y = avg_risk_score)) +
+  geom_point(alpha = 0.5) +
+  theme_bw()
+# no obvious relationship between odds ratio and selection score or risk score
+
+
+```
+
+## Assessing Chi-squared test cluster generalizability
+
+```{r}
+clustcr_results_df <- readRDS(
+  glue("{clustcr_dir}/results/compiled_clustcr_results_df_2025-08-24.rds")
+  )
+clustcr_results_df %>% glimpse()
+
+```
+
+
+```{r}
+summary_paths <- list.files(
+  glue("{clustcr_dir}/results/cohort_subsets"), pattern = "_summary.csv", 
+  full.names = TRUE, recursive = TRUE
+)
+
+full_summary_path <- glue("{clustcr_dir}/results/clusTCR_summary_vgene_restricted_31cpus.csv")
+
+summary_ls <- c(full_summary_path, summary_paths) %>% 
+  purrr::set_names(basename(.)  %>% gsub("_summary.csv", "", .)) %>% 
+  purrr::map(~ read_csv(.) %>% pull(motif))
+names(summary_ls)[1] <- "full_dataset"
+names(summary_ls)
+
+comparison_df <- 
+  combn(names(summary_ls), 2, simplify = FALSE) %>% 
+  map_dfr(~ tibble(Var1 = .x[1], Var2 = .x[2])) %>%
+  glimpse()
+
+comparison_df <- comparison_df %>% 
+  mutate(Var1_counts = map_int(Var1, ~ length(summary_ls[[.x]])),
+         Var2_counts = map_int(Var2, ~ length(summary_ls[[.x]])),
+         overlap = map2_int(Var1, Var2, ~ length(intersect(summary_ls[[.x]], summary_ls[[.y]]))),
+         overlap_percent_var1 = (overlap / Var1_counts) * 100,
+         overlap_percent_var2 = (overlap / Var2_counts) * 100
+         ) %>% 
+  glimpse()
+
+# THis doesn't consider V-gene restriction -- not the best way to do this
+View(comparison_df)
+
+
+```
+
+
+```{r}
+# Saving pre-processed results ----
+aggregate_clustcr_results <- function(clustcr_output_file, clustcr_summary_file, output_path) {
+  clustcr_output <- read_csv(clustcr_output_file, col_select = -1)
+  clustcr_summary <- read_csv(clustcr_summary_file) %>% dplyr::rename(cluster = ...1)
+  clustcr_summary$cluster  <- unique(clustcr_output$cluster)
+
+  clustcr_results_df <- clustcr_output %>%
+    dplyr::left_join(clustcr_summary) %>%
+    dplyr::left_join(tcrb_df, 
+      by = c("junction_aa" = "CDR3b_aa", "v_call" = "TRBV"),
+      relationship = "many-to-many") %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::mutate(unique_donors_per_clust = dplyr::n_distinct(participant_id),
+      unique_samples_per_clust = dplyr::n_distinct(sample_id)
+    ) %>%
+    dplyr::ungroup() %>% 
+    dplyr::mutate(motif_length = motif %>% 
+          gsub("\\[.*?\\]", "X", .) %>%  # Replace bracketed content with single X
+          gsub("\\.", "", .) %>%         # Remove dots
+          gsub("[^A-Z]", "", .) %>%      # Keep only uppercase letters
+          nchar()
+    ) %>% 
+    dplyr::mutate(cluster_id = glue("{motif}_{v_call}")) %>% 
+    # dplyr::mutate(cluster_id = glue("c{cluster}_{motif}")) %>% 
+    glimpse()
+
+  saveRDS(clustcr_results_df, output_path)
+}
+
+# Aggregating clustcr results for each cohort subset
+for (spath in summary_paths) {
+  sname <- spath %>% basename(.) %>% gsub("_summary.csv", "", .) %>% print()
+  aggregate_clustcr_results(
+    clustcr_output_file = spath %>% gsub("_summary", "_clusters", .),
+    clustcr_summary_file = spath,
+    output_path = glue("{cohort_subset_dir}/{sname}/{sname}_aggregated.rds")
+  )
+}
+
+# Running Chi-squared test on each dataset
+run_dataset_chi2 <- function(clustcr_results_path, outputdir = NULL) {
+  sname <- clustcr_results_path %>% basename(.) %>% gsub("_aggregated.rds", "", .)
+  message(glue("Running Chi-squared test on {sname}... \n"))
+  output_path <- glue("{clustcr_dir}/results/cohort_subsets/{sname}/{sname}_chi2_results_df_{Sys.Date()}.rds")
+
+  if (file.exists(output_path)) return()
+  
+  clustcr_results_df <- readRDS(clustcr_results_path)
+  clustcr_results_df_filtered <- clustcr_results_df %>% 
+    filter(unique_donors_per_clust >= 4) %>% 
+    filter(motif_length >= 9)
+
+  sample_groups_df <- clustcr_results_df_filtered %>%
+      dplyr::select(participant_id, case_control_other_latest) %>%
+      distinct()
+
+  grp_n <- sample_groups_df$case_control_other_latest %>% table()
+  case_n_base <- grp_n[["Case"]]
+  ctrl_n_base <- grp_n[["Control"]]
+  cidx_list <- unique(clustcr_results_df_filtered$cluster_id)
+
+  # 1.  unique donors per (cluster × group) in one pass 
+  per_cluster <- clustcr_results_df_filtered %>%
+    dplyr::distinct(cluster_id, participant_id, case_control_other_latest) %>%
+    dplyr::count(cluster_id, case_control_other_latest, name = "n") %>%
+    pivot_wider(names_from = case_control_other_latest,
+                values_from = n,
+                values_fill = 0) %>%
+    mutate(
+      remCase = case_n_base - Case,
+      remCtrl = ctrl_n_base - Control
+    ) %>% 
+    glimpse()
+
+  # per_cluster: data-frame with Case, Control, remCase, remCtrl columns
+  future::plan(future::multisession, workers = 15)
+  chi2_stats <- furrr::future_pmap_dfr(
+    per_cluster %>% dplyr::select(Case, Control, remCase, remCtrl),
+    function(Case, Control, remCase, remCtrl) {
+      mat <- matrix(c(Case, Control, remCase, remCtrl), nrow = 2)
+      ## 1. χ² test (no Yates correction keeps it comparable to Fisher)
+      ct <- suppressWarnings(chisq.test(mat, correct = FALSE))
+      ## 2. Odds ratio for context
+      or <- ((Case + 0.5)  * (remCtrl + 0.5)) / ((Control + 0.5) * (remCase + 0.5))
+      list(
+        chi2_p_value = ct$p.value,
+        chi2_stat    = unname(ct$statistic),
+        odds_ratio   = or,
+        exp_case_cluster    = ct$expected[1],
+        exp_control_cluster = ct$expected[2]
+      )
+    }
+  )
+
+  chi2_results_df <- dplyr::bind_cols(per_cluster, chi2_stats) %>% 
+      dplyr::mutate(
+        adj_chi2_p_value = stats::p.adjust(chi2_p_value, method = "fdr")) %>%
+      dplyr::arrange(chi2_p_value) %>% 
+      glimpse()
+
+  if (is.null(outputdir)) {
+    outputdir <- dirname(clustcr_results_path)
+  }
+  saveRDS(chi2_results_df, 
+    glue("{outputdir}/{sname}_chi2_results_df_{Sys.Date()}.rds"))
+
+}
+
+
+# Separating out individual cohorts from the full clustering - aggregating - and then running Chi2 test
+clustcr_results_df %>% glimpse()
+cohort_from_full <- list()
+for (cohort_name in unique(metadata$study)) {
+  cohort_pids <- metadata %>% filter(study == cohort_name) %>% pull(participant_id) %>% unique()
+  cohort_from_full[[cohort_name]] <- clustcr_results_df %>% 
+    filter(participant_id %in% cohort_pids) %>% 
+    dplyr::group_by(cluster) %>%
+    dplyr::mutate(
+      unique_donors_per_clust = dplyr::n_distinct(participant_id),
+      unique_samples_per_clust = dplyr::n_distinct(sample_id)
+    ) %>%
+    dplyr::ungroup() %>% 
+    filter(unique_donors_per_clust >= 4) %>% 
+    glimpse()
+  
+  outdir <- glue("{cohort_subset_dir}/ONLY_{cohort_name}_from_full_clustering/")
+  dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+  saveRDS(cohort_from_full[[cohort_name]], 
+    glue("{outdir}/{cohort_name}_from_full_clustering_aggregated.rds")
+      )
+}
+
+
+# Running Chi2 for each dataset
+clustcr_subset_aggpaths <- list.files(
+    cohort_subset_dir, full.names = TRUE, 
+    recursive = TRUE, pattern = "aggregated.rds")
+
+clustcr_subset_aggpaths %>% 
+  purrr::walk(run_dataset_chi2)
+
+
+# future::plan(sequential)
+```
+
+
+```{r}
+clustcr_subset_chi2_paths <- list.files(
+    cohort_subset_dir, full.names = TRUE, 
+    recursive = TRUE, pattern = "_chi2_results_df_2025-08-25"
+    )
+clustcr_subset_chi2_paths_onlyfromfull <- list.files(
+    cohort_subset_dir, full.names = TRUE, 
+    recursive = TRUE, pattern = "_from_full_clustering_chi2_results_df_2025-08-25"
+    )
+
+# 
+
+# clustcr_subset_chi2_paths
+all_except_paths <- clustcr_subset_chi2_paths %>% keep(~ grepl("ALL_EXCEPT", .))
+names(all_except_paths) <- all_except_paths %>% dirname() %>% basename()
+
+only_paths <- clustcr_subset_chi2_paths_onlyfromfull
+names(only_paths) <- only_paths %>% dirname() %>% basename()
+
+# For each dataset at a time 
+# study_names <- unique(metadata$study)
+# study_name <- "HBS"
+# all_except_df <- all_except_paths[[glue("ALL_EXCEPT_{study_name}")]] %>% 
+#   readRDS() %>% 
+#   dplyr::rename_at(vars(-cluster_id), ~ glue("{.}_ALL_EXCEPT")) %>% 
+#   glimpse()
+
+# only_df <- only_paths[[glue("ONLY_{study_name}_from_full_clustering")]] %>% 
+#   readRDS() %>% 
+#   dplyr::rename_at(vars(-cluster_id), ~ glue("{.}_ONLY")) %>% 
+#   glimpse()
+
+# full_df <- full_join(all_except_df, only_df) %>% 
+#   glimpse()
+
+# aset <- all_except_df$cluster_id %>%
+#   unique()
+# bset <- only_df$cluster_id %>% 
+#   unique()
+# intersect_set <- intersect(aset, bset)
+
+# length(aset)
+# length(bset)
+# length(intersect_set)
+# full_df %>% glimpse
+# full_df %>% 
+#   # filter(chi2_p_value_ALL_EXCEPT <= 0.05) %>% 
+#   ggplot(aes(x = log2(odds_ratio_ALL_EXCEPT), y = log2(odds_ratio_ONLY))) +
+#   geom_point() +
+#   geom_abline(slope = 1, intercept = 0) +
+#   theme_minimal()
+
+# full dataset chi2 results
+chi2_results_df <- readRDS(
+  glue("{clustcr_dir}/results/chi2_results/chi2_results_df_2025-09-08.rds")) %>% 
+  glimpse()
+
+chi2_results_df$cluster_id %>% unique() %>% length()
+
+# top 25 hits
+top35full <- chi2_results_df %>% slice_min(chi2_p_value, n = 35) %>% 
+  pull(cluster_id)
+
+# Identifying clusters that are significant in at least two separate cohort_subset_dir
+only_dfs <- only_paths %>% 
+  purrr::map(readRDS) %>% 
+  bind_rows(.id = "dataset") %>% 
+  mutate(sig_dir = case_when(
+    log2(odds_ratio) > 0.5 ~ "PD UP",
+    log2(odds_ratio) < -0.5 ~ "PD DN",
+    TRUE ~ "TOSS"
+  )) %>% 
+  glimpse()
+
+cluster_hits <- only_dfs %>% 
+  filter(chi2_p_value <= 0.05) %>% 
+  group_by(cluster_id, sig_dir) %>% 
+  summarise(n = n(), .groups = "drop") %>%
+  filter(sig_dir != "TOSS") %>% 
+  filter(n >= 2) %>% 
+  pull(cluster_id) %>% 
+  unique()
+length(cluster_hits)
+
+
+only_dfs %>% glimpse()
+
+p_all_reprod_cids <- only_dfs %>% 
+  filter(cluster_id %in% cluster_hits) %>% 
+  mutate(color_var = case_when(
+    (sig_dir == "PD UP" & chi2_p_value <= 0.05) ~ "Enriched in PD",
+    (sig_dir == "PD DN" & chi2_p_value <= 0.05) ~ "Enriched in Control",
+    TRUE ~ "Not Significant"
+  )) %>% 
+  mutate(cohort = gsub("ONLY_|_from_full_clustering", "", dataset)) %>%
+  ggplot(aes(x = log2(odds_ratio), y = fct_reorder(cluster_id, log2(odds_ratio)))) +
+  geom_bar(stat = "identity", aes(fill = color_var)) +
+  facet_wrap(~ cohort, nrow = 1) +
+  labs( x = expression(log[2]~"Odds Ratio"), y = "Cluster ID", fill = NULL) +
+  scale_fill_manual(
+    values = c(
+      "Enriched in PD" = "#FF7F0F",
+      "Enriched in Control" = "#1F77B4",
+      "Not Significant" = "grey50"
+    )
+  ) +
+  theme_bw() +
+  theme(axis.text.y = element_blank(),
+    panel.grid = element_blank()
+    )
+
+ggsave(
+  glue("{clustcr_figs}/clusTCR_cohort_reproducible_clusters_ALL_{Sys.Date()}.png"),
+  p_all_reprod_cids,
+  width = 10,
+  height = 4
+)
+
+p_top35_reprod_cids <- only_dfs %>% 
+  filter(cluster_id %in% cluster_hits) %>% 
+  filter(cluster_id %in% top35full) %>% 
+  mutate(color_var = case_when(
+    (sig_dir == "PD UP" & chi2_p_value <= 0.05) ~ "Enriched in PD",
+    (sig_dir == "PD DN" & chi2_p_value <= 0.05) ~ "Enriched in Control",
+    TRUE ~ "Not Significant"
+  )) %>% 
+  mutate(cohort = gsub("ONLY_|_from_full_clustering", "", dataset)) %>%
+  ggplot(aes(x = log2(odds_ratio), y = fct_reorder(cluster_id, log2(odds_ratio)))) +
+  geom_bar(stat = "identity", aes(fill = color_var), width = 0.5) +
+  facet_wrap(~ cohort, nrow = 1) +
+  labs( x = expression(log[2]~"Odds Ratio"), y = "Cluster ID", fill = NULL) +
+  scale_fill_manual(
+    values = c(
+      "Enriched in PD" = "#FF7F0F",
+      "Enriched in Control" = "#1F77B4",
+      "Not Significant" = "grey50"
+    )
+  ) +
+  theme_bw()
+
+ggsave(
+  glue("{clustcr_figs}/clusTCR_cohort_reproducible_clusters_TOP_{Sys.Date()}.png"),
+  p_top35_reprod_cids,
+  width = 10,
+  height = 4
+)
+
+# only_dfs %>% glimpse()
+# only_dfs %>% 
+#   filter(cluster_id %in% cluster_hits) %>% View
+#   filter(cluster_id %in% top35full) %>% 
+#   View()
+```
+
+
+
+## Logistic Regression Models for Cluster Membership  ----
+
+Now running a logistic regression model to test for PD enriched/depeleted clusters
+
+```{r}
+clustcr_results_df_filtered %>% glimpse()
+clonotype_volume_df_pid <- trust4_reports_tcrb %>% 
+  group_by(participant_id) %>% 
+  dplyr::summarize(
+      clonal_volume = sum(`#count`),
+      clonal_count = n()
+      ) %>%
+  glimpse()
+
+metadata %>% glimpse()
+model_meta_df <- metadata %>% 
+  # dplyr::select(participant_id, age_at_baseline, sex, study, est_tcell_reads_abis, case_control_other_latest) %>%
+  dplyr::group_by(participant_id, age_at_baseline, sex, study, case_control_other_latest, MHC_all_PC1, MHC_all_PC2, MHC_all_PC3) %>%
+  dplyr::summarize(est_tcell_reads_abis_pid = sum(est_tcell_reads_abis)) %>% 
+  distinct() %>% 
+  glimpse()
+
+saveRDS(model_meta_df,
+  glue("{clustcr_dir}/results/metadata_for_logreg_{Sys.Date()}.rds")
+)
+
+per_cluster_norm_pid <- clustcr_results_df_filtered %>%
+  as.data.table() %>% 
+  dplyr::group_by(cluster_id, case_control_other_latest, participant_id) %>%
+  dplyr::summarize(count = sum(count)) %>%
+  left_join(clonotype_volume_df_pid) %>% 
+  mutate(norm_count = count / clonal_volume) %>% 
+  left_join(model_meta_df) %>% 
+  glimpse()
+
+# per_cluster_norm_pid$cluster_id %>% unique() %>% length()
+# cluster_df <- per_cluster_norm_pid %>% filter(cluster_id == "c0_CSARD.g.SGANVLTF") %>% 
+#   glimpse()
+
+run_cluster_logreg_analysis <- function(cluster_df) {
+  require(magrittr)
+  cid <- unique(cluster_df$cluster_id)
+  clustcr_dir <- 
+    "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/clusTCR"
+  model_meta_df <- readRDS(
+    glue::glue("{clustcr_dir}/results/metadata_for_logreg_2025-08-17.rds")
+  )
+  cluster_df <- cluster_df %>% 
+    dplyr::full_join(model_meta_df) %>% 
+    dplyr::mutate(norm_count = tidyr::replace_na(norm_count, 0))
+
+  # Models ----
+  null_model <- glm(
+    # norm_count ~ est_tcell_reads_abis_pid + age_at_baseline + sex,
+    # norm_count ~ age_at_baseline + sex,
+    norm_count ~ MHC_all_PC1 + MHC_all_PC2 + MHC_all_PC3 + est_tcell_reads_abis_pid,
+    data = cluster_df,
+    family = binomial(link = "logit")
+  )
+  full_model <- glm(
+    # norm_count ~ case_control_other_latest + est_tcell_reads_abis_pid + age_at_baseline + sex,
+    # norm_count ~ case_control_other_latest + age_at_baseline + sex,
+    norm_count ~ case_control_other_latest + MHC_all_PC1 + MHC_all_PC2 + MHC_all_PC3 + est_tcell_reads_abis_pid,
+    data = cluster_df,
+    family = binomial(link = "logit")
+  )
+
+  model_comp <- anova(full_model, null_model, test = "LRT")
+  lrt_res <- model_comp %>% broom::tidy()
+
+  logreg_anova_df <- lrt_res[2,] %>% 
+    dplyr::mutate(full_model = lrt_res$term[1]) %>% 
+    dplyr::mutate(cluster_id = cid)
+
+  logreg_reslist <- list(
+      "cluster_id" = cid,
+      "logit_null" = null_model,
+      "logit_full" = full_model,
+      "comparison_res" = model_comp,
+      "logit_anova_df" = logreg_anova_df
+  )
+  saveRDS(logreg_reslist, 
+    glue::glue("{clustcr_dir}/results/logistic_regression_age-sex-covars/",
+      "{cid}__{Sys.Date()}.rds")
+      )
+}
+
+cluster_list <- per_cluster_norm_pid %>% 
+  ungroup() %>% 
+  dplyr::group_split(cluster_id) %>% 
+  setNames(unique(per_cluster_norm_pid$cluster_id))
+length(cluster_list)
+names(cluster_list) %>% head()
+
+# unrun_clusters <- names(cluster_list) %>% 
+#   discard(~ file.exists(glue("{clustcr_dir}/results/logistic_regression/{.}__2025-08-17.rds")))
+# unrun_clusters %>% length()
+
+unrun_clusters <- names(cluster_list) %>% 
+  discard(~ file.exists(glue("{clustcr_dir}/results/logistic_regression/{.}__2025-08-17.rds")))
+unrun_clusters %>% length()
+
+```
+
+Executing Logistic Regression Models for Cluster Membership (WEIGHTED BY CLONAL VOLUME)
+
+```{r}
+# future::plan(future::multisession, workers = 15)
+# options(future.globals.maxSize = 2 * 1024^3)  # 2GB per worker
+# cluster_list %>% 
+# # cluster_list[unrun_clusters] %>%
+#   furrr::future_walk(run_cluster_logreg_analysis, .options = furrr_options(seed = TRUE))
+# future::plan(sequential)
+
+# Running on cluster in parallel
+# configure registry ----
+breg <- breg_setup(cluster_name = "clusTCR_logreg", 
+    log_dir = glue("{wkdir}/.cluster_runs/"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl")
+    )
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = run_cluster_logreg_analysis,
+  args = list(cluster_list),
+  reg = breg
+)
+jobs[, chunk := chunk(job.id, chunk.size = 40)]
+print(jobs[, .N, by = chunk])
+
+# can probably do two per minute so x jobs / 2 = minutes
+submitJobs(jobs,
+  resources = list(
+    walltime = "1:00:00",
+    memory = "5GB",
+    ncpus = 1,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+
+
+Aggregating and visualizing Logistic Regression results
+
+```{r}
+# Utility funcs
+pull_logreg_anova_df <- function(res) {
+  res$logit_anova_df
+}
+
+pull_logreg_full_model <- function(res) {
+  res$logit_full %>% broom::tidy()
+}
+```
+
+
+```{r}
+future::plan(future::multisession, workers = 15)
+options(future.globals.maxSize = 2 * 1024^3) 
+
+logreg_reslist <- list.files(
+  glue("{clustcr_dir}/results/logistic_regression"),
+  full.names = TRUE)
+
+logreg_anova_df <- logreg_reslist %>% 
+  # purrr::map(~ readRDS(.x) %>% pull_logreg_anova_df()) %>% 
+  furrr::future_map(~ readRDS(.x) %>% pull_logreg_anova_df()) %>% 
+  bind_rows() %>% 
+  glimpse()
+logreg_anova_df %>% slice_min(p.value, n = 20)
+saveRDS(
+  logreg_anova_df,
+  glue("{clustcr_dir}/results/logistic_regression_anova_df_{Sys.Date()}.rds")
+)
+
+full_models_df <- logreg_reslist %>% 
+  purrr::set_names(basename(.)  %>% str_before_first("__")) %>% 
+  purrr::map(~ readRDS(.) %>% pull_logreg_full_model()) %>% 
+  bind_rows(.id = "cluster_id") %>% 
+  glimpse()
+saveRDS(
+  full_models_df,
+  glue("{clustcr_dir}/results/logistic_regression_full_models_df_{Sys.Date()}.rds")
+)
+
+#______________________________________________________________________________
+# Age / sex covars only ----
+logreg_reslist_agesex <- list.files(
+  glue("{clustcr_dir}/results/logistic_regression_age-sex-covars"),
+  full.names = TRUE)
+length(logreg_reslist_agesex)
+
+logreg_anova_df <- logreg_reslist_agesex %>% 
+  # purrr::map(~ readRDS(.x) %>% pull_logreg_anova_df()) %>% 
+  furrr::future_map(~ readRDS(.x) %>% pull_logreg_anova_df()) %>% 
+  bind_rows() %>% 
+  glimpse()
+logreg_anova_df %>% slice_min(p.value, n = 20)
+saveRDS(
+  logreg_anova_df,
+  glue("{clustcr_dir}/results/logistic_regression_anova_df_agesex_{Sys.Date()}.rds")
+)
+
+full_models_df <- logreg_reslist_agesex %>% 
+  purrr::set_names(basename(.)  %>% str_before_first("__")) %>% 
+  furrr::future_map(~ readRDS(.) %>% pull_logreg_full_model()) %>% 
+  bind_rows(.id = "cluster_id") %>% 
+  glimpse()
+saveRDS(
+  full_models_df,
+  glue("{clustcr_dir}/results/logistic_regression_full_models_df_agesex_{Sys.Date()}.rds")
+)
+
+#______________________________________________________________________________
+# MHC seqdpeth covars only ----
+logreg_reslist_agesex <- list.files(
+  glue("{clustcr_dir}/results/logistic_regression_age-sex-covars"),
+  full.names = TRUE)
+length(logreg_reslist_agesex)
+
+logreg_anova_df <- logreg_reslist_agesex %>% 
+  # purrr::map(~ readRDS(.x) %>% pull_logreg_anova_df()) %>% 
+  furrr::future_map(~ readRDS(.x) %>% pull_logreg_anova_df()) %>% 
+  bind_rows() %>% 
+  glimpse()
+logreg_anova_df %>% slice_min(p.value, n = 20)
+saveRDS(
+  logreg_anova_df,
+  glue("{clustcr_dir}/results/logistic_regression_anova_df_mhcseqdepth_{Sys.Date()}.rds")
+)
+
+full_models_df <- logreg_reslist_agesex %>% 
+  purrr::set_names(basename(.)  %>% str_before_first("__")) %>% 
+  furrr::future_map(~ readRDS(.) %>% pull_logreg_full_model()) %>% 
+  bind_rows(.id = "cluster_id") %>% 
+  glimpse()
+saveRDS(
+  full_models_df,
+  glue("{clustcr_dir}/results/logistic_regression_full_models_df_mhcseqdepth_{Sys.Date()}.rds")
+)
+
+future::plan(sequential)
+```
+
+```{r}
+full_models_df %>% glimpse()
+full_models_df %>% 
+  filter(term == "case_control_other_latestControl") %>% 
+  slice_min(p.value, n = 20) %>% 
+  View()
+
+full_models_df %>% 
+  filter(term == "case_control_other_latestCase") %>% 
+  slice_min(p.value, n = 20) %>% 
+  View()
+
+```
+
+
+
+
+## PERMANOVA screening for metadata explained variance in cluster membership
+
+NOTE: This section uses data from the clusTCR distances notebook
+
+
+Subsetting distance matrices into random subsamples of samples
+```{r}
+# Saving subsampled distance matrix and metadata
+subsample_metadata_and_distmat <- function(iter, permanova_metadata, distance_matrix, outdir) {
+    set.seed(iter)
+    sid_subsample <- permanova_metadata %>% 
+        rownames_to_column(var = "sample_id") %>%
+        group_by(participant_id) %>%
+        dplyr::slice_sample(n = 1) %>%
+        ungroup() %>%
+        pull(sample_id)
+    
+    common_samples <- intersect(rownames(distance_matrix), rownames(permanova_metadata))
+    i_common_samples <- intersect(common_samples, sid_subsample)
+    distance_matrix_filtered <- as.dist(distance_matrix[i_common_samples, i_common_samples])
+    permanova_metadata_filtered <- permanova_metadata[i_common_samples, ]
+    
+    # Saving distance matrix and metadata
+    saveRDS(distance_matrix_filtered,
+        glue("{outdir}/distance_matrix_filtered_subsample_{iter}.rds")
+    )
+    saveRDS(permanova_metadata_filtered,
+        glue("{outdir}/permanova_metadata_filtered_subsample_{iter}.rds")
+    )
+}
+
+# full vs pd only
+# binary and weighted matrices
+
+clustcr_mat_w_eucdist <- readRDS(
+  glue("{clustcr_dir}/results/clustcr_mat_w_eucdist_pca_SSxRS_2025-08-18.rds"))
+clustcr_mat_b_eucdist <- readRDS(
+  glue("{clustcr_dir}/results/clustcr_mat_b_eucdist_pca_SSxRS_2025-08-18.rds"))
+clustcr_mat_w_eucdist_input <- clustcr_mat_w_eucdist %>% 
+  as.matrix() %>% as.data.frame()
+clustcr_mat_b_eucdist_input <- clustcr_mat_b_eucdist %>% 
+  as.matrix() %>% as.data.frame()
+
+clustcr_perm_outputs <- c(
+  "weighted_SSxRS_PD_only",
+  "binary_SSxRS_PD_only",
+  "weighted_SSxRS_full",
+  "binary_SSxRS_full"
+)
+
+target_metadata <- colnames(metadata) %>% 
+    discard(. %in% c("sample_id"))
+
+# Get sample metadata for PERMANOVA
+permanova_metadata <- metadata %>%
+    filter(sample_id %nin% low_vol_samples$sample_id) %>%
+    column_to_rownames("sample_id") %>%
+    select(all_of(target_metadata), participant_id) %>%
+    glimpse()
+
+clustcr_mat_b_eucdist_input[pd_sids, pd_sids] %>% glimpse()
+clustcr_mat_w_eucdist_input[pd_sids, pd_sids] %>% glimpse()
+
+for (output in clustcr_perm_outputs) {
+  output_path <- glue("{clustcr_dir}/results/permanova/inputs/{output}")
+  dir.create(output_path, showWarnings = FALSE, recursive = TRUE)
+
+  if (grepl("weighted", output)) {
+    distance_matrix <- clustcr_mat_w_eucdist_input
+  } else {
+    distance_matrix <- clustcr_mat_b_eucdist_input
+  }
+  if (grepl("PD_only", output)) {
+    pd_sids <- metadata %>%
+      filter(sample_id %nin% low_vol_samples$sample_id) %>%
+      filter(case_control_other_latest == "Case") %>% 
+      filter(sample_id %in% rownames(distance_matrix)) %>%
+      pull(sample_id) %>% 
+      unique()
+    distance_matrix <- distance_matrix[pd_sids, pd_sids]
+  }
+
+  for (i in 1:50) {
+    message(glue("Subsampling {output} for iteration {i}"))
+    subsample_metadata_and_distmat(i, permanova_metadata, distance_matrix, output_path)
+  }
+}
+
+```
+
+Executing slurm batchtools for PERMANOVA
+
+```{r}
+perm_resdir <- glue("{clustcr_dir}/results/permanova/results")
+clustcr_perm_outputs %>% purrr::map( ~ {
+  dir.create(glue("{perm_resdir}/{.}"), showWarnings = FALSE, recursive = TRUE)
+})
+
+batch_params <- 
+  expand.grid("var" = target_metadata, "i" = 1:50, "output" = clustcr_perm_outputs) %>% 
+    mutate(
+        n_perms = 9999,
+        n_cores = 1,
+        dmat_path = glue("{clustcr_dir}/results/permanova/inputs/{output}/distance_matrix_filtered_subsample_{i}.rds"),
+        meta_path = glue("{clustcr_dir}/results/permanova/inputs/{output}/permanova_metadata_filtered_subsample_{i}.rds"),
+        model_formula_string = glue("distance_matrix ~ {var}"),
+        outpath = glue("{perm_resdir}/{output}/",
+            "permanova_{var}_nperms_{n_perms}_subsample_{i}_{Sys.Date()}.rds")
+    ) %>%
+    filter(var != "participant_id") %>% 
+    dplyr::select(-c(var, i, output)) %>% 
+    glimpse()
+
+# configure registry ----
+breg <- breg_setup(cluster_name = "PERM_ClusTCR", 
+    log_dir = glue("{wkdir}/.cluster_runs/"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl")
+    )
+
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = run_permanova,
+  args = batch_params,
+  reg = breg
+)
+nrow(batch_params)
+
+# 221600 / 1000
+# (120 * 15) / 60 - needs about 30 hours for 120 jobs with 4 cores each
+jobs[, chunk := chunk(job.id, chunk.size = 120)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = "2-01:00:00",
+    memory = "10GB",
+    ncpus = 4,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+
+Aggregating PERMANOVA results
+
+```{r}
+perm_resdir <- glue("{clustcr_dir}/results/permanova/results")
+
+res_files <- list.files(perm_resdir, full.names = TRUE, recursive = TRUE)
+length(res_files)
+# res_files[1] %>% readRDS() %>% broom::tidy()
+
+# loading in metadata categories
+
+
+cond <- "binary_SSxRS_PD_only"
+# cond <- "weighted_SSxRS_PD_only"
+perm_resdir_w_full <- glue("{clustcr_dir}/results/permanova/results/{cond}")
+res_files <- fs::dir_ls(perm_resdir_w_full, recurse = TRUE, type = "file")
+length(res_files)
+
+future::plan("multisession", workers = 8)
+permanova_results <- res_files %>%
+    purrr::set_names(basename(.)) %>%
+    furrr::future_map(~ readRDS(.) %>% broom::tidy()) %>%
+    bind_rows(.id = "model_info") %>%
+    janitor::clean_names() %>%
+    mutate(r2_percent = round(r2 * 100, 3)) %>%
+    arrange(p_value) %>%
+    glimpse()
+
+passing_meta <- permanova_results %>%   
+    filter(term %nin% c("Residual", "Total")) %>% 
+    filter(p_value <= 0.05) %>% 
+    pull(term) %>% unique()
+
+p_permanova <- permanova_results %>%
+    filter(term %nin% c("Residual", "Total")) %>%
+    filter(term %in% passing_meta) %>% 
+    arrange(p_value) %>%
+    mutate(
+        significant = p_value < 0.05,
+        p_value_formatted = format.pval(p_value, digits = 3)
+    ) %>%
+    ggplot(aes(y = fct_reorder(term, r2), x = r2 * 100)) +
+    geom_point(aes(color = significant),
+        size = 0.8,
+        position = position_jitter(height = 0.2, width = 0), alpha = 0.85
+    ) +
+    geom_boxplot(alpha = 0.3, outlier.shape = NA, width = 0.5) +
+    scale_color_manual(values = c("grey70", "red")) +
+    theme_bw() +
+    labs(
+        title = "PERMANOVA Results: TCR Repertoire Similarity",
+        x = "R² % (Effect Size)",
+        y = NULL
+    ) +
+    theme(legend.position = "bottom")
+
+# ggsave(
+#     glue("{clustcr_figs}/permanova_results_{cond}_{Sys.Date()}.png"),
+#     p_permanova,
+#     width = 8,
+#     height = 20
+# )
+
+# Summarize
+perm_summary_df <- permanova_results %>%
+  group_by(term) %>%
+  summarise(
+    mean_log10_p = mean(-log10(p_value), na.rm = TRUE),
+    sd_log10_p = sd(-log10(p_value), na.rm = TRUE),
+    mean_r2_percent = mean(r2 * 100, na.rm = TRUE),
+    sd_r2_percent = sd(r2 * 100, na.rm = TRUE),
+    mean_statistic = mean(statistic, na.rm = TRUE),
+    sd_statistic = sd(statistic, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  filter(!grepl("guid|GUID", term)) %>% 
+  left_join(metadata_categories_df, by = c("term" = "metadata")) %>% 
+  glimpse()
+
+# Flag terms above threshold
+pval_thresh <- -log10(0.05)
+hits <- perm_summary_df %>%
+  filter(mean_log10_p > pval_thresh) %>% 
+  glimpse()
+# View(hits)
+
+labeled_points <- hits %>%
+  # filter(metadata_class %nin% c("Biomarkers Genetics", "Biomarkers Omics")) %>%
+  filter(metadata_class %in% c("Motor Severity", "Clinical History", "Cognition")) %>%
+  slice_max(mean_r2_percent, n = 30, with_ties = FALSE) %>% 
+  filter(grepl("moca|mds_updrs|hoehn|levodopa|medication", term)) %>%
+  glimpse()
+# View(labeled_points)
+
+metadata_class_color_var <- metadata_categories_df %>% 
+  select(metadata_class, class_color) %>% 
+  distinct() %>% 
+  deframe()
+metadata_subclass_color_var <- metadata_categories_df %>% 
+  select(metadata_subclass, class_color) %>% 
+  distinct() %>% 
+  deframe()
+
+# Plot
+p_perm_base <- ggplot(perm_summary_df, aes(x = mean_log10_p, y = mean_r2_percent)) +
+  geom_errorbar(aes(ymin = mean_r2_percent - sd_r2_percent,
+                    ymax = mean_r2_percent + sd_r2_percent),
+                width = 0.01, alpha = 0.1) +
+  geom_errorbarh(aes(xmin = mean_log10_p - sd_log10_p,
+                     xmax = mean_log10_p + sd_log10_p),
+                 height = 0.01, alpha = 0.1) +
+  geom_point(alpha = 0.95, aes(color = metadata_class)) +
+    scale_y_log10() +
+    geom_vline(xintercept = -log10(0.05), linetype = "dashed") +
+  labs(
+    x = expression("Mean -log"[10]*"(p-value)"),
+    y = "Mean R² (%) Explained Variance",
+    # title = glue("PERMANOVA Summary by Term: {cond}"),
+    color = "Metadata Class"
+  ) +
+  scale_color_manual(values = metadata_class_color_var) +
+  scale_fill_manual(values = metadata_class_color_var, guide = "none") +
+  theme_bw()
+# ggsave(
+#     glue("{clustcr_figs}/permanova_results_{cond}_summary_base_{Sys.Date()}.png"),
+#     p_perm_base,
+#     width = 10,
+#     height = 6,
+#     dpi = 600
+# )
+
+set.seed(4)
+p_perm_annot <- p_perm_base +
+  ggrepel::geom_label_repel(
+    data = labeled_points,
+    aes(label = term, fill = metadata_class),
+    size = 2.5,
+    max.overlaps = Inf,
+    force = 50,
+    force_pull = 0,
+    nudge_x = ifelse(labeled_points$mean_log10_p > 0, 1, -1),
+    nudge_y = 0.25,
+    box.padding = 0.8,
+    point.padding = 0.5,
+    segment.color = "darkblue",
+    segment.size = 0.2,
+    segment.alpha = 0.75,
+    alpha = 0.75,
+    direction = "both",
+    segment.curvature = 0.3,
+    segment.ncp = 3,
+    segment.angle = 10
+  )
+
+ggsave(
+    glue("{clustcr_figs}/permanova_results_{cond}_summary_annot_{Sys.Date()}.png"),
+    p_perm_annot,
+    width = 7,
+    height = 4,
+    dpi = 600
+)
+
+```
+
+
+
+
+Running Glmmer models to screen for metadata explained variance in cluster membership
+
+```{r}
+clustcr_results_df %>% glimpse()
+cluster_stats %>% glimpse()
+
+sid_count_summary_per_cluster <- clustcr_results_df %>% 
+  filter(unique_donors_per_clust >= 10) %>% 
+  filter(motif_length >= 8) %>% 
+  group_by(cluster, motif, v_call, sample_id, participant_id) %>% 
+  dplyr::summarize(
+    unique = n_distinct(junction_aa),
+    total = sum(count)
+  ) %>% 
+  glimpse()
+
+sid_count_summary_per_cluster_wide <- sid_count_summary_per_cluster %>% 
+  ungroup() %>% 
+  mutate(cluster = glue("clust_{cluster}_{v_call}")) %>% 
+  select(-c(motif, v_call)) %>% 
+  pivot_wider(
+    # id_cols = c(cluster),
+    names_from = cluster,
+    values_from = c(unique, total),
+    names_glue = "{cluster}__{.value}",
+    values_fill = 0
+  )
+
+dim(sid_count_summary_per_cluster_wide)
+sid_count_summary_per_cluster_wide %>% colnames() %>% head()
+
+# 200158  total clusters being tested in this case
+full_df <- sid_count_summary_per_cluster_wide %>% 
+  left_join(metadata) %>% 
+  glimpse()
+
+# metadata %>% glimpse()
+
+library(glmmTMB)
+# full_df[["clust_0_TRBV20-1__unique"]]
+top_clusts <- cluster_stats %>% 
+  slice_max(unique_donors_per_clust, n = 10) %>% 
+  pull(cluster)
+sid_count_summary_per_cluster %>% glimpse()
+sid_count_summary_per_cluster %>% 
+  filter(cluster %in% top_clusts)  %>% 
+  mutate(cluster = glue("clust_{cluster}_{v_call}")) %>% 
+  pull(cluster) %>% 
+  unique()
+
+model_df <- full_df %>% 
+  mutate(
+    in_k_unique = .data[["clust_37759_TRBV7-3__unique"]],
+    not_in_k_unique = clonal_count - in_k_unique,
+    in_k_total = .data[["clust_37759_TRBV7-3__total"]],
+    not_in_k_total = clonal_volume - in_k_total
+    ) %>% 
+  dplyr::select(
+    in_k_unique, not_in_k_unique, in_k_total, not_in_k_total, not_in_k_total,
+    est_tcell_reads_abis, case_control_other_latest,
+    participant_id, sample_id) %>% 
+  glimpse()
+
+# full vs null -----------------------------------------------------
+null_mod_unique <- glmmTMB::glmmTMB(
+  cbind(in_k_unique, not_in_k_unique) ~ case_control_other_latest + est_tcell_reads_abis + (1|participant_id),
+  data = model_df, family = binomial(link = "logit")
+)
+full_mod_unique <- glmmTMB::glmmTMB(
+  cbind(in_k_unique, not_in_k_unique) ~ est_tcell_reads_abis + (1|participant_id),
+  data = model_df, family = binomial(link = "logit")
+)
+anova(null_mod_unique, full_mod_unique) %>% as.data.frame()
+
+
+null_mod_total <- glmmTMB::glmmTMB(
+  cbind(in_k_total, not_in_k_total) ~ case_control_other_latest + est_tcell_reads_abis + (1|participant_id),
+  data = model_df, family = binomial(link = "logit")
+)
+full_mod_total <- glmmTMB::glmmTMB(
+  cbind(in_k_total, not_in_k_total) ~ case_control_other_latest + est_tcell_reads_abis + (1|participant_id),
+  data = model_df, family = binomial(link = "logit")
+)
+anova(null_mod_unique, full_mod_unique, test = "LRT")              # likelihood-ratio test
+
+
+
+# library(glmmTMB)
+# null_mod_unique <- glmmTMB(
+#   cbind(in_k_unique, not_in_k_unique) ~ case_control_other_latest +
+#                                          scale(est_tcell_reads_abis) +
+#                                          (1|participant_id),
+#   data = model_df,
+#   family = betabinomial(link = "logit"),            # ← handles over-dispersion
+#   control = glmmTMBControl(optimizer = optim,
+#                            optArgs = list(method = "BFGS")) # more robust optimiser
+# )
+# summary(null_mod_unique)
+
+library(DescTools)
+DescTools::SeparationTest(in_k_unique ~ case_control_other_latest,
+                          data = model_df)   # TRUE  = separation
+
+```
+
+
+
+
+Running Glmmer models to screen for metadata explained variance in cluster membership (WEIGHTED BY CLONAL VOLUME)
+
+```{r}
+clustcr_results_df %>% glimpse()
+cluster_stats %>% glimpse()
+
+sid_count_summary_per_cluster <- clustcr_results_df %>% 
+  filter(unique_donors_per_clust >= 10) %>% 
+  filter(motif_length >= 8) %>% 
+  group_by(cluster, motif, v_call, sample_id, participant_id) %>% 
+  dplyr::summarize(
+    unique = n_distinct(junction_aa),
+    total = sum(count)
+  ) %>% 
+  glimpse()
+
+sid_count_summary_per_cluster_wide <- sid_count_summary_per_cluster %>% 
+  ungroup() %>% 
+  mutate(cluster = glue("clust_{cluster}_{v_call}")) %>% 
+  select(-c(motif, v_call)) %>% 
+  pivot_wider(
+    # id_cols = c(cluster),
+    names_from = cluster,
+    values_from = c(unique, total),
+    names_glue = "{cluster}__{.value}",
+    values_fill = 0
+  )
+
+dim(sid_count_summary_per_cluster_wide)
+sid_count_summary_per_cluster_wide %>% colnames() %>% head()
+
+# 200158  total clusters being tested in this case
+full_df <- sid_count_summary_per_cluster_wide %>% 
+  left_join(metadata) %>% 
+  glimpse()
+
+# metadata %>% glimpse()
+
+library(glmmTMB)
+# full_df[["clust_0_TRBV20-1__unique"]]
+top_clusts <- cluster_stats %>% 
+  slice_max(unique_donors_per_clust, n = 10) %>% 
+  pull(cluster)
+sid_count_summary_per_cluster %>% glimpse()
+sid_count_summary_per_cluster %>% 
+  filter(cluster %in% top_clusts)  %>% 
+  mutate(cluster = glue("clust_{cluster}_{v_call}")) %>% 
+  pull(cluster) %>% 
+  unique()
+
+model_df <- full_df %>% 
+  mutate(
+    in_k_unique = .data[["clust_37759_TRBV7-3__unique"]],
+    not_in_k_unique = clonal_count - in_k_unique,
+    in_k_total = .data[["clust_37759_TRBV7-3__total"]],
+    not_in_k_total = clonal_volume - in_k_total
+    ) %>% 
+  dplyr::select(
+    in_k_unique, not_in_k_unique, in_k_total, not_in_k_total, not_in_k_total,
+    est_tcell_reads_abis, case_control_other_latest,
+    participant_id, sample_id) %>% 
+  glimpse()
+
+# full vs null -----------------------------------------------------
+null_mod_unique <- glmmTMB::glmmTMB(
+  cbind(in_k_unique, not_in_k_unique) ~ case_control_other_latest + est_tcell_reads_abis + (1|participant_id),
+  data = model_df, family = binomial(link = "logit")
+)
+full_mod_unique <- glmmTMB::glmmTMB(
+  cbind(in_k_unique, not_in_k_unique) ~ est_tcell_reads_abis + (1|participant_id),
+  data = model_df, family = binomial(link = "logit")
+)
+anova(null_mod_unique, full_mod_unique) %>% as.data.frame()
+
+
+null_mod_total <- glmmTMB::glmmTMB(
+  cbind(in_k_total, not_in_k_total) ~ case_control_other_latest + est_tcell_reads_abis + (1|participant_id),
+  data = model_df, family = binomial(link = "logit")
+)
+full_mod_total <- glmmTMB::glmmTMB(
+  cbind(in_k_total, not_in_k_total) ~ case_control_other_latest + est_tcell_reads_abis + (1|participant_id),
+  data = model_df, family = binomial(link = "logit")
+)
+anova(null_mod_unique, full_mod_unique, test = "LRT")              # likelihood-ratio test
+
+
+
+# library(glmmTMB)
+# null_mod_unique <- glmmTMB(
+#   cbind(in_k_unique, not_in_k_unique) ~ case_control_other_latest +
+#                                          scale(est_tcell_reads_abis) +
+#                                          (1|participant_id),
+#   data = model_df,
+#   family = betabinomial(link = "logit"),            # ← handles over-dispersion
+#   control = glmmTMBControl(optimizer = optim,
+#                            optArgs = list(method = "BFGS")) # more robust optimiser
+# )
+# summary(null_mod_unique)
+
+library(DescTools)
+DescTools::SeparationTest(in_k_unique ~ case_control_other_latest,
+                          data = model_df)   # TRUE  = separation
+
+```
+
+Running Glmmer models to screen for metadata explained variance in cluster membership (UNWEIGHTED - BINARY)
+
+First formatting the data for modeling
+```{r}
+clustcr_results_df %>% glimpse()
+model_meta_df <- readRDS(
+    glue("{clustcr_dir}/results/metadata_for_logreg_2025-08-17.rds")) %>% 
+    glimpse()
+
+sid_count_summary_per_cluster <- clustcr_results_df %>% 
+  filter(unique_donors_per_clust >= 10) %>% 
+  filter(motif_length >= 8) %>% 
+  dplyr::select(cluster_id, participant_id) %>% 
+  ungroup() %>% 
+  distinct() %>% 
+  glimpse()
+
+sid_count_summary_per_cluster_wide <- sid_count_summary_per_cluster %>% 
+    mutate(value = 1) %>% 
+    pivot_wider(
+        names_from = cluster_id,
+        values_from = value,
+        values_fill = 0
+    )
+
+dim(sid_count_summary_per_cluster_wide)
+sid_count_summary_per_cluster_wide %>% colnames() %>% head()
+# 99,105  total clusters being tested in this case
+
+# Joining with particpant level metadata
+full_df <- sid_count_summary_per_cluster_wide %>% 
+  left_join(model_meta_df)
+
+# Saving the full dataframe
+saveRDS(
+  full_df,
+  glue("{clustcr_dir}/results/logistic_regression_input_binary_dataframe_{Sys.Date()}.rds")
+)
+
+```
+
+
+Running a single cluster test and wrapping code into a function
+
+```{r}
+full_df <- readRDS(glue("{clustcr_dir}/results/logistic_regression_input_binary_dataframe_2025-09-08.rds"))
+full_df[1:5, 1:5]
+full_df %>% colnames() %>% tail(n=10)
+# full_df[["CSARD..G.GYTF_TRBV20-1"]]
+
+# Manually running a single cluster test ----
+cid_list <- full_df[, -1] %>% colnames() %>% head(n=30)
+cid <- "YASSSg.YEQYF_TRBV26"
+null_formula <- glue("{cid} ~ est_tcell_reads_abis_pid + age_at_baseline + sex")
+full_formula <- glue("{cid} ~ case_control_other_latest + est_tcell_reads_abis_pid + age_at_baseline + sex")
+
+null_model <- glm(as.formula(null_formula), data = full_df, family = binomial(link = "logit"))
+full_model <- glm(as.formula(full_formula), data = full_df, family = binomial(link = "logit"))
+
+model_comp <- anova(full_model, null_model, test = "LRT")
+lrt_res <- model_comp %>% broom::tidy()
+logreg_anova_df <- lrt_res[2,] %>% 
+    dplyr::mutate(full_model = lrt_res$term[1]) %>% 
+    dplyr::mutate(cluster_id = cid)
+
+logreg_reslist <- list(
+    "cluster_id" = cid,
+    "logit_null" = broom::tidy(null_model),
+    "logit_full" = broom::tidy(full_model),
+    "comparison_res" = model_comp,
+    "logit_anova_df" = logreg_anova_df,
+    "full_model_glance" = broom::glance(full_model),
+    "null_model_glance" = broom::glance(null_model)
+)
+
+# Wrapping code into a function ----
+run_binary_cluster_logreg_analysis <- function(cid_list) {
+    require(magrittr)
+    require(glue)
+    require(dplyr)
+    require(tictoc)
+    
+    # reading the full dataframe
+    clustcr_dir <- "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/clusTCR"
+    full_df <- readRDS(glue("{clustcr_dir}/results/logistic_regression_input_binary_dataframe_2025-09-08.rds"))
+
+    for (cid in cid_list) {
+      tic("Fitting the models")
+      null_formula <- glue("`{cid}` ~ est_tcell_reads_abis_pid + age_at_baseline + sex")
+      full_formula <- glue("`{cid}` ~ case_control_other_latest + est_tcell_reads_abis_pid + age_at_baseline + sex")
+
+      null_model <- glm(as.formula(null_formula), data = full_df, family = binomial(link = "logit"))
+      full_model <- glm(as.formula(full_formula), data = full_df, family = binomial(link = "logit"))
+
+      model_comp <- anova(full_model, null_model, test = "LRT")
+      lrt_res <- model_comp %>% broom::tidy()
+
+      logreg_anova_df <- lrt_res[2,] %>% 
+          dplyr::mutate(full_model = lrt_res$term[1]) %>% 
+          dplyr::mutate(cluster_id = cid)
+
+      logreg_reslist <- list(
+          "cluster_id" = cid,
+          "logit_null" = broom::tidy(null_model),
+          "logit_full" = broom::tidy(full_model),
+          "comparison_res" = model_comp,
+          "logit_anova_df" = logreg_anova_df,
+          "full_model_glance" = broom::glance(full_model),
+          "null_model_glance" = broom::glance(null_model)
+      )
+
+      saveRDS(logreg_reslist, 
+        glue("/central/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{cid}__2025-09-08.rds"))
+      toc()
+    }
+}
+
+
+# # test with list of cids
+# run_binary_cluster_logreg_analysis(cid_list)
+
+```
+
+Executing log regression model at scale
+
+Executing Logistic Regression Models for Cluster Membership (UNWEIGHTED - BINARY)
+
+```{r}
+cid_run_list <- unique(sid_count_summary_per_cluster$cluster_id) #%>%
+  # discard(~ file.exists(glue("/central/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{.}__2025-09-08.rds")))
+
+length(unique(sid_count_summary_per_cluster$cluster_id))
+length(cid_run_list)
+cid_run_list[1:10]
+
+# Running on cluster in parallel
+breg <- breg_setup(cluster_name = "clusTCR_logreg_binary", 
+    log_dir = glue("{wkdir}/.cluster_runs/"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl")
+    )
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = run_binary_cluster_logreg_analysis,
+  args = list(chunk_func(cid_run_list, n = 20)),
+  reg = breg
+)
+
+# jobs[, chunk := chunk(job.id, chunk.size = 40)]
+# print(jobs[, .N, by = chunk])
+
+# can probably do two per sqminute so x jobs / 2 = minutes
+submitJobs(jobs,
+  resources = list(
+    walltime = "3:00:00",
+    memory = "5GB",
+    ncpus = 1,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+Checking on the results
+
+```{r}
+res_paths <- list.files(
+    glue("/central/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary"),
+    full.names = TRUE
+)
+length(res_paths)
+
+future::plan(future::multisession, workers = 4)
+# Contains p-values for the LRT comparing the null and full models with the addition of case/control status to the full model
+full_logreg_binary_model_res <- res_paths %>% 
+  purrr::set_names( ~ basename(.) %>% gsub("__2025-09-08.rds", "", .)) %>% 
+  future_map(~ possibly(readRDS, NULL)(.))
+
+saveRDS(full_logreg_binary_model_res, 
+  glue("{clustcr_dir}/results/logistic_regression_binary_all_model_results_list_{Sys.Date()}.rds")
+  )
+
+anova_lrt_pval_df <- res_paths %>% 
+  furrr::future_map(~ possibly(readRDS, NULL)(.)$logit_anova_df) %>% 
+  bind_rows() %>% 
+  janitor::clean_names() %>% 
+  dplyr::select(cluster_id, p_value) %>% 
+  arrange(p_value) %>% 
+  glimpse()
+anova_lrt_pval_df %>% glimpse()
+
+saveRDS(anova_lrt_pval_df, 
+  glue("{clustcr_dir}/results/logistic_regression_binary_anova_lrt_pval_df_{Sys.Date()}.rds")
+  )
+
+full_model_stats_df <- res_paths %>% 
+  purrr::set_names( ~ basename(.) %>% gsub("__2025-09-08.rds", "", .)) %>% 
+  future_map(~ possibly(readRDS, NULL)(.)$logit_full) %>% 
+  bind_rows(.id = "cluster_id") %>% 
+  janitor::clean_names() %>% 
+  glimpse()
+
+saveRDS(full_model_stats_df, 
+  glue("{clustcr_dir}/results/logistic_regression_binary_full_model_stats_df_{Sys.Date()}.rds")
+  )
+
+```
+
+
+```{r}
+# Loading chi2 results
+chi2_results_df <- readRDS(
+  glue("{clustcr_dir}/results/chi2_results/chi2_results_df_2025-09-08.rds")) %>% 
+  glimpse()
+# Loading logreg results --
+# ANOVA LRT p-values
+anova_lrt_pval_df <- readRDS(
+  glue("{clustcr_dir}/results/logistic_regression_binary_anova_lrt_pval_df_2025-09-10.rds")
+  ) %>% 
+  dplyr::rename(anova_lrt_pval = p_value)  %>% 
+  mutate(anova_lrt_pval_adjusted = p.adjust(anova_lrt_pval, method = "BH")) %>% 
+  arrange(anova_lrt_pval_adjusted) %>% 
+  glimpse()
+
+# Full model stats
+full_model_stats_df <- readRDS(
+  glue("{clustcr_dir}/results/logistic_regression_binary_full_model_stats_df_2025-09-10.rds")
+  )
+# # Loading model results  ( how to see full aggregated results)
+# full_logreg_binary_model_res <- readRDS(
+#   glue("{clustcr_dir}/results/logistic_regression_binary_all_model_results_list_2025-09-10.rds")
+#   )
+
+# # comparing chi2 and anova lrt p-values
+# chi2_results_df %>% 
+#   left_join(anova_lrt_pval_df, by = "cluster_id") %>% 
+#   ggplot(aes(x = anova_lrt_pval, y = chi2_p_value)) +
+#   geom_point() +
+#   geom_abline(slope = 1, intercept = 0) +
+#   theme_minimal()
+
+p_model_pval_comparison_plot <- chi2_results_df %>% 
+  left_join(anova_lrt_pval_df, by = "cluster_id") %>% 
+  ggplot(aes(x = -log10(anova_lrt_pval), y = -log10(chi2_p_value))) +
+  geom_point(alpha = 0.3) +
+  geom_abline(slope = 1, intercept = 0) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = -log10(0.05), linetype = "dashed") +
+  labs(x = expression(-log[10](ANOVA~LRT~"P-value")), y = expression(-log[10]("Chi2 P-value"))) +
+  coord_equal() +
+  theme_bw()
+
+ggsave(p_model_pval_comparison_plot, 
+  filename = glue("{clustcr_figs}/Chi2_vs_LogReg_LRT_pval_comparisons_{Sys.Date()}.png"),
+  width = 6,
+  height = 6
+)
+
+# Double checking directionality is consistent between full logreg models and chi2
+full_model_stats_df %>%
+  filter(term == "case_control_other_latestControl") %>% 
+  left_join(chi2_results_df, by = "cluster_id") %>% 
+  left_join(anova_lrt_pval_df, by = "cluster_id") %>%
+  filter(anova_lrt_pval < 0.05) %>% 
+  ggplot(aes(x = -estimate, y = log2(odds_ratio))) +
+  geom_point() +
+  # geom_abline(slope = 1, intercept = 0) +
+  theme_bw()
+
+# Notes: looks like directionality is consistent; however chi2 has much more spread and a natural distribution while logreg is much more specific to a handful of clusters
+
+
+# Now looking at a volcano plot of case/control estimates with the LRT p-value
+full_model_stats_df %>%
+  filter(term == "case_control_other_latestControl") %>% 
+  left_join(anova_lrt_pval_df, by = "cluster_id") %>%
+  # filter(anova_lrt_pval < 0.05) %>% 
+  ggplot(aes(x = -estimate, y = -log10(p_value))) +
+  geom_point() +
+  theme_bw()
+# Notes = this is pretty weird ..? Looks like is some strange structure to the estimate scores
+
+full_model_stats_df %>%
+  filter(term == "case_control_other_latestControl") %>% 
+  left_join(anova_lrt_pval_df, by = "cluster_id") %>%
+  filter(anova_lrt_pval < 0.05) %>%
+  slice_max(order_by = abs(estimate), n = 100) %>%
+  View
+
+
+
+# cid <- "CASS.G..NSPLHF_TRBV12-3"
+# full_mod <- readRDS(glue("/central/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{cid}__2025-09-08.rds"))$logit_full %>% 
+#   janitor::clean_names() %>% 
+#   glimpse()
+# # readRDS(glue("/central/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{cid}__2025-09-08.rds"))$full_model_glance
+
+# raw_binary_data <- full_df %>% 
+#   select(detected = {{cid}}, case_control_other_latest, est_tcell_reads_abis_pid, age_at_baseline, sex, participant_id) %>% 
+#   mutate(cid = {{cid}}) %>% 
+#   glimpse()
+
+# raw_binary_data %>% 
+#   ggplot(aes(y = detected, x = case_control_other_latest)) +
+#   geom_boxplot()
+#   # geom_point() +
+#   # geom_smooth(method = "glm", method.args = list(family = "binomial")) 
+
+```
+
+Plotting a volcano plot with the LRT p-value and odds ratio
+
+```{r}
+cluster_sscore_filtered <- clustcr_results_df_filtered %>% 
+  dplyr::select(cluster_id, Q_data, risk_score_p2_glrm_strat) %>% 
+  group_by(cluster_id) %>% 
+  dplyr::summarize(
+    avg_risk_score = mean(risk_score_p2_glrm_strat, na.rm = TRUE),
+    avg_selection_score = mean(log10(Q_data), na.rm = TRUE)) %>% 
+  glimpse()
+
+cluster_stats_filtered <- clustcr_results_df_filtered %>% 
+  dplyr::select(cluster_id, motif, unique_donors_per_clust, unique_samples_per_clust, motif_length) %>% 
+  distinct() %>% 
+  left_join(cluster_sscore_filtered) %>% 
+  glimpse()
+
+
+volcano_df <- chi2_results_df %>%
+  left_join(anova_lrt_pval_df, by = "cluster_id") %>%
+  left_join(cluster_stats_filtered) %>% 
+  left_join(full_model_stats_df %>% filter(term == "case_control_other_latestControl"), 
+    by = "cluster_id") %>%
+    arrange(anova_lrt_pval) %>% 
+  glimpse()
+
+volcano_df %>% glimpse()
+# volcano_df$unique_donors_per_clust %>% summary()
+
+p_lrt_volcano <- volcano_df %>% 
+  mutate(cluster_label = str_before_first(cluster_id, "_")) %>% 
+  # Add a column to identify significant points
+  mutate(
+    significant = case_when(
+      abs(log2(odds_ratio)) >= 0.5 & anova_lrt_pval <= 0.05 ~ case_when(
+        odds_ratio > 1 ~ "Enriched in Cases",
+        odds_ratio < 1 ~ "Enriched in Controls"
+      ),
+      TRUE ~ "Not Significant"
+    ),
+    # Create custom hover text
+    hover_text = sprintf(
+      "Cluster: %s\nLRT P-value: %.2e\nOdds Ratio: %.2f\nUnique Donors: %d",
+      cluster_label, anova_lrt_pval, odds_ratio, unique_donors_per_clust
+    )
+  ) %>%
+  # Add a column to identify points to label
+  mutate(
+    label_text = case_when(
+      # Top 5 most significant enriched in cases
+      significant == "Enriched in Cases" & 
+        anova_lrt_pval <= (arrange(filter(., significant == "Enriched in Cases"), anova_lrt_pval) %>% 
+                         slice_head(n = 5) %>% 
+                         pull(anova_lrt_pval) %>% 
+                         max()) ~ cluster_label,
+      # Top 5 most significant enriched in controls
+      significant == "Enriched in Controls" & 
+        anova_lrt_pval <= (arrange(filter(., significant == "Enriched in Controls"), anova_lrt_pval) %>% 
+                         slice_head(n = 5) %>% 
+                         pull(anova_lrt_pval) %>% 
+                         max()) ~ cluster_label,
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  ggplot(aes(
+    x = log2(odds_ratio), 
+    # x = odds_ratio, 
+    y = -log10(anova_lrt_pval), 
+             color = significant, 
+             text = hover_text)) +
+  geom_point(alpha = 0.6, aes(size = unique_donors_per_clust), shape = 21) +
+  # Add ggrepel text labels
+  geom_label_repel(
+    aes(label = label_text),
+    size = 3,
+      force = 100,
+    max.overlaps = Inf,
+    box.padding = 0.5,
+    segment.color = "grey50",
+    show.legend = FALSE,
+    segment.curvature = 0.3,
+    segment.ncp = 3,
+    segment.angle = 10
+  ) +
+  scale_color_manual(
+    values = c(
+      "Enriched in Cases" = "#FF7F0F",
+      "Enriched in Controls" = "#1F77B4",
+      "Not Significant" = "grey50"
+    )
+  ) +
+  labs(
+    # title = "Chi-squared test for PD enriched/depleted clusters",
+    x = expression(log[2]~"(Odds Ratio)"),
+    y = expression(-log[10]~"(P-value)"),
+    size = "Unique Donors per Cluster",
+    color = NULL
+
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    # legend.title = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12)
+  ) +
+  geom_hline(yintercept = -log10(0.05), 
+             linetype = "dashed", 
+             color = "darkgrey") +
+  geom_vline(xintercept = c(-0.5, 0.5), 
+             linetype = "dashed", 
+             color = "darkgrey") +
+  coord_cartesian(clip = "off")
+
+ggsave(
+  glue("{clustcr_figs}/clusTCR_VolcanoPlot_LogReg-LRT-pvalue_vs_odds_ratio_{Sys.Date()}.png"),
+  p_lrt_volcano,
+  width = 7,
+  height = 4 #,dpi = 600
+)
+
+seq_converg_df <- volcano_df %>% 
+  mutate(direction = case_when(
+    log2(odds_ratio) > 1 ~ "Enriched in Cases",
+    log2(odds_ratio) < 1 ~ "Enriched in Controls",
+    TRUE ~ "Not Significant"
+  )) %>% 
+  filter(anova_lrt_pval < 0.05) %>%
+  group_by(direction, motif) %>% 
+  dplyr::summarize(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  glimpse()
+
+seq_converg_df %>% 
+  filter(direction == "Enriched in Cases") %>% 
+  slice_max(order_by = n, n = 10) %>% 
+  DT::datatable()
+
+seq_converg_df %>% 
+  filter(direction == "Enriched in Controls") %>% 
+  slice_max(order_by = n, n = 10) %>% 
+  DT::datatable()
+
+
+
+
+# # metadata$diagnosis_latest %>% table
+# metadata_pdonly <- metadata %>% filter(case_control_other_latest == "Case")
+
+# metadata_pdonly$code_upd2313_posture %>% table
+# metadata_pdonly$code_upd2301_speech_problems %>% table
+# metadata_pdonly$code_upd2hy_hoehn_and_yahr_stage %>% table
+
+# metadata_pdonly$mds_updrs_part_ii_summary_score %>% table
+# metadata_pdonly$mds_updrs_part_iii_summary_score %>% table
+
+# metadata_pdonly$upd23a_medication_for_pd %>% table
+# metadata_pdonly$use_of_pd_medication %>% table
+# metadata_pdonly$moca_total_score %>% table
+# metadata_pdonly$moca_delayed_recall_subscore %>% table
+
+
+# table(metadata$diagnosis_latest, metadata$study)
+# metadata %>% 
+#   filter(case_control_other_latest != "Other") %>% 
+#   ggplot(aes(x = on_levodopa, y = mds_updrs_part_iii_summary_score)) +
+#   geom_boxplot() +
+#   # geom_point() +
+#   theme_bw()
+
+
+```
+
+Comparing logreg model with chi2 results
+
+```{r}
+chi2_results_df <- readRDS(
+  glue("{clustcr_dir}/results/chi2_results/chi2_results_df_2025-09-08.rds")) %>% 
+  glimpse()
+
+```
+

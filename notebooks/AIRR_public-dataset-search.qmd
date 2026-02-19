@@ -1,0 +1,719 @@
+---
+title: "Screening Public Databases for clones with Public Overlap"
+editor: source
+author: "Joe Boktor"
+date: '2023-12-07'
+bibliography: references.bib
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    grid:
+      sidebar-width: 300px
+      body-width: 900px
+      margin-width: 300px
+      gutter-width: 1.5rem
+---
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(fastICA)
+library(parallelDist)
+library(mclust)
+library(seqinr)
+library(progress)
+library(transport)
+library(immunarch)
+library(nlme)
+library(broom.mixed)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+library(scico)
+library(ggside)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+source(paste0(src_dir, "/R_scripts/_airr_analyze-permanova.R"))
+source(paste0(src_dir, "/R_scripts/_airr_mcpas_vdjdb_funcs.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+refdir <- glue("{wkdir}/data/input/reference_datasets")
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+mcpas_stats_dir <- glue("{metrics_dir}/association_screening_McPAS")
+vdjdb_stats_dir <- glue("{metrics_dir}/association_screening_VDJdb")
+# dir.create(mcpas_stats_dir, showWarnings = FALSE)
+# dir.create(vdjdb_stats_dir, showWarnings = FALSE)
+
+data.table::setDTthreads(30)
+options(future.globals.maxSize = 2 * 1024^3)  # 2 GB
+future::plan(future::multisession, workers = 30)
+theme_set(theme_bw())
+
+```
+
+
+Loading metadata categories
+
+```{r}
+metadata_categories_df <- readRDS(
+  glue("{wkdir}/data/interim/metadata/metadata_categories_dataframe_2025-07-21.rds"))
+
+testable_meta <- metadata_categories_df %>% 
+  pull(metadata) %>% 
+  discard(~ . %in% c("sample_id", "participant_id"))
+
+```
+
+
+Downloading VDJdb and McPAS reference datasets
+
+```{r}
+# vdjdb <- dbLoad(
+#   "https://gitlab.com/immunomind/immunarch/raw/dev-0.5.0/private/vdjdb.slim.txt.gz", 
+#   "vdjdb",
+#   .species = "HomoSapiens", 
+#   .chain = "TRB")
+
+# vdjdb
+
+# mcpas = dbLoad(
+#   "https://gitlab.com/immunomind/immunarch/raw/dev-0.5.0/private/McPAS-TCR.csv.gz",
+#   "mcpas", .species = "Human", .chain = "TRB"
+#   )
+
+# mcpas
+```
+
+
+We downloaded two reference datasets (VDJdb and McPas) on June 10th 2025, and filter by Human TRB containing matches
+
+- [VDJdb](https://vdjdb.cdr3.net/search)
+
+- [McPAS-TCR](https://friedmanlab.weizmann.ac.il/McPAS-TCR/)
+
+
+In the databases, we remove the CDR3β sequences with 
+
+- missing pathology/epitope species, or incomplete CDR3β. 
+
+- The pathologies/epitope species containing less than 30 CDR3β sequences
+
+
+
+```{r}
+vdjdb <- read_tsv(
+  glue("{refdir}/SearchTable-2025-06-11 00_47_14.856.tsv")) %>% 
+  filter(Gene == "TRB") %>% 
+  filter(Species == "HomoSapiens") %>% 
+  janitor::clean_names() %>%
+  filter(epitope_species != "synthetic") %>% 
+  mutate(epitope_species = case_when(
+    epitope_species == "Mtb" ~ "M.tuberculosis",
+    epitope_species == "Hcv" ~ "Hepatitis C virus (HCV)",
+    epitope_species == "HPV-16" ~ "HPV",
+    epitope_species == "HCoV-HKU1" ~ "SARS-CoV",
+    epitope_species == "SARS-CoV-2" ~ "SARS-CoV",
+    TRUE ~ epitope_species
+  )) %>% 
+  glimpse()
+
+vdjdb$epitope_species %>% table()
+# vdjdb$`Epitope gene` %>% table()
+vdjdb_path_vars <- table(vdjdb$epitope_species)
+testable_vdjdb_vars <- names(vdjdb_path_vars[vdjdb_path_vars > 30])
+
+# vdjdb$Species %>% table
+mcpas <- read_csv(
+  glue("{refdir}/McPAS-TCR.csv")) %>% 
+  filter(!is.na(CDR3.beta.aa)) %>% 
+  filter(Species == "Human") %>% 
+  mutate(Pathology = case_when(
+    Pathology == "Hepatitis C virus" ~ "Hepatitis C virus (HCV)",
+    Pathology == "M.Tuberculosis" ~ "M. tuberculosis",
+    TRUE ~ Pathology
+  )) %>% 
+  glimpse()
+
+mcpas$Category %>% table
+mcpas$Pathology %>% table
+
+mcpas_path_vars <- table(mcpas$Pathology)
+testable_mcpas_vars <- names(mcpas_path_vars[mcpas_path_vars > 30])
+```
+
+
+Loading repertoire data
+
+```{r}
+immdata <- readRDS(
+    glue("{wkdir}/data/interim/airr/immunarch/immunarch-obj_TCRB_2025-07-08.rds")
+)
+immdata$data %>% names()
+# immdata %>% glimpse()
+# immdata$data[[1]]
+```
+
+## Executing VDJdb and McPAS mapping
+
+```{r}
+vdjdb_map <- dbAnnotate(immdata$data, vdjdb, "CDR3.aa", "CDR3") %>% 
+  glimpse()
+saveRDS(vdjdb_map, 
+  glue("{metrics_dir}/VDJdb_mapping_{Sys.Date()}.rds")
+)
+
+mcpas_map <- dbAnnotate(immdata$data, mcpas, "CDR3.aa", "CDR3.beta.aa") %>% 
+  glimpse()
+saveRDS(mcpas_map, 
+  glue("{metrics_dir}/McPAS_mapping_{Sys.Date()}.rds")
+)
+```
+
+## Association screening VDJdb and McPAS mapping results
+
+Reading in TCRB data
+
+```{r, eval=FALSE}
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  glimpse()
+
+key_meta_df <- metadata %>% 
+  dplyr::select(
+    sample_id, participant_id, case_control_other_latest, 
+    age_at_baseline, sex, abis_t_cell, ethnicity, race, visit_month, study,
+    aligned_reads, est_tcell_reads_abis, pd_hla_risk_score, pd_hla_risk_score_z
+  ) %>% 
+  glimpse()
+
+trust4_reports_tcrb <- readRDS(
+  glue("{wkdir}/data/interim/airr/trust4_reports_tcrb_clean_df_2025-07-08.rds")
+)
+
+trust4_reports_tcrb %<>% 
+  group_by(sample_id) %>% 
+  mutate(tcrb_freq = `#count` / sum(`#count`)) %>% 
+  ungroup() %>% 
+  glimpse()
+
+# clonotype_volume_df <- trust4_reports_tcrb %>% 
+#   group_by(sample_id) %>% 
+#   dplyr::summarize(tcrb_volume = sum(`#count`)) %>% 
+#   ungroup() %>% 
+#   glimpse()
+
+# saveRDS(clonotype_volume_df, 
+#   glue("{metrics_dir}/clonotype_volume_df_{Sys.Date()}.rds")
+# )
+```
+
+
+
+
+```{r}
+# Showing one manual loop for grouping CDR3βs by pathology
+pd_cdr3b <- mcpas %>% 
+  filter(Pathology == "Parkinson disease") %>% 
+  pull(CDR3.beta.aa)
+
+# visualizing CDR3β matches in McPAS DB
+formatted_res_df <- mcpas_map %>%
+  filter(CDR3.aa %in% pd_cdr3b) %>% 
+  dplyr::select(-Samples) %>% 
+  pivot_longer(!CDR3.aa, names_to = "sample_id", 
+    values_to = "mcpas_match") %>% 
+  group_by(sample_id) %>% 
+  dplyr::summarize(mcpas_total = sum(mcpas_match)) %>% 
+  left_join(clonotype_volume_df) %>% 
+  mutate(match_fraction = log((mcpas_total / tcrb_volume) + 1e-4)) %>% 
+  ungroup() %>%
+  left_join(metadata) %>% 
+  glimpse()
+
+# example mixed model run
+nlme::lme(
+  match_fraction ~ SAA_Status,
+  data = formatted_res_df,
+  random = ~ 1 | participant_id,
+  na.action = na.omit
+) %>% 
+  broom.mixed::tidy()
+
+res_df <- data.frame()
+
+
+# # EXAMPLE SLOW LOOP
+# for (m in testable_meta[1:5]) {
+#   res <- test_metadata_variable(formatted_res_df, "match_fraction", m)
+#   print(res)
+# }
+
+
+# Set up parallel backend
+future::plan(future::multisession, workers = 30)
+# Parallel LRT testing with furrr
+res_df <- future_map_dfr(testable_meta, function(m) {
+  message(glue("Testing: {m}"))
+  
+  tryCatch({
+    res <- test_metadata_variable(formatted_res_df, "match_fraction", m)
+    
+    tibble(
+      variable = m,
+      LRT = res$L.Ratio[2],
+      p_value = res$`p-value`[2]
+    )
+  }, error = function(e) {
+    warning(glue("Error testing {m}: {e$message}"))
+    tibble(variable = m, LRT = NA, p_value = NA)
+  })
+})
+
+res_df %>% arrange(p_value)
+View(res_df)
+
+formatted_res_df %>% 
+  group_by(sample_id) %>% 
+  ggplot(aes(x = case_control_other_latest, y = match_fraction)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(
+    aes(color = est_tcell_reads_abis),
+    position = position_jitter(width = 0.2)) +
+  scale_y_log10() +
+  theme_bw()
+
+formatted_res_df %>% 
+  group_by(sample_id) %>% 
+  ggplot(aes(x = DRB12, y = match_fraction)) +
+  geom_point(
+    aes(color = case_control_other_latest),
+    position = position_jitter(width = 0.2)) +
+  scale_y_log10() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  # labs(x = "Case/Control", y = "Log(TCRB Frequency)")
+
+```
+
+Scaling McPAS testing across all pathologies with greater than 30 CDR3βs
+
+```{r}
+# Semi parallelezed version - still pretty slow
+
+testable_mcpas_vars
+# Set up parallel backend
+for (p in testable_mcpas_vars) {
+  outfile <- glue("{mcpas_stats_dir}/{p}_res_df_2025-07-17.rds")
+  if (file.exists(outfile)) next
+  message(glue("Testing: {p}"))
+  p_cdr3b <- dplyr::filter(mcpas, Pathology == p) %>% pull(CDR3.beta.aa)
+
+  formatted_res_df <- mcpas_map %>%
+    filter(CDR3.aa %in% p_cdr3b) %>% 
+    dplyr::select(-Samples) %>%
+    pivot_longer(!CDR3.aa, names_to = "sample_id", 
+      values_to = "mcpas_match") %>% 
+    group_by(sample_id) %>% 
+    dplyr::summarize(mcpas_total = sum(mcpas_match)) %>% 
+    left_join(clonotype_volume_df) %>% 
+    mutate(match_fraction = mcpas_total / tcrb_volume) %>% 
+    ungroup() %>%
+    left_join(metadata) #%>% glimpse()
+  # Parallel LRT testing with furrr
+  res_df <- future_map_dfr(testable_meta, function(m) {
+    message(glue("Testing: {m}"))  
+    tryCatch({
+      res <- test_metadata_variable(formatted_res_df, "match_fraction", m)
+      tibble(variable = m, LRT = res$L.Ratio[2], p_value = res$`p-value`[2])
+    }, error = function(e) {
+      warning(glue("Error testing {m}: {e$message}"))
+      tibble(variable = m, LRT = NA, p_value = NA)
+    })
+  })
+  saveRDS(res_df, outfile)
+}
+
+
+```
+
+Executing McPAS association screening in parallel via slurm
+
+```{r}
+# configure registry ----
+breg <- breg_setup(cluster_name = "McPAS_association_screening", 
+    log_dir = glue("{wkdir}/.cluster_runs/"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl")
+    )
+
+batch_params <- data.frame(pathology = testable_mcpas_vars) %>% 
+  mutate(
+    testable_meta = list(testable_meta),
+    wkdir = wkdir,
+    nthreads = 8
+  ) %>% 
+  # filter(!file.exists(
+  #   glue("{mcpas_stats_dir}/{pathology}_res_df_2025-07-17.rds")
+  # )) %>% 
+  glimpse()
+
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = run_mcpas_association_screening,
+  args = batch_params,
+  reg = breg
+)
+# jobs[, chunk := chunk(job.id, chunk.size = 10)]
+# print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = "1:00:00",
+    memory = "50GB",
+    ncpus = 8,
+    max.concurrent.jobs = 9999
+  )
+)
+
+# future::plan(future::sequential)
+```
+
+Executing VDJdb association screening in parallel via slurm
+
+```{r}
+source(glue("{wkdir}/notebooks/R_scripts/_airr_mcpas_vdjdb_funcs.R"))
+# configure registry ----
+breg <- breg_setup(cluster_name = "VDJdb_association_screening", 
+    log_dir = glue("{wkdir}/.cluster_runs/"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl")
+    )
+
+batch_params <- data.frame(epitope_group = testable_vdjdb_vars) %>% 
+  mutate(
+    testable_meta = list(testable_meta),
+    wkdir = wkdir,
+    nthreads = 8
+  ) %>% 
+  # filter(!file.exists(
+  #   glue("{vdjdb_stats_dir}/{epitope_group}_res_df_2025-07-17.rds")
+  # )) %>% 
+  glimpse()
+
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = run_vdjdb_association_screening,
+  args = batch_params,
+  reg = breg
+)
+# jobs[, chunk := chunk(job.id, chunk.size = 10)]
+# print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = "1:00:00",
+    memory = "50GB",
+    ncpus = 8,
+    max.concurrent.jobs = 9999
+  )
+)
+
+# future::plan(future::sequential)
+```
+
+
+## Visualizing VDJdb and McPAS mapping results
+
+Some quick numbers for the VDJdb and McPAS mapping results
+
+- There are 27 and 18 unique pathologies/epitope species in the McPAS and VDJdb databases, respectively. Note that these numbers are trimed to include only categories with greater than 30 CDR3βs and also are testable with the metadata variables. (at least one ANOVA screen was non-NA - probably caused by too few sample matches or misaligned matches with metadata - no metadata with counts)
+- There are 720 metadata variables screened for associations with matches in the VDJdb and McPAS databases.
+- 45 (27 + 18) x 720 = 32,400 ANOVA screens were executed.
+- Out of these 32,400 ANOVA screens, XXXX were significant post BH p-value adjustment (within a given epitope group).
+
+
+
+Aggregating VDJdb and McPAS mapping results
+
+
+
+```{r}
+vdjdb_stats_files <- list.files(vdjdb_stats_dir, full.names = TRUE)
+mcpas_stats_files <- list.files(mcpas_stats_dir, full.names = TRUE)
+
+refdb_stats_df <- c(vdjdb_stats_files, mcpas_stats_files) %>% 
+  purrr::set_names() %>% 
+  purrr::map(readRDS) %>% 
+  bind_rows(.id = "filepath") %>% 
+  mutate(epitope_group = basename(filepath) %>% gsub("_res_df_2025-07-17.rds", "", .)) %>% 
+  mutate(db = strex::str_before_last(filepath, "/") %>% strex::str_after_last("_")) %>% 
+  mutate(epitope_group = glue("{db}_{epitope_group}")) %>% 
+  group_by(epitope_group) %>% 
+  mutate(adj_p_value = p.adjust(p_value, method = "BH")) %>% 
+  arrange(adj_p_value) %>% 
+  ungroup() %>% 
+  mutate(delta_AIC = null_AIC - full_AIC, delta_BIC = null_BIC - full_BIC) %>% 
+  left_join(metadata_categories_df, by = c("variable" = "metadata")) %>%
+  mutate(color_me = case_when(
+    adj_p_value < 0.05 ~ class_color,
+    TRUE ~ "#E5E5E5"
+  )) %>% 
+  glimpse()
+
+# refdb_stats_df$LRT_model[1:10, ]
+
+# Some groups weren't screenable -remove them here
+refdb_stats_df %>% glimpse()
+
+testable_epitope_groups <- refdb_stats_df %>% 
+  dplyr::filter(!is.na(LRT)) %>% 
+  pull(epitope_group) %>%
+  unique()
+refdb_stats_df %<>% 
+  filter(epitope_group %in% testable_epitope_groups) %>% 
+  glimpse()
+
+# out of 87,900 successful tests that match our criteria 1,856 pass BH p-value adjustment
+successsful_tests <- refdb_stats_df %>% 
+  filter(n_samples > 30, n_participants > 10) %>% 
+  drop_na(delta_AIC) %>% 
+  glimpse()
+successsful_tests %>% filter(adj_p_value < 0.05) %>% glimpse()
+87900 * 0.05 # 4,395 expected significant tests
+
+successsful_tests %>%
+  dplyr::select(-c(filepath, class_color, color_me, LRT_model)) %>% 
+  filter(n_samples > 30, n_participants > 10) %>%
+  DT::datatable()
+
+```
+
+
+Visualzing full distributions of p-values by LRT 
+
+```{r}
+# Say we want to visualize the full distributions - maybe a volcano plot?
+refdb_stats_df %>% glimpse()
+
+p_full_dist <- refdb_stats_df %>% 
+  filter(n_samples > 30, n_participants > 10) %>% 
+  drop_na(delta_AIC) %>% 
+  arrange(desc(adj_p_value), is.na(adj_p_value)) %>%
+  ggplot(aes(y = -log10(adj_p_value), x = LRT)) +
+  geom_point(aes(color = color_me), size = 0.95, alpha = 0.9) +
+  geom_xsidedensity(aes(y = after_stat(density)), alpha = 0.7) +
+  # geom_ysidedensity(aes(x = after_stat(density)), alpha = 0.7) +
+  facet_wrap(~epitope_group, scales = "free") +
+  scale_color_identity(guide = "legend",
+                      labels = unique(refdb_stats_df$metadata_class),
+                      breaks = unique(refdb_stats_df$class_color)) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(y = "-log10(adj_p_value)", x = "delta_BIC", color = "Metadata Class") +
+  guides(color = guide_legend(override.aes = list(size = 3))) +
+  theme(
+    ggside.panel.scale = 0.3,  # Adjust the size of side panels
+    ggside.axis.text = element_text(size = 8)
+  )
+
+ggsave(
+  glue("{wkdir}/figures/AIRR/McPAS_VDJdb/",
+    "mcpas_association_screening_p_full_dist_{Sys.Date()}.png"),
+  p_full_dist,
+  width = 22,
+  height = 24
+)
+
+```
+
+
+**Takeaways**
+
+- 
+
+
+
+```{r}
+successsful_tests %>%
+  ggplot(aes(x = -log10(adj_p_value), color = epitope_group)) +
+  geom_density(alpha = 0.3) +
+  scale_color_viridis_d(option = "plasma") +
+  labs(
+    title = "Distribution of P-values by Epitope Group",
+    x = "P-value (log scale)",
+    y = "Density",
+    fill = "Epitope Group"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(size = 8),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 14, face = "bold")
+  ) +
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "red", alpha = 0.7)
+
+sig_features <- refdb_stats_df %>% 
+  filter(!is.na(p_value)) %>% 
+  # filter(p_value < 0.05) %>% 
+  filter(adj_p_value < 0.05) %>% 
+  group_by(variable) %>% 
+  summarize(median_p = median(p_value)) %>% 
+  arrange(median_p) %>% 
+  pull(variable) %>% 
+  unique()
+
+p_var_screen <- refdb_stats_df %>% 
+  filter(adj_p_value < 0.05) %>% 
+  filter(variable %in% sig_features) %>% 
+  ggplot(aes(x = -log10(p_value), 
+    y = fct_relevel(variable, rev(sig_features)), color = epitope_group)) +
+  geom_point() +
+  scale_color_viridis_d(option = "turbo") +
+  scale_x_log10() +
+  labs(x = "-log10(p-value)", y = NULL) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+ggsave(
+  glue("{wkdir}/figures/AIRR/McPAS_VDJdb/",
+    "mcpas_association_screening_p_var_screen_{Sys.Date()}.png"),
+  p_var_screen,
+  width = 18,
+  height = 24
+)
+# plotly::ggplotly(p_var_screen)
+
+```
+
+
+Building a function to load in McPAS or VDJdb mapping and visualize key eptiope groups 
+
+```{r}
+top_hits_df <- successsful_tests %>% 
+  filter(adj_p_value < 0.05) %>% 
+  arrange(desc(adj_p_value)) %>% 
+  slice_min(order_by = adj_p_value, n = 200) %>%
+  mutate(epitope_group_clean = epitope_group %>% strex::str_after_first("_")) %>% 
+  glimpse()
+
+for (i in 1:nrow(top_hits_df)) {
+  egroup <- top_hits_df$epitope_group_clean[i]
+  hit_db <- top_hits_df$db[i]
+  hit_var <- top_hits_df$variable[i]
+  plot_df <- pull_epitope_matches(egroup, hit_db) %>% 
+    drop_na(match_fraction, .data[[hit_var]])
+  p <- plot_df %>% 
+    ggplot(aes(x = .data[[hit_var]], y = match_fraction)) +
+    geom_point() +
+    labs(x = hit_var, y = "match_fraction")
+  ggsave(
+    glue("{wkdir}/figures/AIRR/McPAS_VDJdb/varscreen_hits/",
+      "{egroup}_{hit_var}_{hit_db}_{Sys.Date()}.png"),
+    p,
+    width = 18,
+    height = 24
+  )
+}
+
+metadata$msq01d_told_dreams %>% unique()
+
+ 
+#--------------------------------
+# Plotting all PD Hits
+top_hits_df_pd <- successsful_tests %>% 
+  filter(adj_p_value < 0.05) %>% 
+  arrange(desc(adj_p_value)) %>% 
+  mutate(epitope_group_clean = epitope_group %>% strex::str_after_first("_")) %>% 
+  filter(epitope_group_clean == "Parkinson disease") %>% 
+  glimpse()
+
+for (i in 1:nrow(top_hits_df_pd)) {
+  egroup <- top_hits_df_pd$epitope_group_clean[i]
+  hit_db <- top_hits_df_pd$db[i]
+  hit_var <- top_hits_df_pd$variable[i]
+  plot_df <- pull_epitope_matches(egroup, hit_db) %>% 
+    drop_na(match_fraction, .data[[hit_var]])
+  p <- plot_df %>% 
+    ggplot(aes(x = .data[[hit_var]], y = match_fraction)) +
+    geom_point() +
+    labs(x = hit_var, y = "match_fraction")
+  ggsave(
+    glue("{wkdir}/figures/AIRR/McPAS_VDJdb/varscreen_hits_PD/",
+      "{egroup}_{hit_var}_{hit_db}_{Sys.Date()}.png"),
+    p,
+    width = 18,
+    height = 24
+  )
+}
+
+
+# c("DQA1*01:02:02", "DQA1*05:05:01") %>% strex::str_before_last(., ":")  %>% gsub("\\:|\\*", "_", .)
+
+
+
+#--------------------------------
+# Calculating analysis Ns
+# Things to improve analysis
+# Find buried NA characters and turn into real NAs 
+# Add sample N into returned df
+# Filter for results with at least 30 samples
+
+
+
+# Digging into the RotavirusA x Sudden PD symptom association
+plot_df <- pull_epitope_matches("RotavirusA", "VDJdb")
+
+plot_df$match_fraction %>% unique()
+plot_df$match_total %>% unique()
+
+
+plot_df <- pull_epitope_matches("RotavirusA", "VDJdb")
+
+
+plot_df %>% 
+  drop_na(upd138_off_periods_sudden, match_total) %>% 
+  select(sample_id, upd138_off_periods_sudden, match_total) %>% 
+  View()
+
+plot_df %>% 
+  drop_na(upd138_off_periods_sudden, match_total) %>% 
+  ggplot(aes(x = upd138_off_periods_sudden, y = match_total)) +
+  geom_point() +
+  labs(x = "upd138_off_periods_sudden", y = "match_total")
+
+
+
+
+```

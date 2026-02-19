@@ -1,0 +1,1773 @@
+---
+title: "Clustering TCR repertoires"
+editor: source
+author: "Joe Boktor"
+date: '2025-03-24'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+
+Environment setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(seqinr)
+library(progress)
+library(immunarch)
+library(nlme)
+library(broom)
+library(broom.mixed)
+library(parallelDist)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+library(scico)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+source(paste0(src_dir, "/R_scripts/_airr_analyze-permanova.R"))
+
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+gliph2_plots_dir <- glue("{wkdir}/figures/AIRR/gliph2/")
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+arcasHLA_interim <- glue("{wkdir}/data/interim/airr/arcasHLA")
+gliph2_input_dir <- glue("{wkdir}/data/input/gliph2/param_files")
+gliph2_res_dir <- glue("{wkdir}/data/interim/airr/gliph2/processing")
+clustcr_dir <- glue("{wkdir}/data/interim/clusTCR")
+clustcr_figs <- glue("{wkdir}/figures/clusTCR")
+tcr_cdr3_riskscore_complied <- 
+    glue("{wkdir}/data/interim/cdr3_qtl/scoring_cdr3-risk-scores_complied")
+cohort_subset_dir <- glue("{clustcr_dir}/results/cohort_subsets")
+
+# dir.create(clustcr_figs, showWarnings = FALSE, recursive = TRUE)
+# dir.create(glue("{clustcr_dir}/input"), showWarnings = FALSE, recursive = TRUE)
+# dir.create(glue("{clustcr_dir}/results"), showWarnings = FALSE, recursive = TRUE)
+
+```
+
+
+Loading metadata and TCRB data
+
+```{r, eval=FALSE}
+trust4_reports_tcrb <- readRDS(
+  glue("{wkdir}/data/interim/airr/trust4_reports_tcrb_clean_df_2025-07-08.rds")
+) %>% 
+  glimpse()
+
+trust4_reports_tcrb %>% glimpse()
+# trust4_reports_tcrb$sample_id %>% unique() %>% length()
+# trust4_reports_tcrb$participant_id %>% unique() %>% length()
+metadata %>% select(participant_id, case_control_other_latest) %>% distinct() %>%
+  select(case_control_other_latest) %>% table()
+
+clonotype_volume_df <- trust4_reports_tcrb %>% 
+  group_by(sample_id) %>% 
+  # group_by(participant_id) %>% 
+  dplyr::summarize(
+      clonal_volume = sum(`#count`),
+      clonal_count = n()
+      ) %>%
+  glimpse()
+
+clonotype_volume_df$clonal_count %>% summary()
+clonotype_volume_df$clonal_volume %>% summary()
+
+clonotype_volume_df$clonal_volume %>% summary()
+low_vol_samples <- clonotype_volume_df %>% 
+  filter(clonal_volume < 200) %>% 
+  glimpse()
+
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  left_join(clonotype_volume_df, by = "sample_id") %>% 
+  glimpse()
+
+metadata_categories_df <- readRDS(
+  glue("{wkdir}/data/interim/metadata/metadata_categories_dataframe_2025-07-21.rds")) %>% 
+  glimpse()
+
+```
+
+
+## Analysis Setup - Prepping data for GLIPH2
+
+Prepping TRUST4 data for GLIPH2
+
+```{r}
+trust4_reports_tcrb %>% glimpse()
+
+gliph2_cdr3b_df <- trust4_reports_tcrb %>%
+    mutate("subject_condition" = paste0(sample_id, ":", case_control_other_latest)) %>%
+    mutate(TRBV = str_before_first(V, "\\*")) %>%
+    mutate(TRBJ = str_before_first(J, "\\*")) %>%
+    mutate(CDR3a = "NA") %>% 
+    dplyr::select(
+        "#CDR3b" = CDR3aa, TRBV, TRBJ, CDR3a, 
+        "subject:condition" = subject_condition, count = "#count"
+    ) %>%
+    glimpse()
+
+gliph2_cdr3b_df %>% glimpse()
+
+write.table(
+  gliph2_cdr3b_df,
+  file = glue("{gliph2_input_dir}/amppd_tcrb_{Sys.Date()}.txt"),
+  quote = FALSE,
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE
+)
+
+trust4_reports_tcrb %>% glimpse()
+
+clustcr_cdr3b_df <- trust4_reports_tcrb %>%
+    mutate(TRBV = str_before_first(V, "\\*")) %>%
+    mutate(TRBJ = str_before_first(J, "\\*")) %>%
+    dplyr::select(
+        "CDR3b_aa" = CDR3aa, TRBV, TRBJ, sample_id, participant_id,
+        condition = case_control_other_latest, count = "#count"
+    ) %>%
+    glimpse()
+
+readr::write_tsv(clustcr_cdr3b_df, file = glue("{clustcr_dir}/input/amppd_tcrb_{Sys.Date()}.tsv"))
+
+# latest file:
+# amppd_tcrb_2025-08-04
+
+# Saaving cohort subssets for clustTCR analysis 
+full_amppd_tcrb <- trust4_reports_tcrb %>%
+  mutate(TRBV = str_before_first(V, "\\*")) %>%
+  mutate(TRBJ = str_before_first(J, "\\*")) %>%
+  dplyr::select(
+      "CDR3b_aa" = CDR3aa, TRBV, TRBJ, sample_id, participant_id,
+      condition = case_control_other_latest, count = "#count", study
+  ) %>%
+  glimpse()
+
+# smalltest <- full_amppd_tcrb %>% sample_n(10000)
+# readr::write_tsv(smalltest, file = glue("{clustcr_dir}/input/amppd_tcrb_small_test_{Sys.Date()}.tsv"))
+
+for (cohort in unique(full_amppd_tcrb$study)) {
+  message(glue("Writing {cohort} data"))
+  one_cohort_df <- full_amppd_tcrb %>% filter(study == cohort)
+  readr::write_tsv(one_cohort_df, file = glue("{clustcr_dir}/input/ONLY_{cohort}_{Sys.Date()}.tsv"))
+  all_except_one_cohort_df <- full_amppd_tcrb %>% filter(study != cohort)
+  readr::write_tsv(all_except_one_cohort_df, file = glue("{clustcr_dir}/input/ALL_EXCEPT_{cohort}_{Sys.Date()}.tsv"))
+}
+
+```
+
+
+Saving HLA file for GLIPH2
+
+```{r}
+genotypes_cleaned <- readRDS(
+    glue("{arcasHLA_interim}/genotypes_cleaned_2025-07-06.rds")
+)
+
+# alleles_to_remove <- c("E", "F", "G", "H", "J", "K", "L")
+# alleles_to_remove <- c(
+#     paste0(alleles_to_remove, "1"), 
+#     paste0(alleles_to_remove, "2")
+#     )
+mhc1_alleles <- c("A", "B", "C")
+mhc2_alleles <- c("DPA1", "DPB1", "DQA1", "DQB1", "DRB1")
+major_hla_alleles <- c(mhc1_alleles, mhc2_alleles)
+
+gliph2_hla_df <- genotypes_cleaned %>%
+    left_join(metadata %>% select(participant_id, sample_id, case_control_other_latest),
+        by = c("participant_id" = "participant_id")
+    ) %>%
+    select(-c(participant_id, case_control_other_latest)) %>%
+    select(sample_id, all_of(paste0(rep(major_hla_alleles, each = 2), 1:2))) %>%
+    # select(-all_of(alleles_to_remove)) %>%
+    glimpse()
+
+write.table(
+  gliph2_hla_df,
+  file = glue("{gliph2_input_dir}/amppd_hla_{Sys.Date()}.txt"),
+  quote = FALSE,
+  sep = "\t",
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+# latest file:
+# amppd_hla_2025-07-08
+```
+
+
+### Running GLIPH2
+
+Gliph2 executable for Linux server Centos 7  was downloaded from [here](http://50.255.35.37:8080/) including [Human v2.0](http://50.255.35.37:8080/tools) reference data.
+
+
+The command below was executed in a slurm script found in `notebooks/shell_scripts/slurm_run_gliph2.sh`
+
+
+```{r}
+# # Running test
+# cd /central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/airr/gliph2/tcrb_results_test
+
+# /central/groups/MazmanianLab/joeB/software/gliph2/irtools.centos -c /central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/input/gliph2/param_files/gliph2_tcrb_TEST.cfg
+
+# exec_path <- glue("{home_dir}/software/gliph2/irtools.centos")
+# gliph2_out_dir <- glue("{wkdir}/data/interim/airr/gliph2/tcrb_results")
+# dir.create(gliph2_out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# glue(
+#   "cd {gliph2_out_dir} && ",
+#   "{exec_path} -c {gliph2_input_dir}/gliph2_tcrb.cfg"
+#   )
+```
+
+
+# Running ClusTCR
+
+```{r}
+# cd /central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/notebooks/python_scripts
+# mamba activate clustcr
+# python run_clusTCR.py
+
+```
+
+
+Running the generalized clusTCR script
+
+```{r}
+# # Testing generalized script
+# shell_do(
+#   glue(
+#     "mamba activate clustcr && ",
+#     "python {src_dir}/python_scripts/run_clusTCR_general.py",
+#       " --tcrb {clustcr_dir}/input/amppd_tcrb_small_test_2025-08-22.tsv",
+#       " --outdir {clustcr_dir}/results/NEWRESULTSTESTME",
+#       " --outname TESTNEWSCRIPT",
+#       " --include-vgene",
+#       " --cdr3-col CDR3b_aa",
+#       " --vgene-col TRBV",
+#       " --n-cpus all"
+#   )
+# )
+
+tcrb_input_paths <- list.files(glue("{clustcr_dir}/input"), pattern = "ONLY_|ALL_EXCEPT_")
+names(tcrb_input_paths) <- str_before_last(tcrb_input_paths, "_")
+
+for (dataset in names(tcrb_input_paths)) {
+  message(glue("Running {dataset}"))
+  shell_do(
+    glue(
+      "sbatch --job-name=clustcr_test_{dataset} ",
+      "--cpus-per-task=32 ",
+      "--time=1-00:00:00 ",
+      "--mem=300G ",
+      "--output={wkdir}/.cluster_runs/{get_time()}_clustcr_test_{dataset}_%j.out ",
+      "--error={wkdir}/.cluster_runs/{get_time()}_clustcr_test_{dataset}_%j.err ",
+      "--wrap=\"",
+      "source ~/.bashrc && mamba activate clustcr && ",
+      "python {src_dir}/python_scripts/run_clusTCR_general.py",
+        " --tcrb {clustcr_dir}/input/{tcrb_input_paths[dataset]}",
+        " --outdir {clustcr_dir}/results/cohort_subsets/{dataset}",
+        " --outname {dataset}",
+        " --include-vgene",
+        " --cdr3-col CDR3b_aa",
+        " --vgene-col TRBV",
+        " --n-cpus 32",
+      "\""
+    )
+  )
+}
+
+# Running levenshtein script
+for (dataset in names(tcrb_input_paths)) {
+  message(glue("Running {dataset}"))
+  shell_do(
+    glue(
+      "sbatch --job-name=clustcr_test_{dataset} ",
+      "--cpus-per-task=32 ",
+      "--time=1-00:00:00 ",
+      "--mem=300G ",
+      "--output={wkdir}/.cluster_runs/{get_time()}_clustcr_test_{dataset}_%j.out ",
+      "--error={wkdir}/.cluster_runs/{get_time()}_clustcr_test_{dataset}_%j.err ",
+      "--wrap=\"",
+      "source ~/.bashrc && mamba activate clustcr && ",
+      "python {src_dir}/python_scripts/run_clusTCR_general_levenshtein.py",
+        " --tcrb {clustcr_dir}/input/{tcrb_input_paths[dataset]}",
+        " --outdir {clustcr_dir}/results/cohort_subsets/{dataset}_levenshtein",
+        " --outname {dataset}",
+        " --include-vgene",
+        " --cdr3-col CDR3b_aa",
+        " --vgene-col TRBV",
+        " --n-cpus 32",
+      "\""
+    )
+  )
+}
+
+# Run entire dataset with levenshtein distance
+shell_do(
+  glue(
+    "sbatch --job-name=clustcr_test_levenshtein_full ",
+    "--cpus-per-task=32 ",
+    "--time=2-00:00:00 ",
+    "--mem=600G ",
+    "--output={wkdir}/.cluster_runs/{get_time()}_clustcr_test_levenshtein_full_%j.out ",
+    "--error={wkdir}/.cluster_runs/{get_time()}_clustcr_test_levenshtein_full_%j.err ",
+    "--wrap=\"",
+    "source ~/.bashrc && mamba activate clustcr && ",
+    "python {src_dir}/python_scripts/run_clusTCR_general_levenshtein.py",
+      " --tcrb {clustcr_dir}/input/amppd_tcrb_2025-08-04.tsv",
+      " --outdir {clustcr_dir}/results/levenshtein_full",
+      " --outname levenshtein_full",
+      " --include-vgene",
+      " --cdr3-col CDR3b_aa",
+      " --vgene-col TRBV",
+      " --n-cpus 32",
+      "\""
+  )
+)
+
+```
+
+
+
+## Interpreting & Wrangling ClusTCR results
+
+```{r}
+# loading sample - TCRb data
+clustcr_cdr3b_df <- readr::read_tsv(
+  glue("{clustcr_dir}/input/amppd_tcrb_2025-08-04.tsv")) %>% 
+  dplyr::rename(case_control_other_latest = condition) %>% 
+  glimpse()
+clustcr_cdr3b_df %>% glimpse()
+
+# Reading in CDR3 risk score data
+cdr3_risk_score_df <- readRDS(glue("{tcr_cdr3_riskscore_complied}/",
+        "risk_scores_padj05_2025-08-10.rds")) %>% 
+    distinct() %>% 
+    dplyr::rename(CDR3b_aa = CDR3aa) %>% 
+    glimpse()
+cdr3_risk_score_df %>% glimpse()
+
+# olga/sonnia probabilities 
+genprob_case <- read_csv(
+  glue("{wkdir}/data/interim/olga_sonnia/results/tcrb_case_results/tcrb_case_results.csv")) %>% 
+  mutate(case_control_other_latest = "Case") %>% 
+  dplyr::rename(CDR3b_aa = amino_acid, TRBV = v_gene, TRBJ = j_gene)
+genprob_ctrl <- read_csv(
+  glue("{wkdir}/data/interim/olga_sonnia/results/tcrb_ctrl_results/tcrb_ctrl_results.csv")) %>% 
+  mutate(case_control_other_latest = "Control") %>% 
+  dplyr::rename(CDR3b_aa = amino_acid, TRBV = v_gene, TRBJ = j_gene)
+genprob <- bind_rows(genprob_case, genprob_ctrl) %>% 
+  glimpse()
+
+# Joining CDR3 risk score data and olga/sonnia probabilities to input data
+tcrb_df <- clustcr_cdr3b_df %>% 
+  left_join(cdr3_risk_score_df) %>% 
+  left_join(genprob) %>% 
+  glimpse()
+tcrb_df %>% glimpse()
+
+```
+
+
+```{r}
+# Loading ClusTCR output ----
+clustcr_output <- read_csv(
+  glue("{clustcr_dir}/results/clusTCR_output_vgene_restricted_31cpus.csv"),
+  col_select = -1) %>% 
+  glimpse()
+clustcr_summary <- read_csv(
+  glue("{clustcr_dir}/results/clusTCR_summary_vgene_restricted_31cpus.csv")) %>% 
+  dplyr::rename(cluster = ...1) %>% 
+  glimpse()
+clustcr_summary$cluster  <- unique(clustcr_output$cluster)
+clustcr_output %>% glimpse()
+clustcr_summary %>% glimpse()
+
+
+# Merging ClusTCR output with metadata ----
+clustcr_results_df <- clustcr_output %>%
+  left_join(clustcr_summary) %>%
+  left_join(tcrb_df, 
+    by = c("junction_aa" = "CDR3b_aa", "v_call" = "TRBV"),
+    relationship = "many-to-many") %>%
+  group_by(cluster) %>%
+  mutate(
+    unique_donors_per_clust = n_distinct(participant_id),
+    unique_samples_per_clust = n_distinct(sample_id)
+  ) %>%
+  ungroup() %>% 
+  mutate(motif_length = motif %>% 
+         gsub("\\[.*?\\]", "X", .) %>%  # Replace bracketed content with single X
+         gsub("\\.", "", .) %>%         # Remove dots
+         gsub("[^A-Z]", "", .) %>%      # Keep only uppercase letters
+         nchar()
+  ) %>% 
+  # mutate(cluster_id = glue("c{cluster}_{motif}")) %>% 
+  mutate(cluster_id = glue("{motif}_{v_call}")) %>% 
+  glimpse()
+
+saveRDS(clustcr_results_df, 
+  glue(
+    "{clustcr_dir}/results/",
+    "compiled_clustcr_results_df_{Sys.Date()}.rds")
+  )
+
+```
+
+Visualziing trends between Selection score and CDR3 risk score
+
+```{r}
+clustcr_results_df <- readRDS(
+  glue("{clustcr_dir}/results/compiled_clustcr_results_df_2025-08-24.rds")
+  )
+clustcr_results_df %>% glimpse()
+
+cluster_sscore <- clustcr_results_df %>% 
+  dplyr::select(cluster, Q_data, risk_score_p2_glrm_strat) %>% 
+  group_by(cluster) %>% 
+  dplyr::summarize(
+    avg_risk_score = mean(risk_score_p2_glrm_strat, na.rm = TRUE),
+    avg_selection_score = mean(log10(Q_data), na.rm = TRUE)) %>% 
+  glimpse()
+cluster_stats <- clustcr_results_df %>% 
+  dplyr::select(cluster, motif, unique_donors_per_clust, unique_samples_per_clust, motif_length) %>% 
+  distinct() %>% 
+  left_join(cluster_sscore) %>% 
+  glimpse()
+
+# visualziing top clusters by selection score and risk
+cluster_stats %>% glimpse()
+cluster_stats %>% 
+  filter(unique_donors_per_clust >= 10) %>% 
+  filter(motif_length >= 9) %>% 
+  select(cluster, avg_selection_score, avg_risk_score) %>% 
+  distinct() %>% 
+  ggplot(aes(x = avg_selection_score, y = avg_risk_score)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "lm") +
+  ggside::geom_xsidedensity(aes(y = after_stat(density)), 
+                           position = "stack", 
+                           fill = "steelblue", 
+                           alpha = 0.7) +
+  ggside::geom_ysidedensity(aes(x = after_stat(density)), 
+                           position = "stack", 
+                           fill = "coral", 
+                           alpha = 0.7) +
+  ggside::scale_xsidey_continuous(breaks = NULL) +
+  ggside::scale_ysidex_continuous(breaks = NULL) +
+  theme_minimal() +
+  theme(ggside.panel.scale = 0.3)
+
+```
+
+
+**Notes**
+- Out of 6,679,301 non-unique CDR3b sequences, 2,977,430 get clustered into 210,314 groups
+- We will filter our clusters to contain at least 3 unique donors (participants)
+
+
+### Generating cluster membership matrices
+
+```{r}
+clustcr_filter_summarized <- clustcr_results_df %>% 
+  filter(unique_donors_per_clust >= 10) %>% 
+  filter(motif_length >= 8) %>% 
+  dplyr::group_by(sample_id, cluster_id) %>%
+  dplyr::summarize(count = sum(count)) %>% 
+  glimpse()
+
+sid_count_sum <- clustcr_filter_summarized %>%
+  dplyr::group_by(sample_id) %>% 
+  dplyr::summarize(sid_total_count = sum(count)) %>% 
+  glimpse()
+
+clust_mat_weighted <- clustcr_filter_summarized %>% 
+  left_join(sid_count_sum, by = "sample_id") %>% 
+  mutate(norm_count = count / sid_total_count) %>% 
+  dplyr::select(sample_id, cluster_id, norm_count) %>% 
+  pivot_wider(
+    id_cols = sample_id,
+    names_from = cluster_id,
+    values_from = norm_count,
+    values_fill = 0
+  )
+clust_mat_binary <- clustcr_filter_summarized %>% 
+  mutate(present = 1) %>% 
+  dplyr::select(sample_id, cluster_id, present) %>% 
+  pivot_wider(
+    id_cols = sample_id,
+    names_from = cluster_id,
+    values_from = present,
+    values_fill = 0
+  )
+
+# Saving data filtered for extreme Selection Scores or CDR3 risk scores
+saveRDS(
+  clust_mat_weighted, 
+  glue("{clustcr_dir}/results/clust_mat_weighted_{Sys.Date()}.rds")
+)
+saveRDS(
+  clust_mat_binary, 
+  glue("{clustcr_dir}/results/clust_mat_binary_{Sys.Date()}.rds")
+)
+
+```
+
+
+
+# Interpreting & Wrangling GLIPH2 results
+
+Reading in GLIPH2 results
+
+```{r}
+gliph_dir <- glue("{wkdir}/data/interim/airr/gliph2/tcrb_results_try3")
+cluster_df <- readr::read_csv(
+    glue("{gliph_dir}/AMPPD_TCRB_cluster.csv")) %>%
+    glimpse()
+
+cluster_df %>% glimpse()
+# cluster_df$final_score %>% log10() %>% {-(.)} %>% hist(1000)
+
+sid_pid_key <- key_meta_df %>% 
+    dplyr::select(sample_id, participant_id) %>% 
+    glimpse()
+
+cluster_df_meta <- cluster_df %>% 
+    tidyr::separate(Sample, into = c("sample_id", "case_control_other_latest"), sep = ":", remove = FALSE) %>% 
+    left_join(sid_pid_key) %>% 
+    glimpse()
+
+cluster_df_meta %>% glimpse()
+
+saveRDS(cluster_df_meta, file = glue("{gliph2_res_dir}/cluster_df_meta_{Sys.Date()}.rds"))
+
+```
+
+
+Filtering clusters for Case/Control Fisher's test 
+
+- Minimum 5 unique donors per cluster
+
+- Motif length > 3 fixed positions
+
+```{r}
+cluster_df_meta <- readRDS(glue("{gliph2_res_dir}/cluster_df_meta_2025-05-23.rds"))
+
+cluster_pid_comp <- cluster_df_meta %>% 
+    dplyr::select(index, participant_id) %>% 
+    distinct() %>% 
+    group_by(index) %>% 
+    dplyr::summarise(n_participants = n()) %>% 
+    ungroup()
+
+unique_pid_thresh_inx <- cluster_pid_comp %>% 
+    filter(n_participants >= 5) %>% 
+    pull(index)
+
+cluster_df_meta_f1 <- cluster_df_meta %>% 
+    filter(index %in% unique_pid_thresh_inx) %>% 
+    glimpse()
+
+cluster_df_meta_f1 %>% glimpse()
+
+# Second round of filtering for clusters with Fisher score <= 0.05
+#' This round of filtering remmoves motifs that are likely 
+#' influenced by germline genes and are common in a naive 
+#' inexperience human TCR repertoire population filtering for 
+#' significant values increases the chance that the motif is 
+#' associated with an antigenic peptide ..
+
+cluster_df_meta_f2 <- cluster_df_meta_f1 %>%
+    filter(Fisher_score <= 0.05) %>%
+    glimpse()
+cluster_df_meta_f2 %>% glimpse()
+
+# cluster_df_meta_f2$pattern %>% unique
+# cluster_df_meta_f2$pattern %>% 
+#     gsub("\\%", "", .) %>% nchar()
+
+# Filter 3 clusters with pattern length > 3 fixed pos AAs
+cluster_df_meta_f3 <- cluster_df_meta_f2 %>% 
+    mutate(pattern_len = gsub("\\%", "", pattern) %>% nchar()) %>% 
+    filter(pattern_len > 3) %>% 
+    glimpse()
+
+```
+
+
+```{r}
+# Case / control total DONORS
+sample_groups_df <- cluster_df_meta %>%
+    dplyr::select(participant_id, case_control_other_latest) %>%
+    distinct()
+grp_n <- sample_groups_df$case_control_other_latest %>% table()
+case_n_base <- grp_n[["Case"]]
+ctrl_n_base <- grp_n[["Control"]]
+cidx_list <- unique(cluster_df_meta_f3$index)
+
+fisher_results_df <- tibble(
+    index = numeric(),
+    type = character(),
+    cases_in_cluster = numeric(),
+    controls_in_cluster = numeric(),
+    cases_not_in_cluster = numeric(),
+    controls_not_in_cluster = numeric(),
+    fisher_p_value = numeric(),
+    odds_ratio = numeric(),
+    conf_low = numeric(),
+    conf_high = numeric()
+)
+pb <- progress_bar$new(
+    format = "Processing clusters [:bar] :percent eta: :eta",
+    total = length(cidx_list),
+    clear = FALSE,
+    width = 80
+)
+
+# For each cluster, calculate the values and perform Fisher's test
+for (cidx in cidx_list) {
+    pb$tick()
+    
+    cidx_df <- cluster_df_meta_f3 %>%
+        filter(index == cidx)
+    
+    # Get counts
+    case_n_cluster <- cidx_df %>%
+        filter(case_control_other_latest == "Case") %>%
+        pull(participant_id) %>%
+        n_distinct()
+    ctrl_n_cluster <- cidx_df %>%
+        filter(case_control_other_latest == "Control") %>%
+        pull(participant_id) %>%
+        n_distinct()
+    
+    # Calculate remaining counts
+    case_n_remaining <- case_n_base - case_n_cluster
+    ctrl_n_remaining <- ctrl_n_base - ctrl_n_cluster
+    
+    # Perform Fisher's test
+    fisher_test <- fisher.test(matrix(
+        c(
+            case_n_cluster, ctrl_n_cluster,
+            case_n_remaining, ctrl_n_remaining
+        ),
+        nrow = 2
+    ))
+    
+    # Add results to dataframe
+    fisher_results_df <- fisher_results_df %>%
+        add_row(
+            index = cidx,
+            type = unique(cidx_df$type),
+            cases_in_cluster = case_n_cluster,
+            controls_in_cluster = ctrl_n_cluster,
+            cases_not_in_cluster = case_n_remaining,
+            controls_not_in_cluster = ctrl_n_remaining,
+            fisher_p_value = fisher_test$p.value,
+            odds_ratio = fisher_test$estimate[1],
+            conf_low = fisher_test$conf.int[1],
+            conf_high = fisher_test$conf.int[2]
+        )
+}
+
+# Sort by p-value and display results
+fisher_results_df <- fisher_results_df %>%
+    mutate(adj_fisher_p_value = p.adjust(fisher_p_value, method = "BH")) %>%
+    arrange(fisher_p_value) %>% 
+    glimpse()
+
+# View the first few rows
+fisher_results_df %>% View()
+
+```
+
+
+## TESTING A FASTER VERSION OF THE FISHER'S TEST
+
+```{r}
+# To retain as many clusters as possible
+cluster_df_meta_f3 <- cluster_df_meta_f1 %>% 
+    mutate(pattern_len = gsub("\\%", "", pattern) %>% nchar()) %>% 
+    filter(pattern_len > 3) %>% 
+    glimpse()
+
+cluster_df_meta_f3 %>% glimpse()
+
+sample_groups_df <- cluster_df_meta_f3 %>%
+    dplyr::select(participant_id, case_control_other_latest) %>%
+    distinct()
+
+grp_n <- sample_groups_df$case_control_other_latest %>% table()
+case_n_base <- grp_n[["Case"]]
+ctrl_n_base <- grp_n[["Control"]]
+cidx_list <- unique(cluster_df_meta_f3$index)
+
+
+# 1.  unique donors per (cluster × group) in one pass 
+per_cluster <- cluster_df_meta_f3 %>%
+  dplyr::distinct(index, type, participant_id, case_control_other_latest) %>%
+  dplyr::count(index, type, case_control_other_latest, name = "n") %>%
+  pivot_wider(names_from = case_control_other_latest,
+              values_from = n,
+              values_fill = 0)                                          # columns: Case, Control
+
+per_cluster %>% glimpse()
+
+# 2.  add the 'remaining' cells once 
+per_cluster <- per_cluster %>%
+  mutate(
+    remCase = case_n_base - Case,
+    remCtrl = ctrl_n_base - Control
+  ) %>% 
+  glimpse()
+
+# # 3.  run Fisher’s test row-wise (vectorised over rows) 
+# future::plan(future::multisession, workers = 7)
+# fisher_stats <- furrr::future_pmap_dfr(
+#   # supply the four cell counts as parallel vectors
+#   per_cluster %>% dplyr::select(Case, Control, remCase, remCtrl),
+#   function(Case, Control, remCase, remCtrl) {
+#     ft <- fisher.test(matrix(c(Case+1, Control+1, remCase+1, remCtrl+1), nrow = 2))
+#     list(
+#       fisher_p_value = ft$p.value,
+#       odds_ratio     = unname(ft$estimate),
+#       conf_low       = ft$conf.int[1],
+#       conf_high      = ft$conf.int[2]
+#     )
+#   }
+# )
+
+# # 4.  final result 
+# fisher_results_df <- bind_cols(per_cluster, fisher_stats) %>% 
+#     glimpse()
+
+# fisher_results_df$adj_fisher_p_value %>% sort() %>% head
+# fisher_results_df %>% 
+#     slice_head(n = 10, by = fisher_p_value) %>% 
+#     View()
+
+# per_cluster: data-frame with Case, Control, remCase, remCtrl columns
+future::plan(future::multisession, workers = 15)
+chi2_stats <- furrr::future_pmap_dfr(
+  per_cluster %>% select(Case, Control, remCase, remCtrl),
+  function(Case, Control, remCase, remCtrl) {
+    mat <- matrix(c(Case, Control, remCase, remCtrl), nrow = 2)
+    ## 1. χ² test (no Yates correction keeps it comparable to Fisher)
+    ct <- suppressWarnings(chisq.test(mat, correct = FALSE))
+    ## 2. Odds ratio for context
+    or <- (Case * remCtrl) / (Control * remCase)
+    list(
+      chi2_p_value = ct$p.value,
+      chi2_stat    = unname(ct$statistic),
+      odds_ratio   = or,
+      exp_case_cluster    = ct$expected[1],
+      exp_control_cluster = ct$expected[2]
+    )
+  }
+)
+
+chi2_results_df <- bind_cols(per_cluster, chi2_stats) %>% 
+    mutate(adj_chi2_p_value = stats::p.adjust(chi2_p_value, method = "fdr")) %>%
+    arrange(chi2_p_value) %>% 
+    glimpse()
+
+chi2_results_df %>% 
+    slice_head(n = 10, by = chi2_p_value) %>% 
+    View()
+
+saveRDS(chi2_results_df, file = 
+  glue("{gliph2_res_dir}/chi2_results_df_{Sys.Date()}.rds"))
+
+```
+
+
+TEMP FITTING LMs over time x disease metric to classify clusters as worsening, improving, or stagnant
+
+```{r}
+library(broom)
+
+chi2_results_df <- readRDS(
+  glue("{gliph2_res_dir}/chi2_results_df_2025-05-26.rds"))
+
+full_meta_df %>% glimpse()
+# For each participant and each disease metric, calculate slopes and quality of fit
+# For each participant, fit a linear model and extract the slope and R²
+
+# code_upd2hy_hoehn_and_yahr_stage
+# mds_updrs_part_iii_summary_score
+# mds_updrs_part_iv_summary_score
+# upsit_total_score
+# rbd_info_source
+
+slopes_df <- full_meta_df %>%
+  filter(!is.na(mds_updrs_part_iii_summary_score), !is.na(visit_month)) %>%
+  group_by(participant_id) %>%
+  do({
+    fit = lm(mds_updrs_part_iii_summary_score ~ visit_month, data = .)
+    tidy_fit = broom::tidy(fit)
+    glance_fit = broom::glance(fit)
+    data.frame(
+      slope = tidy_fit$estimate[tidy_fit$term == "visit_month"],
+      intercept = tidy_fit$estimate[tidy_fit$term == "(Intercept)"],
+      r.squared = glance_fit$r.squared,
+      n = nrow(.)
+    )
+  }) %>%
+  ungroup()
+
+# categorize each metric sample as reliably increasing, decreasing, highly variable, or not stagnant
+metric_type <- slopes_df %>% 
+    mutate(metric_type = case_when(
+        slope > 0.2 & r.squared > 0.3 ~ "increasing",
+        slope < -0.2 & r.squared > 0.3 ~ "decreasing",
+        r.squared < 0.3 ~ "highly variable",
+        TRUE ~ "stagnant"
+    )) %>% 
+    mutate(metric_type = factor(metric_type, levels = c("increasing", "decreasing", "highly variable", "stagnant"))) %>% 
+    select(participant_id, metric_type) %>% 
+    glimpse()
+
+# table(full_meta_df$case_control_other_latest, full_meta_df$upsit_total_score)
+# table(full_meta_df$study, full_meta_df$mds_updrs_part_ii_summary_score)
+
+full_meta_df %>% 
+    left_join(metric_type, by = "participant_id") %>% 
+    filter(!is.na(metric_type)) %>%
+    ggplot(aes(x = visit_month, y = mds_updrs_part_iii_summary_score, color = metric_type)) +
+    facet_grid(metric_type~case_control_other_latest) +
+    scale_color_aaas() +
+    geom_line(aes(group = participant_id), alpha = 0.3)
+    # geom_smooth(aes(group = participant_id), alpha = 0.1, method = "lm", se = FALSE, linewidth = 0.5)
+
+
+# For each sample_id calculate the fraction of membership in TCR meta-clusters that are PD enriched / PD depleted
+cluster_id_annotation <- chi2_results_df %>% 
+    mutate(
+        significant = case_when(
+            abs(log2(odds_ratio)) >= 0.5 & chi2_p_value <= 0.05 ~ case_when(
+                odds_ratio > 1 ~ "Enriched in Cases",
+                odds_ratio < 1 ~ "Enriched in Controls"
+            ),
+            TRUE ~ "Not Significant"
+        )
+    )  %>% 
+    select(index, type, significant) %>% 
+    distinct() %>% 
+    glimpse()
+
+# cluster_df_meta_f3 <- cluster_df_meta_f1 %>% 
+#     mutate(pattern_len = gsub("\\%", "", pattern) %>% nchar()) %>% 
+#     filter(pattern_len > 3) %>% 
+#     glimpse()
+
+# full_meta_df %>% 
+#     left_join(metric_type, by = "participant_id") %>% 
+#     filter(!is.na(metric_type)) 
+
+sid_cluster_enrichment <- cluster_df_meta_f3 %>% 
+  dplyr::select(index, type, sample_id, participant_id, Freq, case_control_other_latest) %>%
+  left_join(cluster_id_annotation, by = c("index", "type")) %>% 
+  distinct() %>% 
+  group_by(participant_id, significant, case_control_other_latest) %>%
+  dplyr::summarise(total_freq = sum(Freq)) %>%
+  group_by(participant_id) %>%
+  dplyr::mutate(frac_prop = total_freq / sum(total_freq)) %>%
+  # left_join(full_meta_df, by = "participant_id") %>% 
+  left_join(metric_type, by = "participant_id") %>% 
+  # filter(!is.na(metric_type)) %>%
+  glimpse()
+
+
+# Optionally, order participants by fraction of "Enriched in Cases" for better visualization
+participant_order <- sid_cluster_enrichment %>%
+  filter(significant == "Enriched in Cases") %>%
+  arrange(desc(frac_prop)) %>%
+  pull(participant_id)
+
+# Set factor levels for consistent color mapping and ordering
+sid_cluster_enrichment$significant <- factor(
+  sid_cluster_enrichment$significant,
+  levels = c("Enriched in Cases", "Enriched in Controls", "Not Significant")
+)
+sid_cluster_enrichment$participant_id <- factor(
+  sid_cluster_enrichment$participant_id,
+  levels = participant_order
+)
+
+
+sid_cluster_enrichment %>% glimpse()
+
+# Plot
+p_metacluster_enrichment_disease <- ggplot(sid_cluster_enrichment, aes(
+  y = participant_id,
+  x = frac_prop,
+  fill = significant
+)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.8) +
+  scale_fill_manual(
+    values = c(
+      "Enriched in Cases" = "#FF7F0F",
+      "Enriched in Controls" = "#1F77B4",
+      "Not Significant" = "grey50"
+    )
+  ) +
+  labs(
+    x = "Fraction of repertoire",
+    y = "Participant ID",
+    fill = "Cluster Enrichment",
+    title = "Fraction of GLIPH2 Meta-Cluster Composition by Participant"
+  ) +
+  theme_bw() +
+  facet_wrap(~case_control_other_latest, ncol = 1, scales = "free_y") +
+  theme(
+    axis.text.y = element_blank(),
+    legend.position = "right"
+  )
+
+p_metacluster_enrichment_disease_severity_group <- sid_cluster_enrichment %>% 
+  filter(case_control_other_latest == "Case") %>% 
+  filter(!is.na(metric_type)) %>% 
+  ggplot(aes(
+    y = participant_id,
+    x = frac_prop,
+    fill = significant
+    )) +
+  geom_bar(stat = "identity", position = "stack", width = 0.8) +
+  scale_fill_manual(
+    values = c(
+      "Enriched in Cases" = "#FF7F0F",
+      "Enriched in Controls" = "#1F77B4",
+      "Not Significant" = "grey50"
+    )
+  ) +
+  labs(
+    x = "Fraction of repertoire",
+    y = "Participant ID",
+    fill = "Cluster Enrichment",
+    title = "Fraction of GLIPH2 Meta-Cluster Composition by Participant"
+  ) +
+  theme_bw() +
+  facet_wrap(~metric_type, ncol = 1, scales = "free_y") +
+  theme(
+    axis.text.y = element_blank(),
+    legend.position = "right"
+  )
+
+ggsave(
+  glue("{gliph2_plots_dir}/tcr_cluster_enrichment_disease_cond_{Sys.Date()}.png"),
+  plot = p_metacluster_enrichment_disease,
+  width = 8,
+  height = 6
+)
+
+ggsave(
+  glue("{gliph2_plots_dir}/tcr_cluster_enrichment_disease_severity_group_{Sys.Date()}.png"),
+  plot = p_metacluster_enrichment_disease_severity_group,
+  width = 8,
+  height = 6
+)
+
+
+p_metacluster_enrichment_disease_severity_group_contrank <- sid_cluster_enrichment %>% 
+  filter(case_control_other_latest == "Case") %>% 
+  filter(!is.na(metric_type)) %>% 
+  ggplot(aes(
+    y = participant_id,
+    x = frac_prop,
+    fill = significant
+    )) +
+  geom_bar(stat = "identity", position = "stack", width = 0.8) +
+  scale_fill_manual(
+    values = c(
+      "Enriched in Cases" = "#FF7F0F",
+      "Enriched in Controls" = "#1F77B4",
+      "Not Significant" = "grey50"
+    )
+  ) +
+  labs(
+    x = "Fraction of repertoire",
+    y = "Participant ID",
+    fill = "Cluster Enrichment",
+    title = "Fraction of GLIPH2 Meta-Cluster Composition by Participant"
+  ) +
+  theme_bw() +
+  facet_wrap(~metric_type, ncol = 1, scales = "free_y") +
+  theme(
+    axis.text.y = element_blank(),
+    legend.position = "right"
+  )
+
+```
+
+
+
+```{r}
+p_fishers_volc <- chi2_results_df %>% 
+    # Add a column to identify significant points
+    mutate(
+        significant = case_when(
+            abs(log2(odds_ratio)) >= 0.5 & chi2_p_value <= 0.05 ~ case_when(
+                odds_ratio > 1 ~ "Enriched in Cases",
+                odds_ratio < 1 ~ "Enriched in Controls"
+            ),
+            TRUE ~ "Not Significant"
+        ),
+        # Create custom hover text
+        hover_text = sprintf(
+            "Type: %s\nP-value: %.2e\nOdds Ratio: %.2f",
+            type, chi2_p_value, odds_ratio
+        )
+    ) %>%
+    # Add a column to identify points to label
+    mutate(
+        label_text = case_when(
+            # Top 8 most significant enriched in cases
+            significant == "Enriched in Cases" & 
+                chi2_p_value <= (arrange(filter(., significant == "Enriched in Cases"), chi2_p_value) %>% 
+                                 slice_head(n = 15) %>% 
+                                 pull(chi2_p_value) %>% 
+                                 max()) ~ type,
+            # Top 8 most significant enriched in controls
+            significant == "Enriched in Controls" & 
+                chi2_p_value <= (arrange(filter(., significant == "Enriched in Controls"), chi2_p_value) %>% 
+                                 slice_head(n = 8) %>% 
+                                 pull(chi2_p_value) %>% 
+                                 max()) ~ type,
+            TRUE ~ NA_character_
+        )
+    ) %>%
+    ggplot(aes(x = log2(odds_ratio), 
+               y = -log10(chi2_p_value),
+               color = significant,
+               text = hover_text)) +
+    geom_point(alpha = 0.8, size = 1) +
+    # Add ggrepel text labels
+    geom_label_repel(
+        aes(label = label_text),
+        size = 3,
+        max.overlaps = Inf,
+        box.padding = 0.5,
+        segment.color = "grey50",
+        show.legend = FALSE,
+        segment.curvature = 0.3, # Controls how curved the lines are (0 = straight)
+        segment.ncp = 3, # Number of control points (higher = smoother curves)
+        segment.angle = 10 # Angle of the curve
+    ) +
+    scale_color_manual(
+        values = c(
+            "Enriched in Cases" = "#FF7F0F",
+            "Enriched in Controls" = "#1F77B4",
+            "Not Significant" = "grey50"
+        )
+    ) +
+    theme_bw() +
+    theme(
+        legend.position = "right",
+        legend.title = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 12)
+    ) +
+    geom_hline(yintercept = -log10(0.05), 
+               linetype = "dashed", 
+               color = "darkgrey") +
+    geom_vline(xintercept = c(-0.5, 0.5), 
+               linetype = "dashed", 
+               color = "darkgrey") +
+    labs(
+        x = expression(log[2]~"(Odds Ratio)"),
+        y = expression(-log[10]~"(p-value)"),
+        title = "TCR Cluster Enrichment Analysis"
+    ) +
+    coord_cartesian(clip = "off")
+
+# p_fishers_volc
+ggsave(
+    glue("{gliph2_plots_dir}/tcr_cluster_volcano_{Sys.Date()}.png"),
+    plot = p_fishers_volc,
+    width = 8,
+    height = 6
+)
+
+
+# # Convert to plotly with custom hover template
+# p_fishers_volc_plotly <- ggplotly(p_fishers_volc, tooltip = "text") %>%
+#     layout(hoverlabel = list(bgcolor = "white"))
+
+# # Save the plotly object as an interactive HTML
+# htmlwidgets::saveWidget(
+#     p_fishers_volc_plotly, 
+#     file = glue("{gliph2_plots_dir}/tcr_cluster_volcano_interactive.html"),
+#     selfcontained = TRUE  # This ensures all dependencies are included in the file
+# )
+
+
+```
+
+
+
+```{r}
+sample_groups_df <- cluster_df_meta_f3 %>%
+    dplyr::select(participant_id, case_control_other_latest) %>%
+    distinct()
+grp_n <- sample_groups_df$case_control_other_latest %>% table()
+case_n_base <- grp_n[["Case"]]
+ctrl_n_base <- grp_n[["Control"]]
+cidx_list <- unique(cluster_df_meta_f3$index)
+
+
+# 1.  unique donors per (cluster × group) in one pass 
+per_cluster <- cluster_df_meta_f3 %>%
+  dplyr::distinct(index, type, participant_id, case_control_other_latest) %>%
+  dplyr::count(index, type, case_control_other_latest, name = "n") %>%
+  pivot_wider(names_from = case_control_other_latest,
+              values_from = n,
+              values_fill = 0)                                          # columns: Case, Control
+
+# 2.  add the 'remaining' cells once 
+per_cluster <- per_cluster %>%
+  mutate(
+    remCase = case_n_base - Case,
+    remCtrl = ctrl_n_base - Control
+  ) %>% 
+  glimpse()
+
+# 3.  run Fisher’s test row-wise (vectorised over rows) 
+future::plan(future::multisession, workers = 7)
+fisher_stats <- furrr::future_pmap_dfr(
+  # supply the four cell counts as parallel vectors
+  per_cluster %>% dplyr::select(Case, Control, remCase, remCtrl),
+  function(Case, Control, remCase, remCtrl) {
+    ft <- fisher.test(matrix(c(Case+1, Control+1, remCase+1, remCtrl+1), nrow = 2))
+    list(
+      fisher_p_value = ft$p.value,
+      odds_ratio     = unname(ft$estimate),
+      conf_low       = ft$conf.int[1],
+      conf_high      = ft$conf.int[2]
+    )
+  }
+)
+
+# 4.  final result 
+fisher_results_df <- bind_cols(per_cluster, fisher_stats) %>% 
+    glimpse()
+
+# fisher_results_df$adj_fisher_p_value %>% sort() %>% head
+fisher_results_df %>% 
+    slice_head(n = 10, by = fisher_p_value) %>% 
+    View()
+
+# per_cluster: data-frame with Case, Control, remCase, remCtrl columns
+chi2_stats <- furrr::future_pmap_dfr(
+  per_cluster %>% select(Case, Control, remCase, remCtrl),
+  function(Case, Control, remCase, remCtrl) {
+    mat <- matrix(c(Case, Control, remCase, remCtrl), nrow = 2)
+    ## 1. χ² test (no Yates correction keeps it comparable to Fisher)
+    ct <- suppressWarnings(chisq.test(mat, correct = FALSE))
+    ## 2. Odds ratio for context
+    or <- (Case * remCtrl) / (Control * remCase)
+    list(
+      chi2_p_value = ct$p.value,
+      chi2_stat    = unname(ct$statistic),
+      odds_ratio   = or,
+      exp_case_cluster    = ct$expected[1],
+      exp_control_cluster = ct$expected[2]
+    )
+  }
+)
+
+chi2_results_df <- bind_cols(per_cluster, fisher_stats, chi2_stats) %>% 
+    mutate(adj_chi2_p_value = stats::p.adjust(chi2_p_value, method = "fdr")) %>%
+    arrange(chi2_p_value) %>% 
+    glimpse()
+
+chi2_results_df %>% 
+    slice_head(n = 10, by = chi2_p_value) %>% 
+    View()
+
+```
+
+
+
+
+## Building scaled ML models for GLIPH2 cluster based prediction of clinical outcomes
+
+First, let's try a bunch of Chi-squared models for categorical outcomes.
+```{r}
+# cluster_df <- cluster_df_meta_f3
+# meta_df <- full_meta_df
+# meta_col <- "DRB1_risk"
+# seed <- 1
+
+cluster_meta_association <- function(cluster_df, meta_df, meta_col, seed) {
+
+    # Filtering out sample_id with missing values from random sample selection process
+    new_meta <- meta_df %>%
+        select(sample_id, all_of(meta_col)) %>% 
+        filter(!is.na(!!sym(meta_col))) %>% 
+        filter(!!sym(meta_col) != "") %>% 
+        mutate(!!sym(meta_col) := stringr::str_replace_all(!!sym(meta_col), "[^A-Za-z0-9]", "_")) %>%
+        distinct() %>% 
+        glimpse()
+    
+    if (nrow(new_meta) == 0) return(NULL)
+    
+    new_meta_order <- new_meta[[meta_col]] %>%
+        table() %>% 
+        sort(decreasing = TRUE) %>% 
+        names()
+
+    set.seed(seed)
+    rand_sids <- cluster_df  %>% 
+        inner_join(new_meta, by = "sample_id") %>% 
+        select(sample_id, participant_id) %>% 
+        distinct() %>% 
+        group_by(participant_id) %>%
+        slice_sample(n = 1, ) %>% 
+        pull(sample_id)
+
+  # Join metadata
+  df <- cluster_df %>%
+    filter(sample_id %in% rand_sids) %>% 
+    select(type, sample_id) %>%
+    distinct() %>%
+    left_join(new_meta, by = "sample_id")
+  
+  # Check type of metadata column
+  meta_vec <- df[[meta_col]]
+  is_cat <- is.factor(meta_vec) || is.character(meta_vec)
+  
+  if (is_cat) {
+    # Categorical: For each cluster, run chi-squared test
+    per_cluster <- df %>%
+      group_by(type, !!sym(meta_col)) %>%
+      summarise(n = n_distinct(sample_id), .groups = "drop") %>%
+      mutate(!!sym(meta_col) := factor(!!sym(meta_col), levels = new_meta_order)) %>%
+      arrange(!!sym(meta_col)) %>% 
+      pivot_wider(names_from = !!sym(meta_col), values_from = n, values_fill = 0)
+    
+    # Get group sizes for "remaining" counts
+    group_sizes <- new_meta %>%
+      filter(sample_id %in% rand_sids) %>% 
+      filter(!is.na(!!sym(meta_col))) %>%
+      mutate(!!sym(meta_col) := factor(!!sym(meta_col), levels = new_meta_order)) %>% 
+      group_by(!!sym(meta_col)) %>%
+      summarize(total_n = n()) %>% 
+      arrange(!!sym(meta_col))
+    
+    # CHECK THAT THE ORDER OF THE GROUPS ALIGN
+    group_sizes_order <- group_sizes %>% pull(!!sym(meta_col))
+    actual_n_order <- colnames(per_cluster)[-1]
+    order_check <- group_sizes_order == actual_n_order
+    if (!all(order_check)) {
+      stop("The order of the groups does not align")
+    }
+
+    # Add remaining counts for each group
+    for (grp in group_sizes[[meta_col]]) {
+      per_cluster[[paste0("rem_", grp)]] <- group_sizes$total_n[group_sizes[[meta_col]] == grp] - per_cluster[[as.character(grp)]]
+    }
+
+    per_cluster %<>% column_to_rownames(var = "type")
+    
+    # # FOR TESTING
+    # vals_df <- per_cluster
+    # vals <- as.list(vals_df[1,])
+
+    # Run chi-squared for each cluster
+    chi2_stats <- purrr::pmap_dfr(
+      per_cluster,
+      function(...) {
+        vals <- list(...)
+        n_groups <- length(vals) / 2
+        mat <- rbind(
+          as.numeric(vals[1:n_groups]), # categories in cluster
+          as.numeric(vals[(n_groups+1):(2*n_groups)]) # categories in remaining
+        )
+        ct <- suppressWarnings(chisq.test(mat, correct = FALSE))
+        tibble(
+          chi2_p_value = ct$p.value,
+          chi2_stat = unname(ct$statistic)
+        )
+      }
+    )
+    result <- bind_cols(per_cluster, chi2_stats)
+    result <- result %>%
+      mutate(adj_chi2_p_value = p.adjust(chi2_p_value, method = "fdr")) %>%
+      arrange(chi2_p_value)
+    message(glue("COMPLETED: {meta_col} has {nrow(result)} rows"))
+    return(result)
+  }
+
+  stop("meta_col must be either categorical (factor/character)")
+}
+
+
+
+full_meta_df %>% glimpse()
+# Select only categorical metadata
+categorical_meta <- full_meta_df %>% 
+  mutate_if(is.factor, as.character) %>% 
+  select_if(is.character) %>% 
+  colnames()
+
+# filtering out metadata that has more than 20 unique values
+testable_categorical_meta <- categorical_meta %>% 
+  purrr::map_df(function(x) {
+    tibble(
+      meta_col = x,
+      n_unique = length(unique(full_meta_df[[x]]))
+    )
+  }) %>% 
+  arrange(desc(n_unique)) %>% 
+  filter(n_unique <= 20 & n_unique > 1) %>% 
+  pull(meta_col)
+
+#' Running with different seeds to shuffle random selection of samples per participant
+
+
+chi2_param_grid <- expand_grid(
+  # meta_col = "DRB1_risk", # for testing
+  meta_col = testable_categorical_meta,
+  seed = 1:10) %>% 
+  glimpse()
+
+# #Single example run
+# result_cat <- cluster_meta_association(
+#   cluster_df = cluster_df_meta_f3,
+#   meta_df = full_meta_df,
+#   meta_col = "upd129_gait"
+# )
+
+
+# with 15 workers this will take about 20 minutes
+tic()
+# future::plan(future::sequential)
+future::plan(future::multisession, workers = 15)
+1:nrow(chi2_param_grid) %>% 
+  # discard(~ file.exists(glue(
+  #   "{gliph2_res_dir}/chi2_association_screening/",
+  #   "{chi2_param_grid$meta_col[.]}_ITER-{chi2_param_grid$seed[.]}_2025-05-23.rds"))) %>%   
+  furrr::future_walk(function(x) {
+    gliph2_res_dir <- "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/airr/gliph2/processing"   
+    result_cat <- cluster_meta_association(
+      cluster_df = cluster_df_meta_f3,
+      meta_df = full_meta_df,
+      meta_col = chi2_param_grid$meta_col[x],
+      seed = chi2_param_grid$seed[x]
+    )
+    saveRDS(result_cat, file = glue(
+      "{gliph2_res_dir}/chi2_association_screening/",
+      "{chi2_param_grid$meta_col[x]}_ITER-{chi2_param_grid$seed[x]}_{Sys.Date()}.rds"))
+  })
+toc()
+
+```
+
+
+
+```{r}
+chi2_screen_res_dir <- glue("{gliph2_res_dir}/chi2_association_screening")
+chi2_screen_res_paths <- list.files(chi2_screen_res_dir, pattern = "ITER", full.names = TRUE)
+
+chi2_res_df <- chi2_screen_res_paths %>% 
+  purrr::set_names(basename(str_before_last(., "_"))) %>% 
+  purrr::map(function(x) {
+    df <- readRDS(x)
+    if (is.null(df)) return(NULL)
+    df %>% 
+      tibble::rownames_to_column(var = "type") %>% 
+      dplyr::select(type, chi2_p_value, chi2_stat, adj_chi2_p_value)
+  }) %>%
+  bind_rows(.id = "meta_iter") %>% 
+  glimpse()
+
+chi2_res_df %>% glimpse()
+
+# result_cat %>% filter(adj_chi2_p_value <= 0.05) %>% glimpse
+meta_cats_df <- readRDS(glue("{wkdir}/",
+  "data/interim/metadata/2023-06-06_metadata_categories_dataframe.rds")) %>% 
+  glimpse()
+```
+
+
+```{r}
+chi2_res_df %<>% 
+  mutate(meta = str_before_first(meta_iter, "_ITER-1")) %>% 
+  as.data.table() %>% 
+  glimpse()
+
+chi2_summary_stats <- chi2_res_df %>%
+  group_by(meta) %>%
+  summarise(
+    across(
+      c(chi2_p_value, chi2_stat, adj_chi2_p_value),
+      list(
+        mean = ~mean(.x, na.rm = TRUE),
+        median = ~median(.x, na.rm = TRUE),
+        sd = ~sd(.x, na.rm = TRUE)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  ) %>%
+  arrange(adj_chi2_p_value_mean) %>%
+  glimpse()
+
+
+# chi2_summary_stats %>% View
+chi2_summary_stats %>% glimpse()
+p <- chi2_summary_stats %>% 
+  ggplot(aes(x=-log10(adj_chi2_p_value_mean), y=chi2_stat_mean)) +
+  geom_point() +
+  theme_bw() +
+  labs(
+    x = expression(-log[10]~"(p-value)"),
+    y = "Chi-squared Statistic"
+  )
+
+ggsave(
+  glue("{gliph2_plots_dir}/chi2_summary_stats_{Sys.Date()}.png"),
+  plot = p,
+  width = 8,
+  height = 6
+)
+
+
+chi2_summary_stats %>% filter(adj_chi2_p_value_mean <= 0.05) %>% View
+chi2_summary_stats %>% View
+
+chi2_summary_stats$chi2_p_value_mean %>% hist()
+
+full_meta_df$genetic_status_enrollment %>% table()
+full_meta_df$genetic_status_enrollment %>% unique()
+full_meta_df$upd2106_dopamine_dysregulation_syndrome_features %>% table()
+full_meta_df$upd2317c_rest_tremor_amplitude_right_lower_extremity %>% table()
+full_meta_df$DRB1_grouped %>% table()
+full_meta_df$DRB1_risk %>% table()
+
+
+
+chi2_res_df_DRB1grpd <- chi2_screen_res_paths %>% 
+  keep(grepl("DRB1_risk", .)) %>% 
+  purrr::set_names(basename(str_before_last(., "_"))) %>% 
+  purrr::map(function(x) {
+    df <- readRDS(x)
+    if (is.null(df)) return(NULL)
+    df %>% tibble::rownames_to_column(var = "type")
+  }) %>%
+  bind_rows(.id = "meta_iter") %>% 
+  glimpse()
+
+View(chi2_res_df_DRB1grpd)
+
+
+
+```
+
+
+## TRYING TO SETUP DATA FOR ML MODELS
+
+```{r}
+chi2_results_df <- readRDS(
+  glue("{gliph2_res_dir}/chi2_results_df_2025-05-26.rds"))
+cluster_id_annotation <- chi2_results_df %>% 
+    mutate(
+        significant = case_when(
+            abs(log2(odds_ratio)) >= 0.5 & chi2_p_value <= 0.05 ~ case_when(
+                odds_ratio > 1 ~ "Enriched in Cases",
+                odds_ratio < 1 ~ "Enriched in Controls"
+            ),
+            TRUE ~ "Not Significant"
+        )
+    )  %>% 
+    select(index, type, significant) %>% 
+    distinct() %>% 
+    glimpse()
+
+useful_cluster_ids <- cluster_id_annotation %>% 
+  filter(significant != "Not Significant") %>% 
+  pull(type)
+
+cluster_pid_comp <- cluster_df_meta %>% 
+    dplyr::select(index, participant_id) %>% 
+    distinct() %>% 
+    group_by(index) %>% 
+    dplyr::summarise(n_participants = n()) %>% 
+    ungroup()
+
+unique_pid_thresh_inx <- cluster_pid_comp %>% 
+    filter(n_participants >= 10) %>% 
+    pull(index)
+
+cluster_df_meta_f1 <- cluster_df_meta %>% 
+    filter(index %in% unique_pid_thresh_inx) %>% 
+    glimpse()
+# cluster_df_meta_f1 %>% glimpse()
+
+# Filter 3 clusters with pattern length > 3 fixed pos AAs
+cluster_df_meta_f3 <- cluster_df_meta_f1 %>% 
+    mutate(pattern_len = gsub("\\%", "", pattern) %>% nchar()) %>% 
+    filter(pattern_len > 3) %>% 
+    glimpse()
+```
+
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+
+cluster_df_meta_f3 %>% glimpse()
+full_meta_df %>% glimpse()
+
+# random sample_id selection per participant_id
+set.seed(42)
+rand_sids <- cluster_df_meta_f3  %>% 
+    select(sample_id, participant_id) %>% 
+    distinct() %>% 
+    group_by(participant_id) %>%
+    slice_sample(n = 1) %>% 
+    pull(sample_id)
+
+# Aggregate features per sample_id (example: sum Freq by sample_id and type)
+features_df <- cluster_df_meta_f3 %>%
+    filter(sample_id %in% rand_sids) %>% 
+      # FILTERING WITH CHI2 results (this time not using 2nd filter round)
+    filter(type %in% useful_cluster_ids) %>%  
+    dplyr::group_by(sample_id, type) %>% 
+    dplyr::summarise(count = sum(Freq, na.rm = TRUE), .groups = "drop") %>% 
+    # sample_n(1000) %>% 
+    pivot_wider(names_from = type, values_from = count, values_fill = 0)
+
+feat_cols <- colnames(features_df)[-1]
+length(feat_cols)
+# Find columns with >0 in at least 5 samples
+cols_to_keep <- feat_cols[
+  colSums(features_df[feat_cols] > 0, na.rm = TRUE) >= 5
+]
+length(cols_to_keep)
+
+filtered_features_df <- features_df %>%
+  select(sample_id, all_of(cols_to_keep))
+filtered_features_df %>% dim()
+
+# Join with case/control status
+meta_status <- full_meta_df %>%
+  filter(case_control_other_latest %in% c("Case", "Control")) %>% 
+  select(sample_id, predict_var = mds_updrs_part_iii_summary_score) %>% 
+  drop_na(predict_var) %>% 
+  glimpse()
+
+model_df <- filtered_features_df %>%
+  inner_join(meta_status, by = "sample_id")
+
+model_df %>% dim()
+```
+
+
+Spliting the data into training and testing sets.
+
+```{r}
+set.seed(123)
+data_split <- initial_split(model_df, strata = predict_var)
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+# Building a recipe
+rec <- recipe(predict_var ~ ., data = train_data) %>%
+  update_role(sample_id, new_role = "id")
+#   step_zv(all_predictors()) %>%
+#   step_normalize(all_predictors())
+
+# Building a model specification
+lasso_spec <- logistic_reg(
+  penalty = tune(),   # LASSO penalty
+  mixture = 1         # 1 = LASSO, 0 = Ridge, in between = Elastic Net
+) %>%
+  set_engine("glmnet")
+
+lasso_spec <- logistic_reg(
+  penalty = tune(),   # LASSO penalty
+  mixture = 1         # 1 = LASSO, 0 = Ridge, in between = Elastic Net
+) %>%
+  set_engine("glmnet")
+
+# Building a workflow
+wf <- workflow() %>%
+  add_model(lasso_spec) %>%
+  add_recipe(rec)
+
+# Tuning the grid of lambda values
+lambda_grid <- grid_regular(penalty(), levels = 10)  # 10 values from min to max
+set.seed(123)
+folds <- vfold_cv(train_data, v = 5, strata = predict_var)
+tune_res <- tune_grid(
+  wf,
+  resamples = folds,
+  grid = lambda_grid,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+# Selecting the best models and evaluating performance
+best_lambda <- select_best(tune_res, "roc_auc")
+final_wf <- finalize_workflow(wf, best_lambda)
+final_fit <- fit(final_wf, data = train_data)
+# Predict on test set
+test_pred <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+# Evaluate
+roc_auc(test_pred, truth = predict_var, .pred_Case)
+accuracy(test_pred, truth = predict_var, 
+.pred_class = ifelse(.pred_Case > 0.5, "Case", "Control"))
+
+
+```
+
+
+Trying with Random Forests
+
+```{r}
+# future::plan(future::multisession, workers = 7)
+
+# Building a recipe (keep this the same)
+rec <- recipe(predict_var ~ ., data = train_data) %>%
+  update_role(sample_id, new_role = "id")
+
+# Random Forest Model - no tuning
+rf_spec <- rand_forest(
+  trees = 500,  # reasonable default
+  min_n = 5     # reasonable default
+) %>%
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+# Building a workflow
+wf <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(rec)
+
+# Fit the model directly (no tuning)
+set.seed(123)
+final_fit <- fit(wf, data = train_data)
+
+# Predict on test set
+test_pred <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+# Evaluate
+roc_auc(test_pred, truth = predict_var, .pred_Case)
+accuracy(test_pred, truth = predict_var, 
+         .pred_class = ifelse(.pred_Case > 0.5, "Case", "Control"))
+
+# Get feature importance
+rf_fit <- extract_fit_parsnip(final_fit)
+var_imp <- vip::vip(rf_fit, num_features = 20)
+print(var_imp)
+```
+
+
+
+## GIANA Clustering 
+
+Setting up working directory
+
+```{r}
+giana_src <- "/central/groups/MazmanianLab/joeB/git/GIANA"
+giana_wkdir <- glue("{wkdir}/data/interim/giana")
+giana_input_dir <- glue("{wkdir}/data/interim/giana/input")
+giana_output_dir <- glue("{wkdir}/data/interim/giana/results")
+dir.create(giana_input_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(giana_output_dir, recursive = TRUE, showWarnings = FALSE)
+
+```
+
+Preparing data for GIANA 
+
+
+Format will only requires a txt or tsv file input where the first column is the CDR3b amino acid sequence - we will also add a sample_id column and count column. 
+
+```{r}
+trust4_reports_tcrb %>% glimpse()
+giana_input_df <- trust4_reports_tcrb %>% 
+  dplyr::select(CDR3aa, v_gene, 
+  #count = `#count`, 
+  sample_id) %>% 
+  glimpse()
+
+head(giana_input_df)
+# write to file
+write_tsv(giana_input_df, file = glue("{giana_input_dir}/full_tcrb_{Sys.Date()}.tsv"))
+
+
+```
+
+Executing GIANA.
+
+
+Below is a python command to run in the terminal - make sure you are in the giana mamba environment with the necessary packages installed for execution.
+
+```{r}
+# execute using slurm script
+shell_do(
+  glue("sbatch {wkdir}/notebooks/shell_scripts/slurm_run_GIANA.sh")
+)
+
+# python /central/groups/MazmanianLab/joeB/git/GIANA/GIANA.4.1.py \
+#                 -f /central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/giana/input/full_tcrb_2025-07-10.tsv \
+#                 -S 3         \     # Smith-Waterman score cutoff (↑ stricter) default value is 3.6 - lowered to allow for a variety of disease relavent TCR clusters
+#                 -t 10          \   # isometric distance cutoff (smaller → faster) default value is 10
+#                 -N 32          \   # threads for FAISS step
+#                 -v                 # exclude v_gene from clustering criteria
+#                 -o /central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/giana/results/
+
+
+
+```
+
+## GIANA Results Analysis
+
+```{r}
+
+```
+
+
+
+
+
+```{r}
+sessionInfo()
+```
+
