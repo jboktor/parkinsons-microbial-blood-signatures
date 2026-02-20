@@ -1,0 +1,753 @@
+---
+title: "Downloading AIRR-data"
+editor: source
+author: "Joe Boktor"
+date: '2023-12-04'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    column: page
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+```{r}
+#| warning: false
+#| message: false
+
+library(googleCloudStorageR)
+library(gargle)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(tidyverse)
+library(plyr)
+library(magrittr)
+library(data.table)
+# setDTthreads(16)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+load_dot_env(glue("{wkdir}/.env"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+t4_bucket = Sys.getenv('GCS_TRUST4')
+```
+
+```{r, eval=FALSE}
+## Fetch token. See: https://developers.google.com/identity/protocols/oauth2/scopes
+# scope <-c("https://www.googleapis.com/auth/cloud-platform")
+# token <- gargle::token_fetch(scopes = scope)
+token <- token_fetch()
+googleCloudStorageR::gcs_auth(token = token)
+
+```
+
+
+```{r, eval=FALSE}
+# Set the storage bucket location
+gcs_get_bucket(Sys.getenv('GCS_TRUST4'))
+# List the files in the bucket
+bucket_files <- gcs_list_objects(Sys.getenv('GCS_TRUST4'))
+
+trust4_file_paths <- list()
+trust4_file_paths[["cdr3"]] <- bucket_files %>% 
+  filter(grepl("_cdr3.out", name))
+trust4_file_paths[["final_assemblies"]] <- bucket_files %>% 
+  filter(grepl("_final.out", name))
+trust4_file_paths[["final_reports"]] <- bucket_files %>% 
+  filter(grepl("_report.tsv", name))
+
+saveRDS(
+  trust4_file_paths, 
+  file = glue("{wkdir}/data/interim/airr/trust4_file-paths.rds")
+)
+
+# For HBS cohort
+hbs_t4_buckets <- paste0("GCS_TRUST4_HBS", 4:5)
+
+# bucket <- "GCS_TRUST4_HBS3"
+for (bucket in hbs_t4_buckets) {
+  message(glue("Downloading from {bucket}"))
+  trust4_file_paths_hbs <- 
+    shell_do(
+      glue("gsutil ls {Sys.getenv(bucket)}/TRUST4workflow/**/*_{{report.tsv,final.out,cdr3.out}}"),
+      stdout_path = TRUE
+    )
+  
+  saveRDS(
+    trust4_file_paths_hbs,
+    glue("{wkdir}/data/interim/gcs_locations/{Sys.Date()}_URLs_TRUST4-HBS_{bucket}.rds")
+  )
+}
+
+
+
+# # bucket <- "GCS_TRUST4_HBS3"
+# for (bucket in hbs_t4_buckets) {
+#   message(glue("Downloading from {bucket}"))
+#   cmd <- glue(
+#     "gsutil ls '{Sys.getenv('bucket')}/TRUST4workflow/**/*_report.tsv' ",
+#     "'{Sys.getenv('bucket')}/TRUST4workflow/**/*_final.out' ",
+#     "'{Sys.getenv('bucket')}/TRUST4workflow/**/*_cdr3.out'"
+#   )
+#   trust4_file_paths_hbs <- shell_do(cmd, stdout_path = TRUE)
+  
+#   saveRDS(
+#     trust4_file_paths_hbs,
+#     glue("{wkdir}/data/interim/gcs_locations/{Sys.Date()}_URLs_TRUST4-HBS_{bucket}.rds")
+#   )
+# }
+
+```
+
+```{r}
+#' Function to download and parse data from Google Storage directly
+#' into an R object
+download_trust4_data <- function(file_path, 
+                                bucket_name = Sys.getenv('GCS_TRUST4'), 
+                                path_ext = "_report.tsv") {
+  sample_name <- basename(file_path) %>% str_remove(path_ext)
+  gcs_get_object(bucket = bucket_name, file_path) %>% 
+    mutate(sample_id = sample_name)
+}
+
+```
+
+```{r, eval=FALSE}
+trust4_file_paths <- readRDS(
+  file = glue("{wkdir}/data/interim/airr/trust4_file-paths.rds")
+)
+
+tic()
+airr_reports <-
+  trust4_file_paths$final_reports$name[1:2000] %>%
+  set_names() %>%
+  purrr::map( ~download_trust4_data(.))
+toc()
+
+saveRDS(
+  airr_reports, 
+  file = glue("{wkdir}/data/interim/airr/trust4_reports_list.rds")
+)
+
+airr_reports_df <- bind_rows(airr_reports)
+
+saveRDS(
+  airr_reports_df, 
+  file = glue("{wkdir}/data/interim/airr/trust4_reports.rds")
+)
+
+
+```
+
+```{r, eval=FALSE}
+trust4_file_paths <- readRDS(
+  file = glue("{wkdir}/data/interim/airr/trust4_file-paths.rds")
+)
+
+tic()
+airr_reports <-
+  trust4_file_paths$final_reports$name[2001:8436] %>%
+  set_names() %>%
+  purrr::map( ~download_trust4_data(.))
+toc()
+
+saveRDS(
+  airr_reports, 
+  file = glue("{wkdir}/data/interim/airr/trust4_reports_list_2001-8436.rds")
+)
+
+airr_reports_df <- bind_rows(airr_reports) %>% as.data.table()
+saveRDS(
+  airr_reports_df, 
+  file = glue("{wkdir}/data/interim/airr/trust4_reports_2001-8436.rds")
+)
+
+```
+
+```{r, eval=FALSE}
+airr_reports_df_2000 <- readRDS(
+  file = glue("{wkdir}/data/interim/airr/trust4_reports.rds")
+)
+airr_reports_df_2000 %<>% as.data.table()
+
+saveRDS(
+  bind_rows(
+    airr_reports_df_2000,
+    airr_reports_df
+  ), 
+  file = glue("{wkdir}/data/interim/airr/trust4_reports_8436.rds")
+)
+
+```
+
+```{r}
+airr_reports_df <- 
+  readRDS(
+  glue("{wkdir}/data/interim/airr/trust4_reports_8436.rds")
+)
+
+write.csv(airr_reports_df, 
+          file = 
+            "{wkdir}/data/interim/airr/2023-05-04_TRUST4-reports-all.csv")
+
+```
+
+Adding HBS cohort and all remaining samples
+
+```{r}
+trust4_reports <- data.table::fread(
+    glue("{wkdir}/data/interim/airr/2023-05-04_TRUST4-reports-all.csv"), 
+    header = TRUE) %>%
+    dplyr::select(-V1) %>% 
+    glimpse()
+
+
+hbs_and_final_reports <- list.files(glue("{pdmbs_dir}/workflow/RNASEQ/AIRR/TRUST4_HBS/reports"),
+  full.names = TRUE)
+
+tic()
+remaining_reports <- hbs_and_final_reports %>%
+  purrr::set_names(basename(.) %>% str_remove("_report.tsv")) %>% 
+  purrr::map( ~ read_tsv(.)) %>% 
+  bind_rows(.id = "sample_id")
+toc()
+
+trust4_reports$sample_id %>% unique %>% length +
+remaining_reports$sample_id %>% unique %>% length
+
+# note that there are 641 redundant samples in the second analysis  - removing them below
+c(trust4_reports$sample_id %>% unique(), remaining_reports$sample_id %>% unique()) %>% length
+c(trust4_reports$sample_id %>% unique(), remaining_reports$sample_id %>% unique()) %>% unique %>% length
+
+redundant_samples <- unique(remaining_reports$sample_id)[
+  unique(remaining_reports$sample_id) %in% unique(trust4_reports$sample_id)]
+
+
+remaining_reports_filt <- remaining_reports %>% 
+  filter(sample_id %nin% redundant_samples)
+
+trust4_reports_10579 <- bind_rows(
+    trust4_reports,
+    remaining_reports_filt
+  ) %>% 
+  glimpse()
+
+# saveRDS(
+#   airr_reports_df_x, 
+#   file = glue("{wkdir}/data/interim/airr/trust4_reports_8436.rds")
+# )
+
+# From 10,579 samples - we assemble 27,985,042 TCR/ BCR receptors
+write.csv(trust4_reports_10579, 
+          glue("{wkdir}/data/interim/airr/2025-07-05_TRUST4-reports-all-10579.csv")
+          )
+
+```
+
+
+#### Quality filtering TCRB sequences
+
+```{r}
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-17.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  glimpse()
+
+key_meta_df <- metadata %>% 
+  dplyr::select(sample_id, participant_id, case_control_other_latest, visit_month,
+    age_at_baseline, sex, study, ethnicity, race, est_tcell_reads_abis) %>% 
+  glimpse()
+
+trust4_reports <- data.table::fread(
+    glue("{wkdir}/data/interim/airr/2025-07-05_TRUST4-reports-all-10579.csv"), 
+    header = TRUE) %>%
+    dplyr::select(-V1) %>% 
+    glimpse()
+
+trust4_reports %>% glimpse()
+
+# selecting for quality receptors for all data available for key samples of interest 
+valid_aa <- "^[ACDEFGHIKLMNPQRSTVWY]+$"
+trust4_reports_clean_df <- trust4_reports %>% 
+  filter(sample_id %in% metadata$sample_id) %>% 
+  filter(CDR3aa != "out_of_frame") %>%
+  filter(!grepl("_", CDR3aa)) %>%
+  filter(grepl(valid_aa, CDR3aa)) %>%
+  filter(C != ".") %>% 
+  glimpse()
+
+trust4_reports_tcrb <- trust4_reports_clean_df %>% 
+    filter(C == "TRBC") %>% 
+    filter(V != "." & J != ".") %>%
+    mutate(CDR3aa_length = nchar(CDR3aa)) %>%
+    filter(CDR3aa_length >= 6) %>%
+    filter(CDR3aa_length <= 26) %>%
+    mutate(v_gene = str_before_first(V, "\\*")) %>%
+    mutate(j_gene = str_before_first(J, "\\*")) %>% 
+    left_join(key_meta_df) %>%
+    glimpse()
+
+saveRDS(
+  trust4_reports_tcrb,
+  file = glue("{wkdir}/data/interim/airr/trust4_reports_tcrb_clean_df_{Sys.Date()}.rds"),
+  compress = FALSE
+)
+
+# Note that 30 samples failed to run TRUST4 - and are not included in the analysis 
+# 30/9,955 (only 0.3% of samples)
+metadata$sample_id %>% unique() %>% length() # 10,609 (originally - 9,955 after removing Other category)
+trust4_reports$sample_id %>% unique() %>% length() # 10,579
+trust4_reports_tcrb$sample_id %>% unique() %>% length() # 9928 
+
+# trust4_reports_tcrb_df$sample_id %>% unique() %>% length()
+
+```
+
+
+Examining our TCRB data:
+
+
+- From 10,609 samples - we assemble 27,985,042 TCR/ BCR receptors. 
+
+
+- After filtering for only PD and Control samples (n = 10,579), annotated constant regions, complete and valid CDR3 sequences
+ we get 19,355,603 TCR/ BCR receptors.
+
+
+- After filtering for TCRB sequences with complete V and J gene annotations and CDR3 lengths between 6 and 26 amino acids - we get 6,679,301 TCRB receptors.
+
+
+### Downloading CDR3 data
+
+```{r, eval=FALSE}
+# Viewing filepath df structure
+cdr3_res <- list.files(data_out)
+dups <- trust4_file_paths$cdr3$name %>%
+  basename() %>%
+  duplicated()
+
+trust4_file_paths$cdr3 %>% glimpse
+trust4_file_paths$final_assemblies %>% glimpse
+trust4_file_paths$final_reports %>% glimpse
+trust4_file_paths$cdr3$name %>% keep(grepl("attempt-", .))
+
+# file size in bytes
+trust4_file_paths$cdr3$size %>%
+  strex::str_after_first(" ") %>%
+  unique()
+trust4_file_paths$final_assemblies$size %>%
+  strex::str_after_last(" ") %>%
+  unique()
+trust4_file_paths$final_reports$size %>%
+  strex::str_after_first(" ") %>%
+  unique()
+```
+
+```{r, eval=FALSE}
+# note may want to double check that the right attempt file was downloaded -- 
+slurm_out <- glue("{wkdir}/.cluster_runs/gcs_download_TRUST4_CDR3")
+data_out <- glue("{pdmbs_dir}/workflow/RNASEQ/AIRR/TRUST4_cdr3")
+dir.create(slurm_out, recursive = TRUE, showWarnings = FALSE)
+dir.create(data_out, recursive = TRUE, showWarnings = FALSE)
+
+# filtering multiple attempts for largest output size
+cdr3_gc_stats <- trust4_file_paths$cdr3 %>%
+  mutate(size_numeric = case_when(
+    grepl(" Kb", size) ~ gsub(" Kb", "", size) %>% as.numeric() * 1000,
+    grepl(" Mb", size) ~ gsub(" Mb", "", size) %>% as.numeric() * 1000000
+  )) %>%
+  mutate(filename = basename(name)) %>%
+    group_by(filename) %>%
+    slice_max(order_by = size_numeric, n = 1, with_ties = FALSE) %>%
+    glimpse
+
+for (url in cdr3_gc_stats$name) {
+  if (file.exists(file.path(data_out, basename(url)))) {
+    next
+  }
+  jobname <- glue("gcs_{tools::file_path_sans_ext(basename(url))}")
+  # pause if there are more than 9,999 slurm jobs submitted
+  # check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --ntasks=1",
+      " --nodes=1",
+      " --mem-per-cpu=200MB",
+      " --time=10:00",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " notebooks/shell_scripts/download_gcs_url.sh",
+      " -i {t4_bucket}/{url}",
+      " -o {data_out}/"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.02)
+}
+
+```
+
+### Downloading Full Length Assemblies
+
+```{r, eval=FALSE}
+slurm_out <- glue("{wkdir}/.cluster_runs/gcs_download_TRUST4_final_assemblies")
+data_out <- glue("{pdmbs_dir}/workflow/RNASEQ/AIRR/TRUST4_final_assemblies")
+dir.create(slurm_out, recursive = TRUE, showWarnings = FALSE)
+dir.create(data_out, recursive = TRUE, showWarnings = FALSE)
+
+final_assemblies_gc_stats <- trust4_file_paths$final_assemblies %>%
+  mutate(size_numeric = case_when(
+    grepl(" Mb", size) ~ gsub(" Mb", "", size) %>% as.numeric() * 1000000
+  )) %>%
+  mutate(filename = basename(name)) %>%
+    group_by(filename) %>%
+    slice_max(order_by = size_numeric, n = 1, with_ties = FALSE) %>%
+    glimpse
+
+for (url in final_assemblies_gc_stats$name) {
+  if (file.exists(file.path(data_out, basename(url)))) {
+    next
+  }
+  jobname <- glue("gcs_{tools::file_path_sans_ext(basename(url))}")
+  # pause if there are more than 9,999 slurm jobs submitted
+  # check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --ntasks=1",
+      " --nodes=1",
+      " --mem-per-cpu=500MB",
+      " --time=10:00",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " notebooks/shell_scripts/download_gcs_url.sh",
+      " -i {t4_bucket}/{url}",
+      " -o {data_out}/"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.01)
+}
+
+```
+
+
+### Downloading HBS TRUST4 Data (Reports, CDR3, Final Assemblies)
+
+```{r}
+# slurm_out <- glue("{wkdir}/.cluster_runs/gcs_download_TRUST4_final_assemblies")
+# data_out <- glue("{pdmbs_dir}/workflow/RNASEQ/AIRR/TRUST4_final_assemblies")
+# dir.create(slurm_out, recursive = TRUE, showWarnings = FALSE)
+# dir.create(data_out, recursive = TRUE, showWarnings = FALSE)
+
+# hbs_t4_buckets <- paste0("GCS_TRUST4_HBS", 1:3)
+hbs_t4_buckets <- paste0("GCS_TRUST4_HBS", 4:5)
+
+hbs_t4_buckets_paths <- hbs_t4_buckets %>% 
+  purrr::set_names() %>% 
+  purrr::map(
+    ~readRDS(
+      glue("{wkdir}/data/interim/gcs_locations/2025-07-03_URLs_TRUST4-HBS_{.}.rds")
+      # glue("{wkdir}/data/interim/gcs_locations/2025-06-29_URLs_TRUST4-HBS_{.}.rds")
+    ) %>% 
+      data.frame(path = .)
+  ) %>% 
+  bind_rows(.id = "bucket") %>% 
+  mutate(sample_id = basename(path) %>% str_before_last("_")) %>% 
+  mutate(filetype = path %>% str_after_last("_")) %>%
+  mutate(bucket_n = str_sub(bucket, -1) %>% as.numeric()) %>% 
+  mutate(attempt_n = case_when(
+    grepl("attempt-", path) ~ str_extract(path, "attempt-\\d+") %>% 
+      gsub("attempt-", "", .) %>% as.numeric(),
+    TRUE ~ 1
+  )) %>% 
+  glimpse()
+
+# Filter runs to only include the latest bucket and highest attempt
+# should have 1869, 278, 1
+
+hbs_t4_buckets_paths %>% glimpse()
+batch_params_temp <- hbs_t4_buckets_paths %>%
+  # select sample run in the latest bucket
+  group_by(sample_id, filetype) %>%
+  slice_max(order_by = bucket_n, n = 1, with_ties = FALSE) %>% 
+  # select highest attempt within a bucket
+  slice_max(order_by = attempt_n, n = 1, with_ties = FALSE) %>% 
+  ungroup() %>% 
+  glimpse()
+
+batch_params_temp %>% group_by(filetype, bucket) %>%
+  dplyr::summarise(n = n())
+
+# Assembling batch params
+hbs_airr_data_dir <- glue("{pdmbs_dir}/workflow/RNASEQ/AIRR/TRUST4_HBS")
+batch_params <- batch_params_temp %>% 
+  mutate(wkdir = wkdir, 
+         data_out = case_when(
+            filetype == "report.tsv" ~ glue("{hbs_airr_data_dir}/reports"),
+            filetype == "final.out" ~ glue("{hbs_airr_data_dir}/final_assemblies"),
+            filetype == "cdr3.out" ~ glue("{hbs_airr_data_dir}/cdr3")
+         )) %>% 
+        dplyr::select(url = path, data_out, wkdir) %>% 
+  glimpse()
+
+
+# function to download data from GCS using gsutil
+download_trust4_shell_do <- function(url, data_out, wkdir) {
+  require(glue)
+  source(glue("{wkdir}/notebooks/R_scripts/_misc_functions.R"))
+  shell_do(
+    glue(
+      "{wkdir}/notebooks/shell_scripts/download_gcs_url.sh",
+      " -i {url}",
+      " -o {data_out}/"
+    )
+  )
+}
+
+# configure registry ----
+breg <- breg_setup(cluster_name = "TRUST4_HBS_GCS_DOWNLOAD", 
+    log_dir = glue("{wkdir}/.cluster_runs/"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl")
+    )
+
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = download_trust4_shell_do,
+  args = batch_params,
+  reg = breg
+)
+
+jobs[, chunk := chunk(job.id, chunk.size = 10)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = "40:00",
+    memory = "2GB",
+    ncpus = 1,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+### Downloading Flagstat Data
+
+```{r}
+tic()
+arcasHLA_urls <- shell_do(
+  glue("gsutil ls {Sys.getenv('GCS_HLA4')}/arcasHLAworkflow/*/call-arcasHLAanalysis/*.json"),
+  stdout_path = TRUE
+)
+toc()
+
+flagstat_cram_urls <- flagstat_urls %>%
+  discard(grepl("unmapped-f4_flagstat.tsv", .))
+flagstat_bam_urls <- flagstat_urls %>%
+  keep(grepl("unmapped-f4_flagstat.tsv", .))
+
+```
+
+### Downloading ArcasHLA data
+
+```{r}
+hla_buckets <- paste0("GCS_HLA", 5:6)
+
+for (bucket in hla_buckets) {
+  message(glue("Downloading from {bucket}"))
+  arcasHLA_urls <- 
+    shell_do(
+      glue("gsutil ls {Sys.getenv(bucket)}/arcasHLAworkflow/*/call-arcasHLAanalysis/*.json"),
+      stdout_path = TRUE
+    )
+  
+  saveRDS(
+    arcasHLA_urls,
+    glue("{wkdir}/data/interim/gcs_locations/{Sys.Date()}_URLs_arcasHLA-jsons_{bucket}.rds")
+  )
+}
+
+arcasHLA_urls_GCS_HLA4 <- 
+  shell_do(
+    glue("gsutil ls {Sys.getenv('GCS_HLA4')}/arcasHLAworkflow/*/call-arcasHLAanalysis/cacheCopy/*.json"),
+  stdout_path = TRUE
+  )
+
+saveRDS(
+  arcasHLA_urls_GCS_HLA4,
+  glue("{wkdir}/data/interim/gcs_locations/{Sys.Date()}_URLs_arcasHLA-jsons_GCS_HLA4.rds")
+)
+
+# For HBS cohort
+hla_buckets <- paste0("GCS_HLA_HBS", 1:3)
+for (bucket in hla_buckets) {
+  message(glue("Downloading from {bucket}"))
+  arcasHLA_urls <- 
+    shell_do(
+      glue("gsutil ls {Sys.getenv(bucket)}/arcasHLAworkflow/*/call-arcasHLAanalysis/*.json"),
+      stdout_path = TRUE
+    )
+  
+  saveRDS(
+    arcasHLA_urls,
+    glue("{wkdir}/data/interim/gcs_locations/{Sys.Date()}_URLs_arcasHLA-jsons_{bucket}.rds")
+  )
+}
+
+```
+
+
+```{r}
+hla_buckets <- paste0("GCS_HLA", 1:3)
+hla_urls_list <- hla_buckets %>% 
+  purrr::set_names() %>% 
+  purrr::map(
+    ~readRDS(
+      glue("{wkdir}/data/interim/gcs_locations/2024-12-15_URLs_arcasHLA-jsons_{.}.rds")
+    )
+  )
+
+hla_urls_list[["GCS_HLA4"]] <- readRDS(
+      glue("{wkdir}/data/interim/gcs_locations/2024-12-13_URLs_arcasHLA-jsons_GCS_HLA4.rds")
+    )
+hla_urls_list[["GCS_HLA5"]] <- readRDS(
+      glue("{wkdir}/data/interim/gcs_locations/2024-12-18_URLs_arcasHLA-jsons_GCS_HLA5.rds")
+    )
+hla_urls_list[["GCS_HLA6"]] <- readRDS(
+      glue("{wkdir}/data/interim/gcs_locations/2024-12-18_URLs_arcasHLA-jsons_GCS_HLA6.rds")
+    )
+
+hla_urls_list %>% purrr::map_int(~length(.) / 2)
+# bucket 3 has 951 when it should have 932 ?
+
+```
+
+
+For HBS cohort - replace chunk above with this chunk
+
+```{r}
+hla_buckets <- paste0("GCS_HLA_HBS", 1:3)
+
+hla_urls_list <- hla_buckets %>% 
+  purrr::set_names() %>% 
+  purrr::map(
+    ~readRDS(
+      glue("{wkdir}/data/interim/gcs_locations/2025-06-27_URLs_arcasHLA-jsons_{.}.rds")
+    )
+  )
+
+hla_urls_list %>% purrr::map_int(~length(.) / 2)
+# GCS_HLA_HBS1 GCS_HLA_HBS2 GCS_HLA_HBS3 
+#          611          159            1 
+# Some duplicates in GCS_HLA_HBS1 since there should be 589 successful runs
+
+```
+
+
+```{r}
+hla_urls_df <- hla_urls_list %>% 
+  purrr::map(
+    ~as_tibble(.) %>% 
+      dplyr::rename(path = value) %>% 
+      mutate(
+        filename = basename(path),
+        sample_id = str_extract(filename, "^[^.]+"),
+        file_type = case_when(
+          str_detect(filename, "\\.genotype\\.json$") ~ "genotype",
+          str_detect(filename, "\\.genes\\.json$") ~ "genes",
+          TRUE ~ NA_character_
+        )
+      )
+  ) %>% 
+  bind_rows(.id = "bucket") %>% 
+  glimpse()
+
+hla_urls_df %>% 
+  janitor::get_dupes(sample_id) %>% 
+  filter(dupe_count > 2)
+
+hla_urls_df %>% 
+  janitor::get_dupes(sample_id, bucket) %>% 
+  filter(dupe_count > 2)
+
+# duplicates are only present across buckets but not within buckets
+# 16 samples are duplicated across buckets -- 
+
+# Here we select samples run in the latest bucket run (re-runs)
+hla_urls_df <- hla_urls_df %>% 
+  mutate(bucket_num = str_extract(bucket, "\\d+")) %>% 
+  group_by(sample_id, file_type) %>% 
+  slice_max(order_by = bucket_num, n = 1, with_ties = FALSE) %>% 
+  glimpse()
+
+hla_urls_df %>% 
+  group_by(bucket, file_type) %>% 
+  dplyr::summarise(n = n())
+
+# This is correct now
+# A tibble: 6 × 3
+# # Groups:   bucket [3]
+#   bucket       file_type     n
+#   <chr>        <chr>     <int>
+# 1 GCS_HLA_HBS1 genes       589
+# 2 GCS_HLA_HBS1 genotype    589
+# 3 GCS_HLA_HBS2 genes       159
+# 4 GCS_HLA_HBS2 genotype    159
+# 5 GCS_HLA_HBS3 genes         1
+# 6 GCS_HLA_HBS3 genotype      1
+
+```
+
+
+```{r}
+slurm_out <- glue("{wkdir}/.cluster_runs/{get_time()}_gcs_download_arcasHLA")
+data_out <- glue("{pdmbs_dir}/workflow/RNASEQ/AIRR/arcasHLA")
+dir.create(slurm_out, recursive = TRUE)
+dir.create(data_out, recursive = TRUE)
+
+gcs_paths_to_download <- hla_urls_df$path %>% 
+  discard( ~ file.exists(file.path(data_out, basename(.))))
+
+for (url in gcs_paths_to_download) {
+  jobname <- glue("gcs_{tools::file_path_sans_ext(basename(url))}")
+  # pause if there are more than 9,999 slurm jobs submitted
+  # check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --ntasks=1",
+      " --nodes=1",
+      " --mem-per-cpu=1GB",
+      " --time=10:00",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " notebooks/shell_scripts/download_gcs_url.sh",
+      " -i {url}",
+      " -o {data_out}/"
+    )
+  )
+  # to prevent memory alloc issues
+  # Sys.sleep(0.1)
+}
+
+```
+

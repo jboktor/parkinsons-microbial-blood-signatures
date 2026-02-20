@@ -1,9 +1,15 @@
 # Joe Boktor
 # Caltech - Mazmanian Lab
 
-source("src/_load_packages.R")
-source("src/_plot-functions.R")
-source("src/plot-PCA.R")
+pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+wgs_wkdir <- paste0(pdmbs_dir, "/workflow/WGS")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
+source(glue("{wkdir}/notebooks/R_scripts/_plot-functions.R"))
+source(glue("{wkdir}/notebooks/R_scripts/plot-PCA.R"))
+
+
 # base::load("data/Phyloseq_Objects/UHGG/Species_counts.RData")
 base::load("data/Phyloseq_Objects/Phyloseq_all_outliers_removed.RData")
 

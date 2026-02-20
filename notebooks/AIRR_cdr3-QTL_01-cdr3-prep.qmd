@@ -1,0 +1,680 @@
+---
+title: "cdr3-QTL Analysis"
+editor: source
+author: "Joe Boktor"
+date: '2025-05-04'
+eval: false
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    fig-height: 8
+    fig-width: 14
+---
+
+This notebook will be following analysis defined in (Ishigaki et al., 2022) and implemented [here](https://github.com/immunogenomics/cdr3-QTL).
+
+## Analysis Setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor) 
+library(glue)
+library(furrr)
+library(tictoc)
+library(progress)
+library(entropy)
+library(data.table)
+library(seqinr)
+library(progress)
+library(nlme)
+library(broom.mixed)
+# plotting
+library(ggsci)
+library(scico)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+imm_plots_dir <- glue("{wkdir}/figures/AIRR/immunarch")
+entropy_dir <- glue("{wkdir}/data/interim/cdr3_entropy")
+entropy_plots_dir <- glue("{wkdir}/figures/AIRR/cdr3_entropy")
+git_dir <- glue("{home_dir}/git/cdr3-QTL")
+
+c3_pheno_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_phenotypes")
+dir.create(c3_pheno_dir, showWarnings = FALSE, recursive = TRUE)
+
+future::plan(multisession, workers = 8)
+```
+
+
+Utility functions
+
+```{r}
+# Function to align CDR3 AA sequences to IMGT, from https://github.com/immunogenomics/cdr3-QTL
+all_imgt_pos <- c(
+    "P104","P105","P106","P107","P108","P109","P110","P111",
+    "P111.1","P112.2","P112.1",
+    "P112","P113","P114","P115","P116","P117","P118")
+
+align_imgt_df <- function(CDR3){
+    AA <- unlist(strsplit(CDR3, ""));
+    N_AA_fow <- nchar(CDR3) %/% 2 + nchar(CDR3) %% 2;
+    N_AA_na <- 18 - nchar(CDR3);
+    AAmod <- c(
+        AA[1:(N_AA_fow)],
+        rep("NA",N_AA_na),
+        AA[(N_AA_fow + 1):nchar(CDR3)]
+    );
+    names(AAmod) <- all_imgt_pos
+    out <- as.data.frame(as.list(AAmod))
+    return(out)
+}
+```
+
+
+Loading metadata and TCRB data
+
+```{r, eval=FALSE}
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  glimpse()
+
+key_meta_df <- metadata %>% 
+    dplyr::select(
+        sample_id, participant_id, case_control_other_latest, ethnicity, race,
+        visit_month, age_at_baseline, sex, study,
+        est_tcell_reads_abis, aligned_reads, pd_hla_risk_score, pd_hla_risk_score_z
+    ) %>%
+    glimpse()
+
+```
+
+
+
+Loading repertoire data
+
+```{r}
+# trust4_reports <- fread(
+#     glue("{wkdir}/data/interim/airr/2023-05-04_TRUST4-reports-all.csv"),
+#     header = TRUE) %>%
+#     dplyr::select(-V1) %>%
+#     glimpse()
+
+# trust4_reports_tcrb <- trust4_reports %>%
+#     filter(C == "TRBC") %>%
+#     filter(V != "." & J != ".") %>%
+#     filter(CDR3aa != "out_of_frame") %>%
+#     filter(!grepl("_", CDR3aa)) %>%
+#     filter(!grepl("\\?", CDR3aa)) %>%
+#     mutate(CDR3aa_len = nchar(CDR3aa)) %>%
+#     glimpse()
+
+trust4_reports_tcrb <- readRDS(
+  glue("{wkdir}/data/interim/airr/trust4_reports_tcrb_clean_df_2025-07-08.rds")
+) %>% 
+  glimpse()
+trust4_reports_tcrb %>% glimpse()
+
+# compiled repertoires by participant_id
+trust4_reports_tcrb_pid <- trust4_reports_tcrb %>%
+    filter(!grepl("\\?", CDR3aa)) %>%
+    mutate(CDR3aa_len = nchar(CDR3aa)) %>%
+    dplyr::rename(count = "#count" ) %>%
+    left_join(key_meta_df %>% dplyr::select(participant_id, sample_id)) %>%
+    select(-c(frequency, cid, cid_full_length, CDR3aa_len, sample_id)) %>%
+    group_by(CDR3nt, CDR3aa, V, D, J, C, participant_id) %>%
+    dplyr::summarise(count = sum(count)) %>%
+    ungroup() %>%
+    mutate(CDR3aa_len = nchar(CDR3aa)) %>%
+    glimpse()
+
+trust4_reports_tcrb_pid %<>%
+    filter(CDR3aa_len >=12 & CDR3aa_len <= 18) %>%
+    glimpse()
+
+```
+
+
+When filtering for CDR3aa_len >=12 & CDR3aa_len <= 18, we are left with 6,094,273 TCRb sequences (94% of total unique TCRb sequences).
+
+# Prepping CDR3 data for cdr3-QTL
+
+This section reformats V and J genes into a format that can be used by the cdr3-QTL repo. We reduce resolution from allele level to gene-copy level (e.g. TRBV7-3*04 -> TCRBV07-03) and exclude non-functional genes.
+
+```{r}
+trust4_reports_tcrb_pid_imgt <- trust4_reports_tcrb_pid %>%
+    mutate(CDR3aa_imgt = furrr::future_map(CDR3aa, align_imgt_df)) %>%
+    unnest(CDR3aa_imgt) %>%
+    glimpse()
+# trust4_reports_tcrb_pid_imgt %>% glimpse()
+
+# Read in the V and J gene exclusion files
+v_genes <- readLines(glue("{wkdir}/data/input/cdr3qtl/demo/V_all.txt"))
+j_genes <- readLines(glue("{wkdir}/data/input/cdr3qtl/demo/J_all.txt"))
+
+t4_vgenes <- trust4_reports_tcrb_pid_imgt$V %>% unique()
+t4_jgenes <- trust4_reports_tcrb_pid_imgt$J %>% unique()
+
+t4_vgenes_formatted <- t4_vgenes %>%
+    str_before_first("\\*") %>%
+    # Add "-01" to any element that does not contain a "-"
+    # This technical is incorrect - since there is only a single gene copy the "-01" is unnecessary but its added to match the reference
+    sapply(function(x) if (!str_detect(x, "-")) paste0(x, "-01") else x) %>%
+    str_replace_all(
+        .,
+        "^TRBV(\\d+)-(\\d+)$",
+        function(x) {
+            m <- str_match(x, "^TRBV(\\d+)-(\\d+)$")
+            sprintf("TCRBV%02d-%02d", as.integer(m[2]), as.integer(m[3]))
+        }
+    ) %>%
+    as.character()
+
+t4_vgenes_formatted[t4_vgenes_formatted %in% v_genes]
+t4_vgenes_formatted[t4_vgenes_formatted %nin% v_genes]
+
+include_v <- t4_vgenes_formatted %in% v_genes
+vname_map <- tibble(
+    V = t4_vgenes,
+    v_formatted = t4_vgenes_formatted,
+    include_v = include_v
+)
+
+# We don't lose any V genes in this process
+t4_jgenes_formatted <- t4_jgenes %>%
+    str_before_first("\\*") %>%
+    str_replace_all(
+        .,
+        "^TRBJ(\\d+)-(\\d+)$",
+        function(x) {
+            m <- str_match(x, "^TRBJ(\\d+)-(\\d+)$")
+            sprintf("TCRBJ%02d-%02d", as.integer(m[2]), as.integer(m[3]))
+        }
+    )
+
+t4_jgenes_formatted
+include_j <- t4_jgenes_formatted %in% j_genes
+# only one gene is excluded here - TRBJ2-2P a non-functional copy of TRBJ2-2
+t4_jgenes_formatted[t4_jgenes_formatted %nin% j_genes] 
+jname_map <- tibble(
+    J = t4_jgenes,
+    j_formatted = t4_jgenes_formatted,
+    include_j = include_j
+)
+
+# `TRBJ2-2P` is the only gene that gets excluded - a non-functional copy of the TRBJ2-2 gene
+```
+
+
+Saving CDR3 sequence count data. This will be the input for calculating CDR3 length-specific amino acid positional frequencies.
+
+
+This data has been aggregated by participant_id (unique donors), filtered to cdr3 lengths 12-18 amino acids, filtered to include only V and J genes with IMGT positional identifiers, and formatted to match the cdr3-QTL reference.
+
+
+```{r}
+trust4_reports_tcrb_pid_imgt %>% glimpse()
+
+tcrb_cdr3_imgt_df <- trust4_reports_tcrb_pid_imgt %>% 
+    left_join(vname_map) %>%
+    left_join(jname_map) %>%
+    filter(include_v & include_j) %>%
+    dplyr::select(-c(include_v, include_j)) %>%
+    glimpse()
+
+saveRDS(
+    tcrb_cdr3_imgt_df,
+    glue("{wkdir}/data/interim/cdr3_qtl/tcrb_cdr3_imgt_df_{Sys.Date()}.rds"),
+    compress = FALSE
+)
+
+```
+
+
+## Phenotype 1: Calcuating CDR3 length-specific amino acid positional frequencies
+
+We test the amino acid sequence with direct contact with the MHC displayed antigen. Here we filter out the 70 pairs of CDR3 length and IMGT positions that we want to test. This format is designed to test amino acid positional frequencies for each CDR3 length and IMGT position. This requires a high volume of data since it's stratified by cdr3 length.
+
+```{r}
+tcrb_cdr3_imgt_df <- readRDS(
+    glue("{wkdir}/data/interim/cdr3_qtl/tcrb_cdr3_imgt_df_2025-07-31.rds")
+) %>% glimpse()
+
+imgt_pos_testable <- all_imgt_pos[4:16]
+cdr3len_pos_pairs <- purrr::set_names(12:18) %>%
+    purrr::map(~ paste0(rep("X", .), collapse = "")) %>%
+    purrr::map(~ {
+        aligned <- align_imgt_df(.)
+        aligned %>%
+            dplyr::select(all_of(imgt_pos_testable)) %>%
+            dplyr::select(where(~ !any(. == "NA")))
+    }) %>%
+    purrr::map_dfr(~ as.data.frame(.), .id = "CDR3aa_len") %>%
+    pivot_longer(!CDR3aa_len, names_to = "imgt_pos") %>%
+    drop_na(value) %>%
+    select(-value) %>%
+    glimpse()
+
+# Exact list of pairs of CDR3 length and IMGT positions to test - 70 pairs
+cdr3len_pos_pairs %>% print(n = 20)
+
+# for length unstratified analysis we just use "imgt_pos_testable"
+
+tcrb_cdr3_imgt_df %>% glimpse()
+clonal_volume <- tcrb_cdr3_imgt_df %>% 
+    group_by(participant_id) %>% 
+    dplyr::summarise(n_cdr3 = sum(count)) %>% 
+    glimpse()
+
+clonal_volume$n_cdr3 %>% summary()
+pid_above_cv1000 <- clonal_volume %>% filter(n_cdr3 > 1000) %>% pull(participant_id)
+
+nrow(clonal_volume)
+length(pid_above_cv1000)
+# removing 745 participants from the analysis who have fewer than 1000 CDR3 counts
+
+```
+
+
+
+Calculating CDR3 length-specific amino acid positional frequencies. This function is used to calculate the amino acid positional frequencies for each CDR3 length and IMGT position. This method is not the method primarily used since it retains the germline V and J amino acids.
+
+```{r}
+# df input containing positional amino acids (IMGT aligned), and participant_id
+amino_acids <- c("A", "R", "N", "D", "C", "Q", "E", "G", "H", "I", 
+                 "L", "K", "M", "F", "P", "S", "T", "W", "Y", "V")
+# 70 pairs of CDR3 length and IMGT positions to test * 20 amino acids = 14,000 rows
+# * 3,731 participants = 52,223,400 rows
+# creating an empty grid to fill in with the results of the function - fill remaining values with 0
+testable_grid_strat <- cdr3len_pos_pairs %>%
+  expand_grid(aa = amino_acids, 
+  participant_id = unique(tcrb_cdr3_imgt_df$participant_id)) %>%
+  dplyr::rename(cdr3len = CDR3aa_len) %>%
+  glimpse()
+testable_grid_unstrat <- testable_grid_strat %>%
+    dplyr::select(-cdr3len) %>%
+    distinct() %>%
+    glimpse()
+
+calcualate_aa_freqs_m1 <- function(target_len, target_pos, df) {
+    df_out <- df %>% 
+        # dplyr::filter(CDR3aa_len == target_len) %>%
+        dplyr::filter(if (is.null(target_len)) TRUE else CDR3aa_len == target_len) %>%
+        drop_na(participant_id) %>% # none should be NA
+        dplyr::select(aa={{target_pos}}, participant_id) %>%
+        group_by(aa, participant_id) %>%
+        dplyr::summarise(aa_counts = n()) %>%
+        group_by(participant_id) %>%
+        mutate(ratio = aa_counts / sum(aa_counts)) %>%
+        ungroup() %>%
+        mutate(
+            cdr3len = target_len,
+            imgt_pos = target_pos
+        ) %>%
+        glimpse()
+    return(df_out)
+}
+
+cdr3_pheno_m1_strat <- 1:nrow(cdr3len_pos_pairs) %>%
+    purrr::map(
+        ~ calcualate_aa_freqs_m1(
+            target_len = cdr3len_pos_pairs$CDR3aa_len[.x],
+            target_pos = cdr3len_pos_pairs$imgt_pos[.x],
+            df = tcrb_cdr3_imgt_df
+        )
+    ) %>%
+    bind_rows()
+
+# fill in missing values with 0
+cdr3_pheno_m1_strat %>% glimpse()
+cdr3_pheno_m1_strat_final <- testable_grid_strat %>% 
+    full_join(cdr3_pheno_m1_strat) %>% 
+    dplyr::mutate_if(is.numeric, ~ ifelse(is.na(.), 0, .)) %>%
+    glimpse()
+
+cdr3_pheno_m1_unstrat <- 1:length(imgt_pos_testable) %>%
+    purrr::map(
+        ~ calcualate_aa_freqs_m1(
+            target_len = NULL,
+            target_pos = imgt_pos_testable[.x],
+            df = tcrb_cdr3_imgt_df
+        )
+    ) %>%
+    bind_rows()
+
+# fill in missing values with 0
+cdr3_pheno_m1_unstrat %>% glimpse()
+cdr3_pheno_m1_unstrat_final <- testable_grid_unstrat %>% 
+    full_join(cdr3_pheno_m1_unstrat) %>% 
+    dplyr::mutate_if(is.numeric, ~ ifelse(is.na(.), 0, .)) %>%
+    glimpse()
+
+saveRDS(
+    cdr3_pheno_m1_strat_final,
+    glue("{c3_pheno_dir}/cdr3_pheno_m1_cdr3len_stratified_{Sys.Date()}.rds")
+)
+
+saveRDS(
+    cdr3_pheno_m1_unstrat_final,
+    glue("{c3_pheno_dir}/cdr3_pheno_m1_cdr3len_UNstratified_{Sys.Date()}.rds")
+)
+
+```
+
+
+## Phenotype 2: Removing germline V and J amino acids
+
+We next remove germline V and J amino acids from the CDR3 sequences using the IMGT postiion identifiers for V and J gene sequences.
+
+
+```{r}
+V_germ_line <- read.table(
+    glue("{wkdir}/data/input/cdr3qtl/demo/V_exclude_AA.info"),
+    header = TRUE, sep = "\t") %>%
+    mutate(IMGT = paste0("P", IMGT)) %>%
+    glimpse()
+J_germ_line <- read.table(
+    glue("{wkdir}/data/input/cdr3qtl/demo/J_exclude_AA.info"),
+    header = TRUE, sep = "\t") %>%
+    mutate(IMGT = paste0("P", IMGT)) %>%
+    glimpse()
+
+V_exclude <- paste0(V_germ_line$Vgene, ":", V_germ_line$IMGT, ":", V_germ_line$AA)
+J_exclude <- paste0(J_germ_line$Jgene, ":L", J_germ_line$Length, ":", J_germ_line$IMGT, ":", J_germ_line$AA)
+
+head(V_exclude, 3)
+head(J_exclude, 3)
+```
+
+Calculating CDR3 length-specific amino acid positional frequencies without germline V and J amino acids.
+
+```{r}
+# this is the primary function for calculating CDR3 length-specific amino acid positional frequencies used in the cdr3-QTL analysis (not the above function). 
+calcualate_aa_freqs_m2 <- function(target_len, target_pos, df, v_rm, j_rm) {
+    df_out <- df %>% 
+        dplyr::filter(if (is.null(target_len)) TRUE else CDR3aa_len == target_len) %>%
+        drop_na(participant_id) %>%
+        dplyr::select(
+            aa = {{ target_pos }}, participant_id, CDR3aa_len,
+            v_formatted, j_formatted
+        ) %>%
+        mutate(
+            v_tag = paste0(v_formatted, ":", target_pos, ":", aa),
+            j_tag = paste0(j_formatted, ":L", CDR3aa_len, ":", target_pos, ":", aa)
+        ) %>%
+        filter((j_tag %nin% j_rm) & (v_tag %nin% v_rm)) %>%
+        group_by(aa, participant_id) %>%
+        dplyr::summarise(aa_counts = n()) %>%
+        group_by(participant_id) %>%
+        mutate(ratio = aa_counts / sum(aa_counts)) %>%
+        ungroup() %>%
+        mutate(
+            cdr3len = target_len,
+            imgt_pos = target_pos
+        ) %>%
+        glimpse()
+    return(df_out)
+}
+
+cdr3_pheno_m2_strat <- 1:nrow(cdr3len_pos_pairs) %>%
+    purrr::map(
+        ~ calcualate_aa_freqs_m2(
+            target_len = cdr3len_pos_pairs$CDR3aa_len[.x],
+            target_pos = cdr3len_pos_pairs$imgt_pos[.x],
+            df = tcrb_cdr3_imgt_df,
+            v_rm = V_exclude,
+            j_rm = J_exclude
+        )
+    ) %>%
+    bind_rows()
+
+cdr3_pheno_m2_strat %>% glimpse()
+cdr3_pheno_m2_strat_final <- testable_grid_strat %>% 
+    full_join(cdr3_pheno_m2_strat) %>% 
+    dplyr::mutate_if(is.numeric, ~ ifelse(is.na(.), 0, .)) %>%
+    glimpse()
+
+cdr3_pheno_m2_unstrat <- 1:length(imgt_pos_testable) %>%
+    purrr::map(
+        ~ calcualate_aa_freqs_m2(
+            target_len = NULL,
+            target_pos = imgt_pos_testable[.x],
+            df = tcrb_cdr3_imgt_df,
+            v_rm = V_exclude,
+            j_rm = J_exclude
+        )
+    ) %>%
+    bind_rows()
+
+cdr3_pheno_m2_unstrat %>% glimpse()
+cdr3_pheno_m2_unstrat_final <- testable_grid_unstrat %>% 
+    full_join(cdr3_pheno_m2_unstrat) %>% 
+    dplyr::mutate_if(is.numeric, ~ ifelse(is.na(.), 0, .)) %>%
+    glimpse()
+
+saveRDS(
+    cdr3_pheno_m2_strat_final,
+    glue("{c3_pheno_dir}/cdr3_pheno_m2_cdr3len_stratified_{Sys.Date()}.rds")
+)
+
+saveRDS(
+    cdr3_pheno_m2_unstrat_final,
+    glue("{c3_pheno_dir}/cdr3_pheno_m2_cdr3len_UNstratified_{Sys.Date()}.rds")
+)
+
+
+```
+
+
+Reading in results
+
+```{r}
+cdr3_p1_strat <- readRDS(
+    glue("{c3_pheno_dir}/cdr3_pheno_m1_cdr3len_stratified_2025-08-01.rds")
+) %>% glimpse()
+
+cdr3_p1_unstrat <- readRDS(
+    glue("{c3_pheno_dir}/cdr3_pheno_m1_cdr3len_UNstratified_2025-08-01.rds")
+) %>% glimpse()
+
+cdr3_p2_strat <- readRDS(
+    glue("{c3_pheno_dir}/cdr3_pheno_m2_cdr3len_stratified_2025-08-01.rds")
+) %>% glimpse()
+
+cdr3_p2_unstrat <- readRDS(
+    glue("{c3_pheno_dir}/cdr3_pheno_m2_cdr3len_UNstratified_2025-08-01.rds")
+) %>% glimpse()
+
+```
+
+
+
+We want to exclude rare cdr3 amino acids that are present in less than 50% of the population at a given cdr3 length and IMGT position.
+
+```{r}
+# function to calculate the fraction of samples with a given AA at a given cdr3 length and IMGT position that are present in at least 50% of the population
+calculate_fraction_above_zero <- function(data, value_col = "ratio", group_cols = c("aa", "imgt_pos", "cdr3len")) {
+  data %>%
+    dplyr::group_by(across(all_of(group_cols))) %>%
+    dplyr::summarise(
+      n_samples = n(),
+      n_above_zero = sum(!!sym(value_col) > 0, na.rm = TRUE),
+      fraction_above_zero = n_above_zero / n_samples,
+      .groups = "drop"
+    )
+}
+
+# out of 1,400 possible AA-IMGT position pairs ( AA(20) x 70 (IMGT-positions) ) - 993 are present in at least 50% of the population
+p1_strat_quality_aa <- calculate_fraction_above_zero(cdr3_p1_strat) %>% 
+    filter(fraction_above_zero >= 0.5) %>%
+    glimpse()
+# out of 266 AA-IMGT (length unstratified) pairs - 236 are present in at least 50% of the population
+p1_unstrat_quality_aa <- calculate_fraction_above_zero(cdr3_p1_unstrat, 
+        group_cols = c("aa", "imgt_pos")
+        ) %>% 
+    filter(fraction_above_zero >= 0.5) %>%
+    glimpse()
+
+# out of 1,400 possible AA-IMGT position pairs ( AA(20) x 70 (IMGT-positions) ) - 882 are present in at least 50% of the population
+p2_strat_quality_aa <- calculate_fraction_above_zero(cdr3_p2_strat) %>% 
+    filter(fraction_above_zero >= 0.5) %>%
+    glimpse()
+# out of 266 AA-IMGT (length unstratified) pairs - 232 are present in at least 50% of the population
+p2_unstrat_quality_aa <- calculate_fraction_above_zero(cdr3_p2_unstrat, 
+        group_cols = c("aa", "imgt_pos")
+        ) %>% 
+    filter(fraction_above_zero >= 0.5) %>%
+    glimpse()
+
+
+cdr3_p1_strat_filtered <- p1_strat_quality_aa %>% 
+    dplyr::select(aa, imgt_pos, cdr3len) %>%
+    left_join(cdr3_p1_strat) %>%
+    glimpse()
+cdr3_p1_unstrat_filtered <- p1_unstrat_quality_aa %>% 
+    dplyr::select(aa, imgt_pos) %>%
+    left_join(cdr3_p1_unstrat) %>%
+    glimpse()
+
+cdr3_p2_strat_filtered <- p2_strat_quality_aa %>% 
+    dplyr::select(aa, imgt_pos, cdr3len) %>%
+    left_join(cdr3_p2_strat) %>%
+    glimpse()
+cdr3_p2_unstrat_filtered <- p2_unstrat_quality_aa %>% 
+    dplyr::select(aa, imgt_pos) %>%
+    left_join(cdr3_p2_unstrat) %>%
+    glimpse()
+
+saveRDS(
+    cdr3_p1_strat_filtered,
+    glue("{c3_pheno_dir}/cdr3_pheno_m1_cdr3len_stratified_filtered_{Sys.Date()}.rds")
+)
+
+saveRDS(
+    cdr3_p1_unstrat_filtered,
+    glue("{c3_pheno_dir}/cdr3_pheno_m1_cdr3len_UNstratified_filtered_{Sys.Date()}.rds")
+)
+
+saveRDS(
+    cdr3_p2_strat_filtered,
+    glue("{c3_pheno_dir}/cdr3_pheno_m2_cdr3len_stratified_filtered_{Sys.Date()}.rds")
+)
+
+saveRDS(
+    cdr3_p2_unstrat_filtered,
+    glue("{c3_pheno_dir}/cdr3_pheno_m2_cdr3len_UNstratified_filtered_{Sys.Date()}.rds")
+)
+
+
+```
+
+
+Now doing the same process but for only participants with a clonal volume of > 1000 CDR3s.
+
+```{r}
+pid_above_cv1000
+
+# out of 1,400 possible AA-IMGT position pairs ( AA(20) x 70 (IMGT-positions) ) - 1040 are present in at least 50% of the population
+p1_strat_quality_aa_cv1000 <- cdr3_p1_strat %>% 
+    filter(participant_id %in% pid_above_cv1000) %>% 
+    calculate_fraction_above_zero() %>% 
+    filter(fraction_above_zero >= 0.5) %>%
+    glimpse()
+# out of 266 AA-IMGT (length unstratified) pairs - 238 are present in at least 50% of the population
+p1_unstrat_quality_aa_cv1000 <- cdr3_p1_unstrat %>% 
+    filter(participant_id %in% pid_above_cv1000) %>% 
+    calculate_fraction_above_zero( group_cols = c("aa", "imgt_pos")
+        ) %>% 
+    filter(fraction_above_zero >= 0.5) %>%
+    glimpse()
+
+# out of 1,400 possible AA-IMGT position pairs ( AA(20) x 70 (IMGT-positions) ) - 939 are present in at least 50% of the population
+p2_strat_quality_aa_cv1000 <- cdr3_p2_strat %>% 
+    filter(participant_id %in% pid_above_cv1000) %>% 
+    calculate_fraction_above_zero() %>% 
+    filter(fraction_above_zero >= 0.5) %>%
+    glimpse()
+# out of 266 AA-IMGT (length unstratified) pairs - 234 are present in at least 50% of the population
+p2_unstrat_quality_aa_cv1000 <- cdr3_p2_unstrat %>% 
+    filter(participant_id %in% pid_above_cv1000) %>% 
+    calculate_fraction_above_zero( group_cols = c("aa", "imgt_pos")) %>% 
+    filter(fraction_above_zero >= 0.5) %>%
+    glimpse()
+
+# cdr3_p1_strat_filtered_cv1000$participant_id %>% unique() %>% length()
+cdr3_p1_strat_filtered_cv1000 <- p1_strat_quality_aa_cv1000 %>% 
+    dplyr::select(aa, imgt_pos, cdr3len) %>%
+    left_join(cdr3_p1_strat) %>%
+    filter(participant_id %in% pid_above_cv1000) %>% 
+    ungroup() %>% 
+    glimpse()
+cdr3_p1_unstrat_filtered_cv1000 <- p1_unstrat_quality_aa_cv1000 %>% 
+    dplyr::select(aa, imgt_pos) %>%
+    left_join(cdr3_p1_unstrat) %>%
+    filter(participant_id %in% pid_above_cv1000) %>% 
+    ungroup() %>% 
+    glimpse()
+
+cdr3_p2_strat_filtered_cv1000 <- p2_strat_quality_aa_cv1000 %>% 
+    dplyr::select(aa, imgt_pos, cdr3len) %>%
+    left_join(cdr3_p2_strat) %>%
+    filter(participant_id %in% pid_above_cv1000) %>% 
+    ungroup() %>% 
+    glimpse()
+cdr3_p2_unstrat_filtered_cv1000 <- p2_unstrat_quality_aa_cv1000 %>% 
+    dplyr::select(aa, imgt_pos) %>%
+    left_join(cdr3_p2_unstrat) %>%
+    filter(participant_id %in% pid_above_cv1000) %>% 
+    ungroup() %>% 
+    glimpse()
+
+saveRDS(
+    cdr3_p1_strat_filtered_cv1000,
+    glue("{c3_pheno_dir}/cdr3_pheno_m1_cdr3len_stratified_filtered_cv1000_{Sys.Date()}.rds")
+)
+
+saveRDS(
+    cdr3_p1_unstrat_filtered_cv1000,
+    glue("{c3_pheno_dir}/cdr3_pheno_m1_cdr3len_UNstratified_filtered_cv1000_{Sys.Date()}.rds")
+)
+
+saveRDS(
+    cdr3_p2_strat_filtered_cv1000,
+    glue("{c3_pheno_dir}/cdr3_pheno_m2_cdr3len_stratified_filtered_cv1000_{Sys.Date()}.rds")
+)
+
+saveRDS(
+    cdr3_p2_unstrat_filtered_cv1000,
+    glue("{c3_pheno_dir}/cdr3_pheno_m2_cdr3len_UNstratified_filtered_cv1000_{Sys.Date()}.rds")
+)
+
+```
+
+
+
+
+
+
+```{r}
+sessionInfo()
+```
+
+
+

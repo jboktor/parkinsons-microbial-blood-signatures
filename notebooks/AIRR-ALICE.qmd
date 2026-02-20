@@ -1,0 +1,159 @@
+title: "Quantifying Generation Probability and Selection Factors of CDR3β Sequences using IGoR/OLGA/SoNNia"
+editor: source
+author: "Joe Boktor"
+date: '2025-05-04'
+eval: false
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    fig-height: 8
+    fig-width: 14
+---
+
+This notebook performs OLGA and SoNNia analyses to quantify the probability of CDR3β generation and produce $P_{gen}$ and $P_{post}$ statistics for each receptor. Then we perform distribution testing across samples as a pairwise distance metric.
+
+## Analysis Setup
+
+Environment setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(fastICA)
+library(parallelDist)
+library(mclust)
+library(seqinr)
+library(progress)
+library(transport)
+library(immunarch)
+library(nlme)
+library(broom)
+library(broom.mixed)
+library(philentropy)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+alice_res_dir <- glue("{wkdir}/data/interim/ALICE/olga_parallel")
+alicegit <- "/central/groups/MazmanianLab/joeB/git/ALICE"
+source(glue("{alicegit}/ALICE.R"))
+
+```
+
+
+Reading in metadata
+
+```{r}
+full_meta_df <- readRDS(
+    glue("{wkdir}/data/interim/airr/full_meta_df_2025-06-07.rds")) %>% 
+    glimpse()
+
+mds_tests <- full_meta_df %>%
+    dplyr::select(matches("mds_updrs.*_summary_score")) %>%
+    colnames()
+
+key_meta_df <- full_meta_df %>%
+    dplyr::select(
+        sample_id, case_control_other_latest,
+        ethnicity, race,
+        visit_month, age_at_baseline, sex, study, participant_id,
+        raw_total_reads, raw_total_reads_binned, DRB1_grouped, DRB1_risk,
+        all_of(mds_tests)
+    ) %>%
+    glimpse()
+
+```
+
+
+Analysis was run using R script and slurm (R-script needs to be executed in ALICE Git repo)
+
+Reading in test results
+
+```{r}
+alice_res <- readRDS(
+    glue("{wkdir}/data/interim/ALICE/tcrb_iter-100_nrec-1e6_2025-06-07.rds")
+)
+
+sapply(alice_res, nrow)
+```
+
+
+Results - pretty underwhelming. Probably don't have enough matched V/J seqs within a samples for the network analysis to pick up signatures.
+
+
+     BF_1001_SVM0_5T1      BF_1029_SVM0_5T1      BF_1135_SVM0_5T1 
+                    4                     4                     4 
+ PD_PDBP166AHF_BLM0T1  PD_PDBP166AHF_SVM6T1  PD_PDBZ725PY8_BLM0T1 
+                    6                     5                     5 
+ PD_PDDB923WW2_BLM0T1 PD_PDDB923WW2_SVM12T1 PD_PDDB923WW2_SVM18T1 
+                    6                     7                     5 
+ PD_PDFU123GRM_BLM0T1  PD_PDKH605DLQ_SVM6T1  PD_PDKU416WUZ_BLM0T1 
+                    4                     5                     2 
+ PD_PDLH751UML_BLM0T1  PD_PDMZ472HZ5_BLM0T1 PD_PDMZ472HZ5_SVM12T1 
+                    6                     2                     5 
+PD_PDMZ472HZ5_SVM18T1 PD_PDMZ472HZ5_SVM24T1  PD_PDMZ472HZ5_SVM6T1 
+                    4                     4                     6 
+ PD_PDPK734UZM_BLM0T1 PD_PDPX797VDT_SVM18T1 PD_PDRM716VPC_SVM18T1 
+                    2                     4                     6 
+ PD_PDXD535AE5_BLM0T1 PD_PDXD535AE5_SVM12T1  PD_PDXZ620KYP_BLM0T1 
+                    4                     5                     4 
+ PD_PDZJ953DRP_BLM0T1       PP_15761_SVM6T1       PP_3086_SVM36T1 
+                    4                     5                     1 
+      PP_3112_SVM12T1        PP_3112_SVM6T1       PP_3173_SVM24T1 
+                    1                     4                     5 
+       PP_3180_SVM6T1       PP_3355_SVM12T1       PP_3380_SVM36T1 
+                    2                     1                     6 
+      PP_3432_SVM24T1        PP_3475_SVM6T1        PP_3481_SVM6T1 
+                    4                     4                     4 
+      PP_3521_SVM36T1       PP_3552_SVM24T1        PP_3564_BLM0T1 
+                    2                     4                     2 
+      PP_3564_SVM24T1       PP_3603_SVM12T1       PP_3603_SVM24T1 
+                    2                     7                     6 
+      PP_3603_SVM36T1        PP_3603_SVM6T1       PP_3613_SVM36T1 
+                    6                     6                     2 
+       PP_3635_BLM0T1       PP_3635_SVM24T1       PP_3759_SVM36T1 
+                    1                     4                     4 
+       PP_3787_BLM0T1       PP_3787_SVM12T1       PP_40004_BLM0T1 
+                    1                     7                     4 
+     PP_40586_SVM12T1      PP_40586_SVM24T1      PP_40754_SVM12T1 
+                    5                     5                     1 
+     PP_40754_SVM24T1       PP_40769_BLM0T1       PP_40769_SVM6T1 
+                    5                     1                     4 
+      PP_41281_BLM0T1       PP_41281_SVM6T1       PP_41285_BLM0T1 
+                    4                     1                     4 
+      PP_41296_BLM0T1       PP_41296_SVM6T1       PP_41564_BLM0T1 
+                    4                     7                     7 
+      PP_42126_BLM0T1       PP_42131_BLM0T1       PP_51594_BLM0T1 
+                    4                     8                     2 
+      PP_52644_BLM0T1       PP_54072_BLM0T1 
+                    4                     4 
+

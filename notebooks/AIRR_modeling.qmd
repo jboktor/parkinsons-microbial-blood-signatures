@@ -1,0 +1,2029 @@
+---
+title: "Adaptive Immune Receptor Repertoire in Parkinson's Disease: Optimal Transport and Probabilistic Modeling Approaches for Latent Space Embeddings"
+editor: source
+author: "Joe Boktor"
+date: '2023-12-07'
+bibliography: references.bib
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    grid:
+      sidebar-width: 300px
+      body-width: 900px
+      margin-width: 300px
+      gutter-width: 1.5rem
+---
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(fastICA)
+library(parallelDist)
+library(mclust)
+library(seqinr)
+library(progress)
+library(transport)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+load_dot_env(glue("{wkdir}/.env"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+t4_bucket = Sys.getenv('GCS_TRUST4')
+```
+
+
+```{r}
+trust4_results <- glue("{pdmbs_dir}/workflow/RNASEQ/AIRR")
+contig_dir <- glue("{trust4_results}/TRUST4_final_assemblies")
+contig_fasta_dir <- glue("{trust4_results}/TRUST4_final_assemblies_cleaned")
+trans_contigs <- glue("{trust4_results}/TRUST4_translated_final_assemblies_V2")
+bcr_contigs <- glue("{trans_contigs}/BCR")
+tcr_contigs <- glue("{trans_contigs}/TCR")
+# embedding_res <- glue("{wkdir}/data/interim/airr/stiTChR_embeddings")
+
+dir.create(contig_fasta_dir, showWarnings = FALSE)
+dir.create(bcr_contigs, showWarnings = FALSE, recursive = TRUE)
+dir.create(tcr_contigs, showWarnings = FALSE, recursive = TRUE)
+
+model_list <- c(
+    "esm2_t12_35M",
+    "esm2_t33_650M",
+    "ProtT5-XL",
+    "ProstT5",
+    "Ankh",
+    "Ankh-Large"
+)
+# purrr::walk(
+#     model_list,
+#     ~ dir.create(
+#         glue("{embedding_res}/TCR/{.x}"), showWarnings = FALSE, recursive = TRUE
+#     )
+# )
+# purrr::walk(
+#     model_list,
+#     ~ dir.create(
+#         glue("{embedding_res}/BCR/{.x}"), showWarnings = FALSE, recursive = TRUE
+#     )
+# )
+
+```
+
+
+## Abstract
+
+Parkinson’s Disease (PD) is a debilitating neurodegenerative condition without cure that affects 1% of the US population over 60 years old. Acute chronic inflammatory profiles along with the presence of immunogenic protein aggregates in brain tissue suggest that PD may involve an autoimmune component. Profiling T and B-cell receptors in PD and healthy patients may provide key insight towards altered activity and or epitope targeting in disease. Due to the stochasticity of VDJ-recombination, individual TCRs/BCRs which target a specific epitope across individuals will present highly divergent sequence profiles. The recent development of open-source protein language models enables a complex and alternative representation of proteins which may enable clustering and modeling by epitope affinity. We hypothesize that TCR and BCR profiles in PD will show unique and/or altered receptor subtypes, indicative of auto-reactivity of the adaptive immune system. Using the TRUST4 algorithm, we assemble millions of BCR and TCR receptor contigs from Bulk-RNA sequence profiles, including 5,107/2,843 samples from 1,789/1,237 unique donors with longitudinal samples from PD and healthy, respectively. We further developed a custom bioinformatics pipeline to select high-quality and complete IMGT annotated single-chain receptors and embed the amino acid sequences within foundational models including ESM2, ProtT5, ProstT5, and Ankh. In this report, we analyze TCRs from a subset of 90 samples using the Ankh-Large model. To compare receptor cluster profiles between individuals we developed a mathematical framework where features were extracted from embedding dimensions using independent component analysis and modeled with probabilistic Gaussian mixture models. Modeling was performed on PD and healthy samples separately and individual mixtures were quantitatively aligned for comparison. Further, we developed an optimal transport bootstrapping framework for computation of pairwise sample dissimilarity of complex distributions using the earth mover’s distance. In our analysis we discover considerable clustering and successful mixture model identification of constant region identity of receptor chains. While PCA and UMAP do not present visually striking PD specific receptor clusters, parameter analysis of aligned mixtures of GMMs highlight some curious alterations. Further, our optimal transport method shows promise as a valuable tool to quantify distance across multivariate distributions of PLM embeddings, but requires further development.
+
+## Introduction & Background
+
+Parkinson's Disease (PD), is a neurodegenerative disorder characterized by the progressive loss of dopaminergic neurons and the accumulation of alpha-synuclein protein aggregates. Roughly 15% of incidence is attributed to a monogenic cause, suggesting a strong role for the environment in most cases of PD[@klein2012]. Recent studies have proposed a dual-hit hypothesis, suggesting that an individual's genetic makeup may predispose them to PD, but subsequent exposure to environmental toxins or other triggers initiate disease pathogenesis[@matheoud2019]. The immune system has been implicated as a central driver of dopaminergic cell death. Recent studies have illuminated roles for microglia, CD4+ T-cells, and border associated macrophages in models of PD pathogenesis[@williams2021; @schonhoff2023; @abdel-haq2022] . Adaptive Immune Receptor Repertoires (AIRRs) are comprised of T-cell receptors (TCRs) and B-cell receptors (BCRs), which encode a historical record of immunogenic epitopes targeted by lymphocytes. Given the altered profile of the immune system in PD, we hypothesize that the AIRR profiles of PD patients have a unique disease specific signal, that may prove as a useful biomarker for disease status, subtype, and severity. Further, profiling AIRRs of PD patients and healthy controls may provide valuable insights into the disease mechanisms and cellular targets of immune cells. These alterations could reflect changes in immune cell function, communication, or vulnerability to the pathological processes underlying PD. 
+
+While TCRs and BCRs structurally encode information regarding the epitopes targeted, there is remarkable sparsity at the amino acid sequence-level between individuals, even when an identical epitope is targeted. Until recently, this resulted in an inability to implicate specific TCR or BCR sequences as drivers of disease states. The recent development of foundational protein language models (PLMs) enables us to represent AIRR sequences in a high-dimensional latent space. These embedding representations have proven insightful in several contexts regarding protein function. For this project, we utilize a variety of PLMs including [ESM2](https://www.science.org/doi/10.1126/science.ade2574), [ProtT5](https://ieeexplore.ieee.org/document/9477085), [ProstT5](https://www.biorxiv.org/content/10.1101/2023.07.23.550085v1), and [Ankh](https://arxiv.org/abs/2301.06568) to represent the AIRRs of PD patients and controls.
+
+## Methods
+### Data Curation 
+#### Bulk-RNA Sequence Profiles
+We utilize data provided by the Accelerating Medicines Partnership Parkinson’s Disease (AMP-PD) consortium. We have obtained tier-2 access to genomic and clinical profiles for roughly 10,000 Parkinson’s Disease (PD) and Control Samples. This rich multi-omic dataset contains whole blood Whole Genome Sequencing (WGS), Bulk RNA-Seq, and targeted Proteomics as well as detailed clinical metadata for many samples. Our analysis workflow beings with reads available in BAM file format, previously mapped to the GRCh38 reference genome. 
+
+#### Epitope specific TCR/BCR reference sequences
+To obtain a set of TCR and BCR sequences with previously annotated epitope targets, we utilized the VDJdb database, ___, and __. VDJdb is a curated database of TCR and BCR sequences with known epitope targets. We downloaded the VDJdb database on 2021-12-07, which contained 1,000,000 unique TCR sequences and 100,000 unique BCR sequences. We then filtered the database to only include sequences with a known epitope target, resulting in 10,000 unique TCR sequences and 1,000 unique BCR sequences.
+Across all datasets, we filter for sequences with complete __ and __ annotation
+
+
+#### Adaptive Immune Receptor Repertoire Assembly
+
+To deconvolute, assemble and annotate TCR and BCR sequences from Bulk RNA-Seq profiles, we utilize TRUST4 [@song2021]. TRUST4 is a multi-step algorithm that first identifies reads that contain TCR or BCR sequences, assembles reads into contigs using a greedy extension approach, and finally annotates the contigs with VDJC information. We applied a customized TRUST4 v1.0.8 WDL pipeline to all AMP-PD Bulk RNA-Seq profiles using hg38 BCR/TCR reference sequences and the human V/D/J/C IMGT reference file (as of 2020). To extract as many high-quality sequences as possible from the TRUST4 annotations, we then applied thimble v1.2.2, a parallelized wrapper for the stiTChR algorithm (REF), to obtain full length single-chain nucleotides and amino acid sequences.
+
+
+#### Protein Language Model Embeddings
+
+Amino acid sequences are embedded within the following protein language modules utilizing TRILL: esm2_t12_35M, esm2_t33_650M, ProtT5-XL, ProstT5, Ankh, Ankh-Large. These models represent a variety of the latest state of the art protein language models, and have been shown to be effective in a variety of prediction tasks.
+
+
+### 1. Mathematical Framework
+
+This analysis is an extension the PopAlign[@chen2020] framework for more general nested multi-sample datasets generated via PLM embeddings, with an additional optimal transport framework to calculate distances between samples using complex distributions. This framework may provide utility to a broad range of data-modalities where samples contain several sub-populations that may be compared between samples for differences in abundance, variance, and overall stat e or representation. The proposed lightweight and flexible probabilistic modeling approach will enable statistical quantification of disease state specific TCRs/BCRs or population scale shifts in profiles.
+
+We define two populations, a  reference ($D^{\text{ref}}$) and test ($D^{\text{test}}$), Each population is described by an $r \text{ x } n$ matrix where $r$ is the number of receptors across all samples within the group and $n$ is number of embedded dimensions. Here, $D^{\text{test}} = \{d_i\}^{r}_{i=1}, \text{ where } d = (d_1, d_2, \dots, d_n)$ is an $n$-dimensional vector of the embedding values for a specific receptor $d$.
+
+
+#### 1.1 Independent Component Analysis (ICA)
+
+Independent Component Analysis (ICA) is a method used to seperate a multivariate signal into additive, theortically independent subcomponents. ICA is implemented using the R `fastICA` package. ICA assumes that the observed signal is a linear combination of independent components, and that the components are non-Gaussian. 
+
+The objective of ICA is to estimate a mixing matrix $A$ such that $X = AS$, where $X$ is the observed data matrix and $S$ contains the independent components we aim to recover. This objective is achieved by optimizing a demixing matrix $W$, which is the inverse of $A$, such that $S=WX$. A brief overview of the procedure for ICA is as follows: 
+
+- center $X$ to mean zero by subtracting the mean of each column
+- whiten $X$ by applying the inverse square root of the covariance matrix. Whitening transforms $X$ such that the covariance matrix becomes the identity matrix, which allows for reduced complexity and accelerated convergence
+- initialize $W$, the intended inverse of $A$, with random variables and apply of an interative algorithum to update the demixing matrix $W$ to maximize non-Gaussinity. 
+    - After each interation, an update rule is applied, $\mathbf{w}_i^{new} = E\{\mathbf{X}g(\mathbf{w}_i^T\mathbf{X})\} - E\{g'(\mathbf{w}_i^T\mathbf{X})\}\mathbf{w}_i$, where $g$ is a hyperbolic tangent function, and $E\{\}$ describes expectation.
+- Once convergence is achieved, determed by some predefined threshold for the angle between the updated and old weight vectors, the matrix of independent components $S$ is extracted by computing $S$ = $WX$
+
+
+#### 1.2 Gaussian Mixture Models
+
+Following the PopAlign framework, we apply Gaussian mixture models (GMM) on feature representations of AIRRs. A GMM is a probabilistic model that assumes all the data points are generated from a mixture of a finite number of Gaussian distributions with unknown parameters. 
+
+$$
+P(c)= \sum^{k}_{i=1} w_i \ \mathcal{N}(c; \mu_i, \Sigma_i) \nonumber
+$$
+
+Each Gaussian $\mathcal{N}_i$ is parameterized with : 
+
+*   mean $\mu_i$: describes the mean receptor-representation in terms of ICA features [m x 1 vector]
+*   covariance matrix $\Sigma_i$: describes spread and shape of the local density [m by m matrix]
+*   weight $w_i$: describes the relative proportion of this density in the model [scalar]
+
+ These GMMS may be fit on individual samples, or across samples to identify shared sub-states. Biologically, these sub-states may represent receptor chains (i.e., alpha, beta, gamma, delta TCRs), or potentially clusters of receptors with similar epitpope affinity. 
+
+ Models are fit with the expectation-maximization (EM) algorithm using the R `mclust::Mclust` function, allowing for variable volume, shape, and orientation of individual mixtures using the parameter (modelNames = 'VVV'). The optimal number of mixture components is determined using the Bayesian Information Criterion (BIC) on the training set.
+
+
+#### 1.3 Alignment of Mixture Components Across Models
+
+To map mixture components from the test model onto the reference model, we calculate pairwise distances between mixture components of two gaussian mixture models using Jeffrey's Divergence, a statistical metric of distribution similarity. This metric is a symmetric version of Kullback-Leibler (KL) divergence, an asymmetric measure of the difference between two probability distributions $P$ and $Q$ of a continuous random variable. KL divergence is defined as:
+
+$$D_{KL}(p \| q) = \int p(x) \log\left(\frac{p(x)}{q(x)}\right) dx$$
+
+Jeffrey's Divergence is thus defined as a symmetric version of KL divergence:
+
+$$
+D_{JD}(\mathcal{N}_P \| \mathcal{N}_Q) = \frac{1}{2} \left( D_{KL}(\mathcal{N}_P \| \mathcal{N}_Q) + D_{KL}(\mathcal{N}_Q \| \mathcal{N}_P) \right)
+$$
+
+Where $P$ and $Q$ are two independent components, from either the same or different mixture models, with $\mu$ and $\sigma$ associated parameters. For Gaussian distributions, $D_{KL}$ has the convenient closed-form expression:
+
+$$
+D_{KL}(\mathcal{N}_P \| \mathcal{N}_Q) = \frac{1}{2} \left( \text{Tr}(\Sigma^{-1}_Q \Sigma_P) + (\mu_P - \mu_Q)^T \Sigma^{-1}_P (\mu_P - \mu_Q) - k + \ln \left( \frac{\det \Sigma_P}{\det \Sigma_Q} \right) \right)
+$$
+
+Combining these two expression, we can get an efficient formula for Jeffrey's Divergence between two Gaussian distribution components:
+
+$$
+D_{JD}(\mathcal{N}_P \| \mathcal{N}_Q) = \frac{1}{2} \text{Tr} \left( \Sigma_P^{-1}\Sigma_Q + \Sigma_Q^{-1}\Sigma_P \right) + \frac{1}{2} (\mu_P - \mu_Q)^T \left( \Sigma_P^{-1} + \Sigma_Q^{-1} \right) (\mu_P - \mu_Q) - n
+$$
+
+Here, 
+
+- $Tr$ denotes the trace of a matrix, or the sum of the diagonal elements.
+- $\Sigma_P^{-1}$ and $\Sigma_Q^{-1}$ are the inverse covariance matrices of $P$ and $Q$, respectively.
+- $\mu_P - \mu_Q$ is the difference betweeen the mean vectors of $P$ and $Q$.
+- $n$ is the dimensionality of the distributions, which is either the number of features in the embedding space, or the number of features in the ICA space.
+
+
+
+#### 1.4 Analysis of GMM Parameters 
+
+Aligned Mixtures between the reference and test models are compared using the following metrics:
+
+$$
+\Delta \mu_i = ||\mathbf{\mu^\text{ref}_i} - \mathbf{\mu^\text{test}_j}||_2
+$$
+
+$$
+\Delta \Sigma_i = D_{\text{C}}(\mathbf{\Sigma^\text{ref}_i},\mathbf{\Sigma^\text{test}_j})\\
+$$
+
+$$
+\Delta w_i = |w^\text{ref}_i - w^\text{test}_j|
+$$
+
+
+$\Delta \mu_i$ is defined by the Euclidean distance or L2 norm between the mean vectors of the aligned mixtures, describing the mean difference between mixtures in ICA feature space. $\Delta \Sigma_i$ is the Forstner’s distance between the covariance matrices of the aligned mixtures, describing shifts in shape, rotation, and variance of the two mixtures. $\Delta w_i$ the absolute diffence  in the weights of the aligned mixtures, describing shifts in receptor state abundance.
+
+
+#### 1.5 Optimal Transport
+
+Optimal transport methods provide a useful framework for quantifying the distance between two complex multivariate probability distributions. The EMD is defined as the minimum cost of transporting a distribution $P$ to $Q$, where the cost is defined as the amount of “work” required to move a pile of dirt from one distribution to the other. The EMD is defined as:
+
+$$
+EMD(P, Q) = \frac{\sum_{i=1}^{m}\sum_{j=1}^{n} f_{ij} d_{ij}}{\sum_{i=1}^{m}\sum_{j=1}^{n} f_{ij}}
+$$
+
+Where $f_{ij}$ is the amount of dirt moved from $P$ to $Q$, $d_{ij}$ is the distance between the $i$th and $j$th points in $P$ and $Q$, respectively, and $m$ and $n$ are the number of points in $P$ and $Q$, respectively.
+
+Here we apply Wasserstein's distance, also known as the Earth Mover’s Distance (EMD), on the top 5 PCA components of Ankh-Large embeddings of TCRs. We implement EMD using the R `transport::wasserstein` package::function (see above). As this approach requires an identical number of features (two mxm matrices of the same dimensionality), we defined an iterative subsampling approach described by the following procedure:
+
+- Select samples with >= 30 unique receptors
+- Identify all unique pairs of samples, where number of unique pairs =  $n(n-1)/2$, where $n$ is the number of samples
+- For each pair of samples, we peform 50 iterations of the following procedure:
+    - Randomly select 25 receptors from each sample, from the PCA data, and calculate the EMD. We then calculate summary statistics on the EMD values across the 50 iterations for each pair of samples.
+
+## Results
+
+#### Overview of receptor count distributions.
+
+![**Receptor count distributions for full sample set, categorized as complete or incomplete contigs (columns) and TCRs/BCRs (rows), represented via emperical cumulative distribution function (ecdf)**.](../figures/AIRR/2023-12-07_ecdf.png){#fig-receptor-ecdfs}
+
+
+In @fig-receptor-ecdfs we observe the count distributions of TCRs and BCRs in our sample set. In our analysis pipeline (see workflow below), we exclude incomplete receptor sequences from the embedding procedure; although even complete contig sequences contain considerable variability in length. The ECDF shows that the majority of samples contain less than 80 receptors following filteration, while unfiltered samples contain up to an order of magnitude more. Focusing on the complete TCR contigs in @fig-receptor-ecdfs, we observe strong count concorrdance for TCR $\alpha$ and $\beta$ chains with considerably fewer $\gamma$ and $\delta$ chains. This is to be expected as $\alpha$ and $\beta$ chains are the most common TCR chains, while $\gamma$ and $\delta$ chains are less common and often expressed in a tissue specific manner. 
+
+
+####  ICA features enable robust probabilistic Gaussian mixture modeling of TCRs.
+
+![**Overview of Ankh-Large Probabilistic GMM Model Fitting and Alignment on high-quality TCR sequences.** A and B show heatmaps of 20 ICA features computed from the raw embedding space of Ankh-Large, C) Displays BIC values across an inreased range of components fit to the reference set (the PD population ICA features in this instance). The various colors indicate different model classes which allow for different pairs of variable volume, shape, and variance in the GMM, Ultimately the VVV model parameter is always selected. D) A heatmap visualizing Jeffreys Divergence across pairs of mixtures in the reference and test set.](../figures/AIRR/gmm-alignment-oveview_Ankh-Large_Case_2023-12-08.png){#fig-gmm-alignment-overview}
+
+
+@fig-gmm-alignment-overview depicts a high-level overview of the probablisitc model fitting and alignment procedure. In our pipeline, we compute 20 ICA components, as a fixed arbitrary amount. Upon observation, it is noticable how the scales for the ICA components in @fig-gmm-alignment-overview A-B) are quite different. This is due to the fact that the ICA procedure is stochastic, with an expectation of convergence; however, there is no guarantee. This is a known issue with the `fastICA` package, and is not a problem for the ICA algorithm itself. However, it does make it difficult to compare the ICA components across samples. 
+
+@fig-gmm-alignment-overview C) Using the BIC parameter, the `Mclust` function was able to identify 9 components as the optimal number of components to fit to the reference set. We selected PD patients samples to use as the reference set and controls as the test, as we hypothesize that PD patients may be more likely to harbor unique clusters that are not present in controls; howver, the directionality of this approach may alter the optimal number of clusters.
+
+@fig-gmm-alignment-overview D) In our Mixture alignment procedure, Jeffreys Divergence is calculated for each pair of components across models. Then, for alignment, we iterate through each test mixture and allow it to match to the reference mixture with the lowest JD value, highlighted with an X. This approach results in a number of test mixtures (Control GMM) that align to the same reference mixtures (PD GMM). This is not ideal, as we would like to have a 1:1 mapping between mixtures in the reference and test set. Reference mixtures 3,5,8 and 9 display no alignment whle mixtures 1,2, and 4 contain multiple matches. 
+
+
+
+####  PCA and UMAP of Ankh-Large embeddings of TCRs from PD and control samples, display robust clustering by GMM component and TCR chain identity.
+
+```{r}
+dimred <- readRDS(
+    glue("{wkdir}/figures/AIRR/PCA-UMAP_Ankh-Large_Case_2023-12-08.rds")
+)
+```
+
+::: panel-tabset
+### Constant Region
+
+```{r}
+#| label: "fig_dimred_C"
+#| fig-cap: "PCA and UMAP of Ankh-Large embeddings of TCRs from PD and Control samples, colored by the constant chain identity of the sequence."
+
+dimred$pca_C
+dimred$umap_C
+```
+
+### Aligned Gaussian Mixtures
+
+```{r}
+#| label: "fig_dimred_GM"
+#| fig-cap: "PCA and UMAP of Ankh-Large embeddings of TCRs from PD and Control samples, colored by the Gaussian Mixture Component identity of the sequence."
+
+dimred$pca_mixtures
+dimred$umap_mixtures
+```
+
+### Case / Control
+
+```{r}
+#| label: "fig_dimred_CC"
+#| fig-cap: "PCA and UMAP of Ankh-Large embeddings of TCRs from PD and Control samples, colored by Case/Control identity of the sequence."
+
+dimred$pca_grouping
+dimred$umap_grouping
+```
+
+:::
+
+
+```{r, eval = FALSE}
+p_ggumaps_plotly <- 
+        c("C", "mixture", "grouping") %>%
+        purrr::set_names() %>%
+        purrr::map(
+        ~ readRDS(
+            glue("{wkdir}/figures/AIRR/gmm_umap_2023-12-18_{.}.rds")
+        )
+    )
+
+p_ggumaps_plotly$C
+p_ggumaps_plotly$mixture
+p_ggumaps_plotly$grouping
+```
+
+
+::: panel-tabset
+### Constant Region
+
+
+![](../figures/AIRR/gmm_umap_2023-12-18_C.png){#fig-ggumap-C}
+
+
+### Aligned Gaussian Mixtures
+
+![](../figures/AIRR/gmm_umap_2023-12-18_mixture.png){#fig-ggumap-GM}
+
+### Case / Control
+
+![](../figures/AIRR/gmm_umap_2023-12-18_grouping.png){#fig-ggumap-CC}
+
+:::
+
+
+We applied PCA and UMAP to the embedding dimensions produced by the Ankh-Large model, and colored individual receptors by the aligned GMM component, constant region, and case/control status. In the figures colored by constant region, we observe that the constant region identity of the receptors are closely associated with clustering in both PCA and UMAP. Viewing the figures colored by GMM component identity, we can notice how these features are also associated with specific clusters; however, it appears that many GMM components are present in multiple clusters. Examining the clusters colored by case/control status we observe that the disease status does not appear to be a strong driver of clustering in either PCA or UMAP. 
+
+Interestingly, we observe subclustering within both constant chain identity and aligned GMM component, potentially suggesting that within these clusters, the Ankh-Large model is able to identify sub-states that may reflect antigen specificity or other biological properties.
+
+
+#### Parameter analysis of aligned mixtures in PD and control models dispay some large shifts in abundance of aligned clusters.
+
+![**Parameter analysis of aligned mixtures**. Moving from left to right, this figure diplays 1) the fractional composition of the constant region of the receptors within each Mixture, 2) $\Delta \mu_i$ shifts in mean embedding state, 3) $\Delta \omega_i$ shifts in abundance of component, and 4) $\Delta \Sigma_i$ shifts in shape, variance, and/or rotation.](../figures/AIRR/gmm-param-summary_Ankh-Large_Case_2023-12-09.png){#fig-gmm-param-summary}
+
+
+This figure highlights some large shifts in abundance of aligned clusters 3 & 4. The Forstner's Distance between the covariance matrices of the aligned mixtures is also quite large, indicating a shift in shape, rotation, and/or variance of the two mixtures; however, this distance is consistantly large across all comparisons. It appears also that some clusters are nearly entirely composed of a single constant region. Cluster 9 displays exclusive composition of $\alpha$ chain TCRs, while 1,5-7 are dominated by $\beta$-chains.
+
+
+#### Bootstrapped pairwise Earth Mover's Distances across samples show considerable variability and no clear separations across Case/Control status.
+
+![Pairwise Earth Mover's Distance Across Samples Displays no Clear Separations Across Donors or Case/Control Status](../figures/AIRR/EMD_Ankh-Large_Case_2023-12-09.png){#fig-ot-dist}
+
+
+To obtain a high-level summary score quantifying the distance between samples containing many receptor embeddings, we calculated the Earth Mover's Distance (EMD). @fig-ot-dist presents median scores of 50 iterations across each pair of samples. In @fig-ot-dist A) pairwise scores are categorized as 1) between individual samples, 2) within a donor but across longitudinal timepoints, and 3) between distinct donors. The "Within Sample" axis in @fig-ot-dist A) would approximate a distance value of zero with perfect bootstrapping. While this group is slighly lower than the "Within Donors" and "Across Donors" distributions, it is considerably larger than anticipated, suggesting that further optimization of the procedure is necessary. In @fig-ot-dist B) pairwise scores are categorized by donor group comparison, including "Within PD", "Within Control", and "Across PD and Control". Again, we observe considerable variability in the EMD scores, with no clear separation in the median values of the distributions between case and controls. Interestingly, these distributions appear to potentially be bimodal, with a small subset of samples displaying considerably lower EMD scores.
+
+Finally, in @fig-ot-dist C) we visualize the relationship between median EMD values between samples and the standard deviation of the EMD values across bootstrap iterations. This scatterplot is informative as it suggests that the variability across measurements is rather large (~ 20% of the median), with no clear trend as median distances increase. 
+
+## Discussion
+
+Here we develop a bioinformatics pipeline to process assembled TCR sequences from PD patients and controls and cast them into protein language models to obtain an abstract high-dimensional representation. We further test a mathematical and statistical framework to compare the distributions of these representations across healthy and control samples to disentangle the effects of disease state and donor variability. 
+
+Utlimately, we are able to identify a number of clusters with biologically meaningful compositions, including clusters that are dominated by a single constant region (ie, TCR $\alpha$/$\beta$). While we do not visually observe strong disease specific signatures in our PCA/UMAP, parameter analysis of aligned Gaussian mixture models suggests there may be a promising signal, worth further exploration. 
+
+However, there are a number of limitations to this approach that should be addressed in future work. Our filtering strategy for selection of quality TCR/BCR sequences reduces the number of sequences per sample by nearly an order of magnitude. Reducing the stringency of these filters may enable a more wholistic representation of the TCR/BCR repertoire, and may enable more robust clustering. 
+
+The ICA procedure we perform is a novel strategy for dimensionality reduction of protein language models. In this analysis a fixed value of 20 components was selected arbitrarily, and may not be the optimal number of components to represent the data. Future work should include a cost function to optimize the number of components to include in the ICA procedure. Further, it would be of value to compare ICA, PCA, and other dimensionality reduction techniques to determine their impact on downstream GMM fitting and analysis. 
+
+The Gaussian mixture models applied here provided a light-weight and flexible approach to analyze a large volume of data. However, the alignment of clusters across samples distributions is not ideal, as the directionality of the alignment plays a significant role in which clusters pair. Further work exploring how this pairing may be optimized would be of value.
+
+Finally, the Earth Mover's Distance (EMD) was applied to the top 5 PCA components of Ankh-Large embeddings of TCRs. This approach was selected as it provides a simple and interpretable metric of distance between two multivariate/complex distributions. However, limitations in the coverage of TCR types and overall abundance limited its application in this pilot analysis. Additional analysis where larger volumes of samples with many TCRs sequences (>500) may provide more robust results. In addition, the impact of utilizing PCA components as opposed to the full embedding space should be explored.
+
+
+## Code / Analysis
+
+```{mermaid}
+%%| fig-cap: "Schematic of analysis workflow, detailing the steps taken to process and analyze Bulk RNA-Seq data, deconvolve and assemble TCRs/BCRs, translate DNA contig sequences, perform quality control filtering, and embed sequences to produce latest space representations of PLMs for analysis."
+%%| fig-width: 8
+
+flowchart TD
+  A(Bulk RNA-Seq BAM)
+  AB{TRUST4}
+  B1(CDR1-3 sequences)
+  B2(assembled contigs)
+  B3(VDJC annotation)
+  C(Amino Acid Contigs \n BCR/TCR FASTA)
+  C2(Amino Acid Contigs \n BCR/TCR FASTA)
+  C3(Full Length \n TCR Chain FASTA)
+  C4(Full Length \n TCR Chain FASTA)
+  DA{TRILL}
+  D(Averge sequence \nEmbedding)
+  E{Probabilistic \n Mixture Models}
+  F{Optimal Transport \nCalculation}
+  Z(HLA-typing)
+  G{Statistical \nAnalysis with \nClinical Metadata}
+  
+  A --> AB
+  AB --> B1
+  AB --> B2
+  AB --> B3
+  B2 --> |1. Select complete chains, \n2. Select sequences in frame, \n3. Translate DNA to AA  \n4. Remove seqs with premature\n stop codons | C
+  C --> |stiTChR| C3
+
+  C2 --> DA
+  C4 --> DA
+  DA --> D
+  D --> E
+  D --> F
+  E --> G
+  F --> G
+  Z --> G
+
+```
+
+
+#### Running Thimble / stiTChR on TRUST4 CDR3 data
+
+Formatting data for thimble
+
+```{r, eval = FALSE}
+
+thimble_input_dir <- glue("{wkdir}/data/interim/airr/thimble_stitchr/inputs")
+thimble_output_dir <- glue("{wkdir}/data/interim/airr/thimble_stitchr/outputs")
+dir.create(thimble_input_dir,
+    showWarnings = FALSE, recursive = TRUE
+)
+dir.create(thimble_output_dir,
+    showWarnings = FALSE, recursive = TRUE
+)
+
+trab_template <- readr::read_tsv(glue(
+    "{wkdir}/data/input/stitchr_templates/",
+    "input_template_TRA-TRB.tsv"
+))
+trgd_template <- readr::read_tsv(glue(
+    "{wkdir}/data/input/stitchr_templates/",
+    "input_template_TRG-TRD.tsv"
+))
+
+trust4_reports_clean_tcrs <- trust4_reports %>%
+    filter(grepl("TR", C)) %>%
+    filter(
+        CDR3aa != "out_of_frame",
+        # cid_full_length ==1,
+        V != "." & J != "." & C != "."
+    ) %>% 
+    mutate(
+        TCR_name = glue("{sample_id}_{cid}")
+    )
+trust4_reports_clean_tcrs %>% glimpse
+
+#' Function to reformat TRUST4 report data for use with Thimble
+thimble_format_trust4_report <- function(df, C_filter) {
+    thimble_data <- df %>%
+        filter(grepl(C_filter, C) &
+            grepl(C_filter, V) & grepl(C_filter, J)) %>%
+        dplyr::rename_at(vars(V, J), ~ paste0(C_filter, .)) %>%
+        dplyr::rename_at(vars(CDR3aa), ~ paste0(C_filter, "_CDR3")) %>%
+        dplyr::select(TCR_name, contains(C_filter))
+    return(thimble_data)
+}
+
+thimble_data_list <- c("TRA", "TRB", "TRG", "TRD") %>%
+    purrr::set_names() %>%
+    purrr::map(
+        ~ thimble_format_trust4_report(
+            trust4_reports_clean_tcrs,
+            C_filter = .
+        )
+    )
+purrr::map(thimble_data_list, tibble)
+
+thibble_inputs <- list()
+thibble_inputs[["TRA"]] <- bind_rows(trab_template, thimble_data_list$TRA) %>%
+    mutate_all(~ replace_na(., ""))
+thibble_inputs[["TRB"]] <- bind_rows(trab_template, thimble_data_list$TRB) %>%
+    mutate_all(~ replace_na(., ""))
+thibble_inputs[["TRG"]] <- bind_rows(trgd_template, thimble_data_list$TRG) %>%
+    mutate_all(~ replace_na(., ""))
+thibble_inputs[["TRD"]] <- bind_rows(trgd_template, thimble_data_list$TRD) %>%
+    mutate_all(~ replace_na(., ""))
+
+# saving thimble inputs
+names(thibble_inputs) %>%
+    purrr::walk(
+        ~ readr::write_tsv(
+            thibble_inputs[[.]],
+            glue("{thimble_input_dir}/trust4_{.}_{Sys.Date()}.tsv")
+        )
+    )
+
+```
+
+Executing thimble
+
+```{r, eval = FALSE}
+
+# Running Thimble ----
+thimble_inputs_paths <- list.files(thimble_input_dir) %>% 
+    keep(grepl("trust4", .))
+names(thimble_inputs_paths) <- thimble_inputs_paths %>%
+    strex::str_before_nth("_", 2) %>%
+    gsub("trust4_TR", "", .) %>%
+    tolower()
+
+for (i in 1:length(thimble_inputs_paths)) {
+    cmd <-
+        glue(
+            "thimble -in {thimble_input_dir}/{thimble_inputs_paths[i]}",
+            " -r {names(thimble_inputs_paths)[i]}",
+            " -o {thimble_output_dir}/{thimble_inputs_paths[i]}"
+        )
+    message(cmd)
+    slurm_shell_do(
+        cmd,
+        memory = 50000, # 50GB
+        ncpus = 8, # 8 CPUS
+        walltime = 36000 # 10 hours
+    )
+}
+
+```
+
+Analyzing thimble results
+
+This process results in 7,805,041 available sequences with 170,562  stitching failures due to implausible CDR3 sequences bc of deletions incomplete CDR3 regions or other errors.
+
+```{r, eval = FALSE}
+
+# read in all thimble outputs into a combinded data-frame
+thimble_stitchr_df <- list.files(thimble_output_dir, full.names = TRUE) %>%
+    purrr::set_names(basename(.)) %>%
+    purrr::map(~ load_thimble_results(.)) %>%
+    bind_rows(.id = "filepath") %>% 
+    mutate(unique_seq_id = glue("{tcr_name}_{cdr3}")) 
+
+thimble_stitchr_df_qc <- filter(thimble_stitchr_df, aa != "") %>%
+    distinct()
+thimble_stitchr_df_qc %>% glimpse
+
+saveRDS(
+    thimble_stitchr_df_qc,
+    glue("{wkdir}/data/interim/airr/thimble_stitchr_qc_seqs_{Sys.Date()}.rds"),
+    compress = FALSE
+)
+
+thimble_stitchr_df_qc %>% glimpse
+stop_codon_indices <- thimble_stitchr_df_qc$aa %>%
+    purrr::map(~ grep("\\*", .))
+
+min_stop <- purrr::map_dbl(stop_codon_indices, ~ min(.))
+stop_codon_indices %>% unlist()
+non_func <- purrr::map_lgl(stop_codon_indices, ~ min(.) < 100)
+sum(non_func)
+
+```
+
+
+Saving thimble/stiTChR sequences into to chunked fasta files
+
+```{r, eval = FALSE}
+# Write processed thimble results to fasta file chunks
+stitchr_tcr_fasta_chk <- glue("{wkdir}/data/interim/airr/stiTChR_fasta_chunks")
+dir.create(stitchr_tcr_fasta_chk, showWarnings = FALSE)
+
+# 4.5gb limit (1500*1024^2 * 3
+# options(future.globals.maxSize= 4718592000)
+write_fasta_chunks(
+    seqs = purrr::map(thimble_stitchr_df_qc$aa, ~ gsub("\\*", "", .)),
+    names = thimble_stitchr_df_qc$unique_seq_id,
+    outdir = stitchr_tcr_fasta_chk,
+    filename = "stitchr_tcrs",
+    nchunks = 1000
+)
+
+```
+
+
+#### Run TRILL on each chunked file
+
+```{r, eval = FALSE}
+stitchr_embeddings <- glue("{wkdir}/data/interim/airr/stiTChR_embeddings")
+dir.create(stitchr_embeddings, showWarnings = FALSE)
+chunked_fa_paths <- list.files(stitchr_tcr_fasta_chk,
+    full.names = TRUE
+)
+# run_name, model, fasta, output_dir)
+
+# generating a data-frame of parameters to run embedding in parallel
+batchtools_params <-
+    expand.grid(chunked_fa_paths, model_list) %>%
+    dplyr::mutate_all(as.character) %>%
+    dplyr::rename(fasta = Var1, model = Var2) %>%
+    dplyr::mutate(
+        run_name = basename(fasta) %>% str_remove(".fasta"),
+        output_dir = stitchr_embeddings,
+        ngpu = 1
+    ) %>%
+    dplyr::mutate(
+        output_exists = file.exists(
+            glue("{output_dir}/{run_name}_{model}_AVG.csv")),
+        output_size = case_when(
+            output_exists ~ file.size(
+                glue("{output_dir}/{run_name}_{model}_AVG.csv")), 
+            TRUE ~ 0
+        )
+    ) %>%
+    dplyr::filter(output_size < 10) %>%
+    dplyr::select(-c(output_exists, output_size)) %>%
+    glimpse
+
+# configure registry ----
+cluster_run <- glue("{get_time()}_TRILL_embed_AIRR_stiTChR")
+message("\n\nRUNNING:  ", cluster_run, "\n")
+breg <- makeRegistry(
+  file.dir = glue(
+    "{wkdir}/.cluster_runs/",
+    cluster_run
+  ),
+  seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+  template = glue("{wkdir}/batchtools_templates/batchtools-trill-embed.tmpl"),
+  scheduler.latency = 0.1,
+  fs.latency = 1
+)
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = trill_embed_parallel,
+  args = batchtools_params,
+
+  reg = breg
+)
+jobs[, chunk := chunk(job.id, chunk.size = 30)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+    resources = list(
+        walltime = 1500,
+        memory_gpu = 20000,
+        ncpus = 8,
+        ngpus = 1,
+        max.concurrent.jobs = 9999
+    )
+)
+
+```
+
+
+Evaluating results for quality control
+
+```{r, eval = FALSE}
+
+model_list_dims <- c(
+    "esm2_t12_35M" = 480 + 1,
+    "esm2_t33_650M" = 1280 + 1,
+    "ProtT5-XL" = 1024 + 1,
+    "ProstT5" = 1024 + 1,
+    "Ankh" = 768 + 1,
+    "Ankh-Large" = 1536 + 1
+)
+
+stitchr_tcr_fasta_chk <- glue("{wkdir}/data/interim/airr/stiTChR_fasta_chunks")
+fa_paths <- list.files(stitchr_tcr_fasta_chk, full.names = TRUE)
+fa_path_n <- fa_paths %>%
+    purrr::set_names(fs::path_ext_remove(basename(.))) %>%
+    purrr::map(
+    ~ seqinr::read.fasta(., seqtype = "AA") %>% length()
+)
+
+fa_path_n_df <- data.frame(
+    "chunk" = names(fa_path_n),
+    "chunk_n" = unlist(fa_path_n)
+)
+
+embedding_paths <- model_list %>%
+    purrr::set_names() %>%
+    purrr::map(
+        ~ list.files(glue("{wkdir}/data/interim/airr/stiTChR_embeddings"),
+            full.names = TRUE,
+            pattern = glue("{.}_AVG.csv")
+        )
+    )
+purrr::map(embedding_paths, length)
+
+future::plan("multisession", workers = 20)
+result_dims <- model_list %>%
+    purrr::set_names() %>%
+    purrr::map(~ embedding_paths[[.]] %>%
+        purrr::set_names(basename(.)) %>%
+        furrr::future_map(~ fread(., header = TRUE) %>% dim()))
+
+result_dims_df <- map_df(names(result_dims), ~{
+  outer_name <- .x
+  map_df(names(result_dims[[outer_name]]), ~{
+    inner_name <- .x
+    values <- unlist(result_dims[[outer_name]][[inner_name]])
+    tibble(
+      row_n = values[1],
+      column_n = values[2],
+      outer_list_name = outer_name,
+      inner_list_name = inner_name
+    )
+  })
+}) %>% glimpse
+
+for (modeln in model_list){
+    message("Processing: ", modeln)
+    result_dims_df %>%
+        filter(outer_list_name == modeln) %>%
+        pull(column_n) %>%
+        table() %>%
+        print()
+}
+
+result_dims_df %<>%
+    mutate(chunk = str_remove(
+        inner_list_name,
+        glue("_{outer_list_name}_AVG.csv")
+    ),
+    model_dim_n = purrr::map_dbl(
+        outer_list_name, ~ model_list_dims[[.]] %>% as.numeric()
+    )) %>%
+    left_join(fa_path_n_df) %>%
+    mutate(
+        correct_sample_n = chunk_n == row_n,
+        correct_model_dim = model_dim_n == column_n
+    ) %>%
+    glimpse()
+
+saveRDS(
+    result_dims_df, 
+    glue("{wkdir}/data/interim/airr/embedding_dims_stiTChR_v2_{Sys.Date()}.rds")
+)
+
+```
+
+Selecting a subset of sequences for fine-tuning pLMs
+
+```{r, eval = FALSE}
+thimble_input_dir <- glue("{wkdir}/data/interim/airr/thimble_stitchr/inputs")
+thimble_output_dir <- glue("{wkdir}/data/interim/airr/thimble_stitchr/outputs")
+
+tcrseq_subset <- list()
+set.seed(42)
+tcrseq_subset[["TRA"]] <- fread(
+    glue("{thimble_output_dir}/trust4_TRA_2023-12-26.tsv")
+    ) %>%
+    filter(TRA_aa != "") %>%
+    sample_n(10000) %>%
+    mutate(seq_id = glue("{TCR_name}_{TRA_CDR3}")) %>%
+    select(seq_id, TRA_aa) %>% dplyr::rename(aa = TRA_aa)
+tcrseq_subset[["TRB"]] <- fread(
+    glue("{thimble_output_dir}/trust4_TRB_2023-12-26.tsv")
+    ) %>%
+    filter(TRB_aa != "") %>%
+    sample_n(10000) %>%
+    mutate(seq_id = glue("{TCR_name}_{TRB_CDR3}")) %>%
+    select(seq_id, TRB_aa) %>%  dplyr::rename(aa = TRB_aa)
+tcrseq_subset[["TRD"]] <- fread(
+    glue("{thimble_output_dir}/trust4_TRD_2023-12-26.tsv")
+    ) %>%
+    filter(TRD_aa != "") %>%
+    sample_n(10000) %>%
+    mutate(seq_id = glue("{TCR_name}_{TRD_CDR3}")) %>%
+    select(seq_id, TRD_aa) %>%  dplyr::rename(aa = TRD_aa)
+tcrseq_subset[["TRG"]] <- fread(
+    glue("{thimble_output_dir}/trust4_TRG_2023-12-26.tsv")
+    ) %>%
+    filter(TRG_aa != "") %>%
+    sample_n(10000) %>%
+    mutate(seq_id = glue("{TCR_name}_{TRG_CDR3}")) %>%
+    select(seq_id, TRG_aa) %>%  dplyr::rename(aa = TRG_aa)
+
+tcrseq_subset_df <- bind_rows(tcrseq_subset, .id = "chain") %>%
+    glimpse
+
+seqinr::write.fasta(
+    sequences = as.list(tcrseq_subset_df$aa),
+    names = tcrseq_subset_df$seq_id,
+    file.out = glue(
+        "{wkdir}/data/interim/airr/",
+        "thimble_stitchr/tcrsubset.fasta"
+    ),
+    as.string = TRUE
+)
+```
+
+
+Plotting UMAPs
+```{r, eval = FALSE}
+
+rec_type <- "TCR"
+modeln <- "ProstT5"
+ref_group <- "Case"
+test_group <- "Control"
+gmm_res <- readRDS(
+    glue("{wkdir}/data/interim/airr/", 
+    "GMMAligner_{rec_type}_{modeln}_Ref-Case_Test-Control_2023-12-20.rds"
+    # "GMMAligner_{rec_type}_{modeln}_Ref-Case_Test-Control_2023-12-18.rds"
+    )
+)
+
+if (rec_type == "TCR") {
+    gmm_res_cleaned <- gmm_res$compiled %>%
+        filter(grepl("TR", C))
+} else if (rec_type == "BCR") {
+    gmm_res_cleaned <- gmm_res$compiled %>%
+        filter(grepl("IG", C))
+}
+
+# Plotting and saving UMAPs
+p_ggumaps <- c("C", "mixture", "grouping") %>%
+    purrr::set_names() %>%
+    purrr::map(
+        ~ ggumap(gmm_res_cleaned, color_by = .)
+    )
+names(p_ggumaps) %>%
+    purrr::walk(
+        ~ ggsave(
+            filename = glue(
+                "{wkdir}/figures/AIRR/",
+                "gmm_umap_{rec_type}_{modeln}_{Sys.Date()}_{.}.png"
+            ),
+            p_ggumaps[[.]], width = 11, height = 9
+        )
+    )
+
+# Converting files to plotly objects and saving
+p_ggumaps_plotly <- purrr::map(p_ggumaps, 
+    ~ ggplotly(.x, tooltip = c("Label"))
+)
+
+names(p_ggumaps_plotly) %>%
+    purrr::walk(
+        ~ saveRDS(
+            p_ggumaps_plotly[[.]],
+            glue(
+                "{wkdir}/figures/AIRR/",
+                "gmm_umap_{modeln}_{Sys.Date()}_{.}.rds"
+            )
+        )
+    )
+
+```
+
+
+
+Loading clinical metadata
+
+```{r, eval = FALSE}
+metadata <- readRDS(
+    glue("{wkdir}/data/interim/metadata/2023-07-14_phyloseq-metadata.rds")
+)
+rna_meta <- metadata$RNASEQ
+rna_meta_essential <- rna_meta %>%
+    dplyr::select(sample_id, case_control_other_at_baseline)
+
+```
+
+Loading TRUST4 CDR3 reports
+
+```{r, eval = FALSE}
+trust4_reports <- fread(
+    glue("{wkdir}/data/interim/airr/2023-05-04_TRUST4-reports-all.csv"), 
+    header = TRUE
+) %>%
+    dplyr::select(-V1)
+
+trust4_reports_chains <-
+    trust4_reports %>%
+    dplyr::select(c(cid, sample_id, C)) %>%
+    distinct() %>%
+    glimpse()
+
+# saveRDS(
+#     trust4_reports_chains,
+#     glue("{wkdir}/data/interim/airr/{Sys.Date()}_TRUST4-reports-chains.rds")
+# )
+
+```
+
+
+Selecting an intial set of 15 PD and 15 Healthy donors with three longitudinal samples as an inital dataset to test pipeline.
+
+```{r, eval = FALSE}
+set.seed(42)
+inital_sample_pop <- rna_meta %>%
+    filter(case_control_other_at_baseline != "Other") %>%
+    group_by(participant_id) %>%
+    dplyr::mutate(longitudinal_samples = n()) %>%
+    dplyr::mutate(visit_rank = rank(visit_month)) %>%
+    filter(longitudinal_samples == 3)
+    
+intial_pids <- inital_sample_pop %>%
+    filter(visit_rank == 1) %>%
+    group_by(case_control_other_at_baseline) %>%
+    slice_sample(n = 15) %>%
+    pull(participant_id) %>%
+    unique()
+
+primary_samples_set <- inital_sample_pop %>%
+    filter(participant_id %in% intial_pids)
+
+# saveRDS(
+#     primary_samples_set,
+#     glue("{wkdir}/data/interim/airr/primary_samples_set.rds")
+# )
+
+```
+
+Cleaning assembled contig files "final_assemblies.out" from TRUST4 pipeline to remove scoring information and convert to fasta format.
+
+```{r, eval = FALSE}
+
+final_assembly_paths <- list.files(
+    contig_dir,
+    pattern = "*.out", full.names = TRUE
+)
+
+future::plan("multisession", workers = 12)
+final_assembly_paths %>%
+    purrr::map(
+        ~ glue(
+            "awk '/^>/{{print; getline; print}}'",
+            " {.} >",
+            " {contig_fasta_dir}/{gsub('.out', '.fasta', basename(.))}"
+        )
+    ) %>%
+    furrr::future_walk(~ shell_do(.))
+
+```
+
+Reading in contig fastas from primary samples set and 1) selecting only complete contigs that are in-frame, and 2) translating the DNA sequence to amino acid sequences.
+
+```{r, eval = FALSE}
+
+final_assembly_paths <- list.files(
+    contig_dir,
+    pattern = "*.out", full.names = TRUE
+)
+qc_stats_dir <- glue("{wkdir}/data/interim/airr/qc_stats")
+dir.create(qc_stats_dir, recursive = TRUE, showWarnings = FALSE)
+assembled_samples <- basename(final_assembly_paths) %>%
+    gsub("_final.out", "", .)
+
+pb <- progress_bar$new(
+    format = "[:bar] :percent eta :eta :current/:total in :elapsed",
+    total = length(assembled_samples)
+)
+
+# contig_stats <- list()
+tic()
+for (sid in assembled_samples) {
+    pb$tick()
+    # message("Processing sample: ", sid)
+
+    # skip if sample has already been processed
+    if (file.exists(glue("{qc_stats_dir}/{sid}.rds"))) {
+        # message("   Already processed")
+        next
+    }
+
+    # pull out report for sample
+    t4sid <- trust4_reports %>%
+        filter(sample_id == sid) %>%
+        filter(
+            CDR3aa != "out_of_frame",
+            # cid_full_length ==1, 
+            V != "." & J != "." & C != "."
+        )
+
+    # create seperate contig id lists for TCRs and BCRs
+    tcr_cids <- filter(t4sid, grepl("TR", C)) %>% pull(cid) %>% unique()
+    bcr_cids <- filter(t4sid, grepl("IG", C)) %>% pull(cid) %>% unique()
+    # remove anything annotated as a TCR and BCR
+    tcr_cids <- setdiff(tcr_cids, bcr_cids)
+    bcr_cids <- setdiff(bcr_cids, tcr_cids)
+
+    # read in contigs
+    dna_contigs <- seqinr::read.fasta(
+        glue("{contig_fasta_dir}/{sid}_final.fasta"),
+        seqtype = "DNA"
+    )
+    n_dna_contigs_tcr <- seqinr::getAnnot(dna_contigs) %>%
+        grepl("TR", .) %>%
+        sum()
+    n_dna_contigs_bcr <- seqinr::getAnnot(dna_contigs) %>%
+        grepl("IG", .) %>%
+        sum()
+    
+    if (nrow(t4sid) == 0) {
+        message("   No complete contigs")
+     summary_stats <- c(
+        "n_all_tcr_contigs" = n_dna_contigs_tcr,
+        "n_all_bcr_contigs" = n_dna_contigs_bcr,
+        # filter for contigs with VJC annotations + in-frame
+        "n_qc1_tcr_contigs" = 0,
+        "n_qc1_bcr_contigs" = 0,
+        # filter for non-stop codons before the first 100 aa
+        "n_qc2_tcr_contigs" = 0,
+        "n_qc2_bcr_contigs" = 0,
+        # filter for contigs with at least 70 aa
+        "n_qc3_tcr_contigs" = 0,
+        "n_qc3_bcr_contigs" = 0
+    )
+        # contig_stats[[sid]] <- summary_stats
+        next
+    }
+
+    # filter contigs by quality assemblies in report
+    quality_contigs <- dna_contigs[
+        names(dna_contigs) %in% tcr_cids |
+        names(dna_contigs) %in% bcr_cids
+    ]
+    # translate to amino acid sequences
+    aa_sequences <- sapply(
+        quality_contigs, seqinr::translate,
+        simplify = TRUE
+    )
+    n_qc1_tcr_contigs <- sum(names(aa_sequences) %in% tcr_cids)
+    n_qc1_bcr_contigs <- sum(names(aa_sequences) %in% bcr_cids)
+
+    # identifying productive and non-productive contigs
+    stop_codon_indices <- purrr::map(aa_sequences, ~ grep("\\*", .))
+    non_func <- purrr::map_lgl(stop_codon_indices, ~ min(.) < 100)
+    qc2_aa <- aa_sequences[!non_func]
+    n_qc2_tcrs <- sum(names(qc2_aa) %in% tcr_cids)
+    n_qc2_bcrs <- sum(names(qc2_aa) %in% bcr_cids)
+
+    # remmove sequences with fewer than 100 amino acids
+    qc3_aa <- qc2_aa[lengths(qc2_aa) >= 70]
+    n_qc3_tcrs <- sum(names(qc3_aa) %in% tcr_cids)
+    n_qc3_bcrs <- sum(names(qc3_aa) %in% bcr_cids)
+
+    # remove stop codons asterisks
+    quality_aa_seqs <- purrr::map(qc3_aa, ~ gsub("\\*", "", .))
+    tcr_seqs <- quality_aa_seqs[names(quality_aa_seqs) %in% tcr_cids]
+    bcr_seqs <- quality_aa_seqs[names(quality_aa_seqs) %in% bcr_cids]
+
+    summary_stats <- c(
+        "n_all_tcr_contigs" = n_dna_contigs_tcr,
+        "n_all_bcr_contigs" = n_dna_contigs_bcr,
+        # filter for contigs with VJC annotations + in-frame
+        "n_qc1_tcr_contigs" = n_qc1_tcr_contigs,
+        "n_qc1_bcr_contigs" = n_qc1_bcr_contigs,
+        # filter for non-stop codons before the first 100 aa
+        "n_qc2_tcr_contigs" = n_qc2_tcrs,
+        "n_qc2_bcr_contigs" = n_qc2_bcrs,
+        # filter for contigs with at least 70 aa
+        "n_qc3_tcr_contigs" = n_qc3_tcrs,
+        "n_qc3_bcr_contigs" = n_qc3_bcrs
+    )
+    # contig_stats[[sid]] <- summary_stats
+
+    # write out translated BCR/TCR contigs
+    write.fasta(
+        sequences = tcr_seqs,
+        names = names(tcr_seqs),
+        file.out = glue("{tcr_contigs}/{sid}.fa")
+    )
+    write.fasta(
+        sequences = bcr_seqs,
+        names = names(bcr_seqs),
+        file.out = glue("{bcr_contigs}/{sid}.fa")
+    )
+    saveRDS(
+        summary_stats,
+        glue("{qc_stats_dir}/{sid}.rds")
+    )
+}
+toc()
+
+```
+
+
+Setting up TRILL environment and installing dependencies.
+
+```{r, eval = FALSE}
+# # Setting up trill
+# mamba create -y -n trill_v152 python=3.10 ; mamba activate trill_v152
+# mamba install -y pytorch==1.13.1 pytorch-cuda=11.7 -c pytorch -c nvidia && \
+# mamba install -y -c conda-forge openmm swig pdbfixer openbabel smina fpocket vina && \
+# mamba install -y -c bioconda pyrsistent foldseek &&\
+# mamba install -y -c pyg pyg=2.3.1=py310_torch_1.13.0_cu117 pytorch-cluster=1.6.1=py310_torch_1.13.0_cu117 pytorch-sparse=0.6.17=py310_torch_1.13.0_cu117 pytorch-scatter=2.1.1=py310_torch_1.13.0_cu117 && \
+# mamba install -y -c bioconda -c "dglteam/label/cu117" dgl
+# pip install trill-proteins
+
+# test runs to install models in right dirs
+# trill testembed 1 embed esm2_t12_35M test.fa --avg
+# trill testembed 1 embed esm2_t33_650M test.fa --avg
+# trill testembed 1 embed ProstT5 test.fa --avg
+# trill testembed 1 embed ProtT5-XL test.fa --avg
+# trill testembed 1 embed Ankh test.fa --avg
+# trill testembed 1 embed Ankh-Large test.fa --avg
+
+```
+
+
+Embedding the primary samples set using "out of the box" PLM models.
+
+```{r, eval = FALSE}
+
+# generating a data-frame of parameters to run embedding in parallel
+batchtools_params <-
+    expand.grid(
+        c(
+            list.files(tcr_contigs, pattern = ".fa", full.names = TRUE),
+            list.files(bcr_contigs, pattern = ".fa", full.names = TRUE)
+        ),
+        model_list
+    ) %>%
+    dplyr::mutate_all(as.character) %>%
+    dplyr::rename(fasta = Var1, model = Var2) %>%
+    dplyr::mutate(
+        run_name = basename(fasta) %>% str_remove(".fa"),
+        output_dir = case_when(
+            grepl("TCR", fasta) ~ glue("{embedding_res}/TCR/{model}"),
+
+        )
+    ) %>% 
+    dplyr::mutate(
+        output_exists = file.exists(
+            glue("{output_dir}/{run_name}_{model}_AVG.csv")),
+        output_size = case_when(
+            output_exists ~ file.size(
+                glue("{output_dir}/{run_name}_{model}_AVG.csv")), 
+            TRUE ~ 0
+        )
+    ) %>%
+    dplyr::filter(output_size < 10) %>%
+    dplyr::select(-c(output_exists, output_size)) %>%
+    glimpse
+
+# configure registry ----
+cluster_run <- glue("{get_time()}_TRILL_embed_AIRR")
+message("\n\nRUNNING:  ", cluster_run, "\n")
+breg <- makeRegistry(
+  file.dir = glue(
+    "{wkdir}/.cluster_runs/",
+    cluster_run
+  ),
+  seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+  template = glue("{wkdir}/batchtools_templates/batchtools-trill-embed.tmpl"),
+  scheduler.latency = 0.1,
+  fs.latency = 1
+)
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = trill_embed,
+  args = batchtools_params,
+  reg = breg
+)
+jobs[, chunk := chunk(job.id, chunk.size = 1)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = 7200,
+    memory_gpu = 40000,
+    ncpus = 2,
+    ngpus = 1,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+Main Script
+
+```{r, eval = FALSE}
+# Source main script functions
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+
+trust4_reports_chains <- readRDS(
+    glue("{wkdir}/data/interim/airr/",
+    "2023-12-17_TRUST4-reports-chains.rds")
+)
+
+# TCR full-length chain embeddings -------------
+modeln <- "esm2_t12_35M"
+ref_group <- "Case"
+test_group <- "Control"
+
+model_list <- c(
+    "esm2_t12_35M",
+    "esm2_t33_650M",
+    "ProtT5-XL",
+    "ProstT5",
+    "Ankh",
+    "Ankh-Large"
+)
+
+model_suffixes <- paste0(model_list, ".csv")
+embedding_paths <- purrr::set_names(model_list) %>%
+    purrr::map(
+        ~ list.files(glue("{embedding_res}/BCR/{.}"),
+            pattern = glue("_{.}_AVG.csv$"), full.names = TRUE
+        )
+    )
+embedding_paths %>% purrr::map(length)
+
+
+# df_latent <- embedding_paths[[modeln]] %>%
+#     keep(~ file.size(.) > 0) %>% 
+#     # TODO FIXME -- SUBSETTING
+#     # sample(2000) %>%
+#     purrr::set_names() %>%
+#     purrr::map_dfr(~ data.table::fread(., header = TRUE), .id = "filepath") %>%
+#     mutate(sample_id = basename(filepath) %>%
+#         str_remove(glue("_{modeln}_AVG.csv"))) %>%
+#     left_join(rna_meta_essential, by = "sample_id") %>%
+#     mutate(Label = glue("{Label}_{sample_id}"))
+
+# df_latent %>% dim
+# df_latent %>% glimpse
+# df_latent %<>% select(where(~ sum(is.na(.)) < 1000 )) %>% glimpse
+
+# D <- df_latent %>%
+#     column_to_rownames("Label") %>%
+#     split_train_test(
+#         split_col = "case_control_other_at_baseline",
+#         remove_cols = c(
+#             "sample_id", "case_control_other_at_baseline", "filepath"
+#         )
+#     )
+# purrr::map(D, tibble)
+
+# # print a preview of df
+# gmm_res <- gmm_aligner(
+#     dlist = D,
+#     ref_group = "Case",
+#     test_group = "Control"
+# )
+
+# saveRDS(
+#     gmm_res,
+#     glue("{wkdir}/data/interim/airr/",
+#         "GMMAligner_{modeln}_Ref-{ref_group}",
+#         "_Test-{test_group}_{Sys.Date()}.rds"
+#     )
+# )
+
+
+
+# ______________________________________________________________________________
+# Aligner Loop
+
+
+
+future::plan("multisession", workers = 14)
+for (modeln in model_list){
+    message("Running model: ", modeln)
+    df_latent <- embedding_paths[[modeln]] %>%
+        keep(~ file.size(.) > 0) %>% 
+        purrr::set_names() %>%
+        furrr::future_map(~ data.table::fread(., header = TRUE)) %>%
+        bind_rows(.id = "filepath") %>%
+        mutate(sample_id = basename(filepath) %>%
+            str_remove(glue("_{modeln}_AVG.csv"))) %>%
+        left_join(rna_meta_essential, by = "sample_id") %>%
+        mutate(Label = glue("{Label}_{sample_id}"))
+
+    message("Dimensions of Latent Embeddings: ", df_latent %>% dim)
+    df_latent %<>% select(where(~ sum(is.na(.)) < 1000 )) %>% glimpse
+
+    D <- df_latent %>%
+        column_to_rownames("Label") %>%
+        split_train_test(
+            split_col = "case_control_other_at_baseline",
+            remove_cols = c(
+                "sample_id", "case_control_other_at_baseline", "filepath"
+            )
+        )
+    
+    purrr::map(D, tibble)
+
+    # print a preview of df
+    gmm_res <- gmm_aligner(
+        dlist = D,
+        ref_group = "Case",
+        test_group = "Control",
+        threads = 14
+    )
+
+    saveRDS(
+        gmm_res,
+        glue("{wkdir}/data/interim/airr/",
+            "GMMAligner_{modeln}_Ref-{ref_group}",
+            "_Test-{test_group}_{Sys.Date()}.rds"
+        )
+    )
+}
+
+
+
+# ______________________________________________________________________________
+
+ica_list <- D %>% purrr::map(
+    ~ as.data.frame(.) %>%
+        fastICA(n.comp = 20)
+)
+
+# Visualizing ICA components
+p_case <- plot_ica_heatmap(ica_list$Case) + ggtitle("Case")
+p_cont <- plot_ica_heatmap(ica_list$Control) + ggtitle("Control")
+ica_heatmap <- p_case + p_cont
+
+ica_df <- purrr::set_names(names(ica_list)) %>%
+    purrr::map(~ ica_list[[.]]$S %>% as.data.frame()) %>%
+    bind_rows(.id = "grouping") %>%
+    dplyr::rename_all(  ~ gsub("V", "ICA_", .)) %>%
+    rownames_to_column("Label") %>%
+    dplyr::mutate(
+        cid = strex::str_before_first(Label, "_"),
+        sample_id = strex::str_after_first(Label, "_")
+    ) %>% 
+    glimpse()
+ica_df %>% tibble
+
+
+#______________________________________________________________________________
+# Gaussian Mixture Models (GMMs)
+
+# Determine optimal number of GMM cluster
+gmm_cluster_fit <- Mclust(ica_list[[ref_group]]$S, G = NULL, modelNames = "VVV")
+optimal_cluster_n <- gmm_cluster_fit$G
+message("Optimal number of clusters is: ", optimal_cluster_n)
+plot(gmm_cluster_fit, what = "density")
+
+# collecting data for BIC plot
+bic_matrix <- gmm_cluster_fit$BIC
+bic_data <- expand.grid(
+  G = rownames(bic_matrix), 
+  Model = colnames(bic_matrix)
+)
+bic_data$BIC <- as.vector(bic_matrix)
+p_GMM_BIC <- bic_data %>%
+    as.data.frame() %>%
+    ggplot(aes(x = G, y = BIC, color = Model)) +
+    geom_point(size = 2) +
+    geom_line(aes(group = Model)) +
+    labs(x = "Number of Clusters", y = "BIC") +
+    theme_bw()
+p_GMM_BIC
+
+# Fit GMMs to reference and test sets
+gmms <- ica_list %>% purrr::map(
+    ~ Mclust(.x$S, G = optimal_cluster_n, modelNames = "VVV")
+    )
+
+# print a summary of the GMMs
+purrr::map(gmms, summary)
+# plot(gmms[[ref_group]], what = "density")
+
+
+# Computing Jeffrey's Divergence between each pair of mixture components of the two GMMs
+jd_matrix <- pairwise_jeffreys_divergence(gmms$Control, gmms$Case)
+print(jd_matrix)
+
+jd_pairs_long <- jd_matrix %>%
+    as_tibble() %>%
+    rownames_to_column("ref_components") %>%
+    pivot_longer(
+        !ref_components,
+        names_to = "test_components",
+        values_to = "jd"
+    ) %>%
+    mutate(
+        ref_components = paste0("Mixture_", ref_components)) %>%
+        mutate(test_components = gsub("V", "Mixture_", test_components)) %>%
+    # Finding closest component from the TEST set to the REFERENCE set
+    group_by(test_components) %>%
+    dplyr::mutate(
+        min_jd = min(jd),
+        train_min = dplyr::case_when(
+        jd == min_jd ~ "X",
+        TRUE ~ ""
+    ))
+
+# List of test set GMM identities to reference set GMM identities
+pair_map_df <- jd_pairs_long %>%
+    dplyr::filter(train_min == "X") %>%
+    dplyr::select(contains("components"))
+
+gmm_class_map <- gmms %>%
+    purrr::map_dfr(
+        ~ .x$classification %>% as.data.frame(),
+        .id = "grouping"
+    ) %>%
+    dplyr::rename("mixture" = ".") %>%
+        mutate(
+            mixture = paste0("Mixture_", mixture),
+            # not actually the test group col,
+            # temporarily using this to map to ref set
+            test_components = mixture
+        ) %>%
+        rownames_to_column("Label") %>%
+    dplyr::left_join(pair_map_df, by = "test_components") %>%
+    dplyr::mutate(
+        aligned_mixture = dplyr::case_when(
+            grouping == ref_group ~ mixture,
+            TRUE ~ ref_components
+        )
+    ) %>%
+    dplyr::select(-c(test_components, ref_components)) %>%
+    glimpse()
+
+
+
+# function to select the closest matching component from the training set to the test
+p_jd_heatmap <- jd_pairs_long %>%
+    ggplot(aes(x = ref_components, y = test_components, fill = jd)) +
+    geom_tile() +
+    geom_text(aes(label = train_min), color = "white", size = 6) +
+    theme_minimal() +
+    theme_set(theme_bw()) +
+    scale_fill_viridis_c(option = "mako") +
+    labs(
+        x = "Reference Components", y = "Test Components",
+        fill = "Jeffrey's Divergence "
+    ) +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top"
+    )
+p_jd_heatmap
+fig_mapping_oveview <- (ica_heatmap | (p_GMM_BIC / p_jd_heatmap)) +
+    plot_annotation(tag_levels = "A")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/gmm-alignment-oveview_{modeln}_{ref_group}_{Sys.Date()}.png"),
+    fig_mapping_oveview,
+    width = 11, height = 9
+)
+
+
+# PCA ----
+D_pca <- prcomp(bind_rows(D), rank. = 3)
+pca_df <- D_pca[["x"]] %>%
+    as.data.frame() %>%
+    rownames_to_column("Label") %>% 
+    glimpse()
+
+# UMAP using default R settings
+D_umap = umap(bind_rows(D), n_components = 3, method = "naive")
+
+umap_df <- D_umap$layout %>%
+    as.data.frame() %>%
+    dplyr::rename_all( ~ gsub("V", "UMAP_", .)) %>%
+    rownames_to_column("Label")
+
+# Combining all receptor level data-fraes
+gmm_meta_df <- gmm_class_map %>%
+    left_join(ica_df) %>%
+    left_join(trust4_reports_chains) %>%
+    left_join(pca_df) %>%
+    left_join(umap_df) %>%
+    glimpse
+
+gmm_meta_df %>% glimpse
+dimred <- list(
+    "pca_C" =  plotly_pca(gmm_meta_df, color_by = "C"),
+    "pca_mixtures" = plotly_pca(gmm_meta_df, color_by = "mixture"),
+    "pca_grouping" = plotly_pca(gmm_meta_df, color_by = "grouping"),
+    "umap_C" = plotly_umap(gmm_meta_df, color_by = "C"),
+    "umap_mixtures" = plotly_umap(gmm_meta_df, color_by = "mixture"),
+    "umap_grouping" = plotly_umap(gmm_meta_df, color_by = "grouping")
+)
+```
+
+
+Computing Earth Movers distance all sample pairs
+
+```{r, eval = FALSE}
+D_pca <- prcomp(bind_rows(D), rank. = 3)
+pca_df_ot <- D_pca[["x"]] %>%
+    as.data.frame() %>%
+    rownames_to_column("Label") %>%
+    mutate(
+        cid = strex::str_before_first(Label, "_"),
+        sample_id = strex::str_after_first(Label, "_")
+    ) %>%
+    glimpse()
+
+# Count the number of receptors per sample and make alist of all with > 20
+df_latent %>% glimpse()
+sids_50 <- df_latent %>%
+    pull(sample_id) %>%
+    count() %>%
+    filter(freq >= 30) %>%
+    pull(x) %>%
+    glimpse()
+
+# computing all unique combinations of sample pairs
+sid_pairs <- gtools::combinations(
+  n = length(sids_50),
+  r = 2, 
+  v = sids_50,
+  repeats.allowed = TRUE
+  ) %>% 
+  as.data.frame() %>%
+  dplyr::rename(
+    sample_id1 = V1,
+    sample_id2 = V2
+  )
+
+# 100 random subsamples with 50 rec per match
+tic()
+future::plan("multisession", workers = 12)
+earth_movers_distance_df <- furrr::future_map2_dfr(
+    sid_pairs$sample_id1, sid_pairs$sample_id2,
+    ~ run_earth_movers_subsamples(pca_df_ot, s1 = .x, s2 = .y, n = 25)
+)
+toc()
+
+saveRDS(
+    earth_movers_distance_df,
+    glue(
+        "{wkdir}/data/interim/airr/",
+        "earth_movers_distance_df_{modeln}_{ref_group}_{Sys.Date()}.rds"
+    )
+)
+
+```
+
+Visualizing Earth Movers distance across sample pairs
+
+```{r, eval = FALSE}
+
+meta_distance_df <- rna_meta %>%
+    dplyr::select(sample_id, participant_id, case_control_other_at_baseline)
+meta_distance_df %>% glimpse
+
+# annotated pairwise comparisons
+earth_movers_distance_df_annot <- earth_movers_distance_df %>%
+    mutate_at(c("mean", "median", "sd", "min", "max"), as.numeric) %>% 
+  left_join(
+    meta_distance_df %>% dplyr::rename_all(~ paste0("sid1_", .)),
+    by = c("sample_id1" = "sid1_sample_id")
+  ) %>%
+  left_join(
+    meta_distance_df %>% dplyr::rename_all(~ paste0("sid2_", .)),
+    by = c("sample_id2" = "sid2_sample_id")
+  ) %>%
+  mutate(self = 
+    case_when(
+        sample_id1 == sample_id2 ~ "Within Sample", 
+        sid1_participant_id == sid2_participant_id ~ "Within Donor",
+        TRUE ~ "Across Donors"
+        )
+    ) %>%
+    mutate(
+        group_comparison = case_when(
+            sid1_case_control_other_at_baseline == "Case" &
+                sid2_case_control_other_at_baseline == "Case" ~ "Within PD",
+            sid1_case_control_other_at_baseline == "Control" &
+                sid2_case_control_other_at_baseline == "Control" ~ "Within Control",
+            sid1_case_control_other_at_baseline != sid2_case_control_other_at_baseline ~ "Across PD-Control",
+            TRUE ~ "other"
+        )
+    )
+
+earth_movers_distance_df_annot %>% glimpse
+p_emd_mediansd <- earth_movers_distance_df_annot %>%
+    ggplot(aes(x = median, y = sd)) +
+    geom_smooth(method = "lm", se = FALSE) +
+    geom_point() +
+    theme_set(theme_light())
+
+p_emd_self <- earth_movers_distance_df_annot %>%
+    ggplot(aes(y = median, x = self)) +
+    geom_point(position = position_jitter(width = 0.4), alpha = 0.6) +
+    geom_boxplot(alpha = 0.5, outlier.alpha = 0) +
+    labs(x = NULL, y = "Median Earth Mover's Distance") +
+    theme_set(theme_light()) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p_emd_group <- earth_movers_distance_df_annot %>%
+    ggplot(aes(y = median, x = group_comparison)) +
+    geom_point(position = position_jitter(width = 0.4), alpha = 0.6) +
+    geom_boxplot(alpha = 0.5, outlier.alpha = 0) +
+    labs(x = NULL, y = "Median Earth Mover's Distance") +
+    theme_set(theme_light()) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_emd <- p_emd_self + p_emd_group + p_emd_mediansd +
+    plot_layout(widths = c(1, 1, 1.8)) +
+    plot_annotation(tag_levels = "A")
+p_emd
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/EMD_{modeln}_{Sys.Date()}.png"),
+    p_emd,
+    width = 11, height = 6
+)
+
+```
+
+
+Visualizing summary stats of samples set (ECDF).
+
+```{r, eval = FALSE}
+rec_types_per_sample <-
+    trust4_reports %>%
+    group_by(sample_id, C, cid_full_length) %>%
+    dplyr::summarise(n = n()) %>%
+    mutate(cell_type_origin = case_when(
+        grepl("TR", C) ~ "TCR",
+        grepl("IG", C) ~ "BCR",
+        TRUE ~ "ERROR"
+    )) %>%
+    mutate(cid_full_length = case_when(
+        cid_full_length == "0" ~ "Incomplete",
+        cid_full_length == "1" ~ "Full Length"
+    ))
+
+p_tcr_chain_ecdf <- rec_types_per_sample %>%
+    filter(cell_type_origin == "TCR") %>%
+        ggplot(aes(n)) +
+        stat_ecdf(aes(color = C), geom = "step", size = 2, alpha = 0.8) +
+        # geom_density(aes(color = C)) +
+        facet_wrap(~cid_full_length) +
+        scale_x_log10() +
+    theme_set(theme_bw()) +
+    scale_color_jco()
+
+p_bcr_chain_ecdf <- rec_types_per_sample %>%
+    filter(cell_type_origin == "BCR") %>%
+        ggplot(aes(n)) +
+            stat_ecdf(aes(color = C), geom = "step", size = 2, alpha = 0.8) +
+            # geom_density(aes(color = C)) +
+            facet_wrap(~cid_full_length) +
+            scale_x_log10() +
+            theme_set(theme_bw()) +
+            scale_color_manual(values = c(
+                "IGHA1" = "#a6cee3",
+                "IGHA2" = "#1f78b4",
+                "IGKC" = "#e31a1c",
+                "IGLC" = "#ff7f00",
+                "IGHD" = "#b15928",
+                "IGHE" = "#ffff99",
+                "IGHG1" = "#1a5016",
+                "IGHG2" = "#33a02c",
+                "IGHG3" = "#5cb356",
+                "IGHG4" = "#99d096",
+                "IGHM" = "#6a3d9a"
+            ))
+
+library(aplot)
+
+p_ecdf <- p_tcr_chain_ecdf %>% insert_bottom(p_bcr_chain_ecdf)
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/{Sys.Date()}_ecdf.png"),
+    plot = p_ecdf,
+    width = 10,
+    height = 6
+)
+
+
+#_______________________________________________________________________________
+# Plotting GMM parameters
+
+# Collecting stats on aligned distributions
+pair_map_clean <- pair_map_df %>%
+    mutate_at(
+        vars(ref_components, test_components),
+        ~ gsub("Mixture_", "", .) %>% as.numeric()
+    ) %>%
+    mutate(
+        delta_mu = purrr::map2_dbl(.x = ref_components, .y = test_components,
+                ~ gmm_mean_l2_norm(
+                    gmm1 = gmms$Case, gmm2 = gmms$Control,
+                    i = .x, j = .y
+                )
+            ), 
+        delta_w = purrr::map2_dbl(
+            .x = ref_components, .y = test_components,
+            ~ gmm_abs_weight_diff(
+                gmm1 = gmms$Case, gmm2 = gmms$Control,
+                i = .x, j = .y
+            )
+        ),
+        delta_sigma = purrr::map2_dbl(
+            .x = ref_components, .y = test_components,
+            ~ gmm_forstners_distance(
+                gmm1 = gmms$Case, gmm2 = gmms$Control,
+                i = .x, j = .y
+            )
+        )
+    )
+pair_map_clean
+
+
+pair_map_clean %>%
+    dplyr::mutate(test_components = as.character(test_components)) %>%
+    ggplot(aes(x = test_components, y = delta_mu)) +
+    geom_segment(aes(
+        x = test_components, xend = test_components,
+        y = 0, yend = delta_mu
+    ), color = "grey") +
+    geom_point( color="orange", size=4) +
+    coord_flip() +
+    labs( y = expression(Delta * mu[i])) +
+    theme_set(theme_light())
+
+
+gmm_meta_df %>% glimpse
+C_freq_df <- gmm_meta_df %>%
+    filter(grepl("TR", C)) %>%
+    group_by(aligned_mixture, C) %>%
+    dplyr::summarise(n = n()) %>%
+    dplyr::mutate(relative_freq = n / sum(n)) %>%
+    mutate(aligned_mixture = gsub("Mixture_", "", aligned_mixture)) %>%
+    dplyr::rename(test_components = aligned_mixture)
+
+p_c_barplot <- C_freq_df %>%
+    ggplot(aes(x = relative_freq, y = test_components)) +
+    geom_bar(aes(fill = C), stat = "identity") +
+    theme_light() +
+    scale_fill_npg() +
+    labs(y = "Aligned_Mixture", x = "Relative Abundance")
+
+pair_map_clean_plot <- pair_map_clean %>%
+    mutate(test_components = as.character(test_components))
+
+# Example usage:
+p_du <- plot_gmm_param(pair_map_clean_plot, "test_components", "delta_mu") +
+    labs(y = expression(Delta * mu[i])) + labs(x = NULL) + theme(axis.text.y = element_blank())
+p_dw <- plot_gmm_param(pair_map_clean_plot, "test_components", "delta_w") +
+    labs(y = expression(Delta * omega[i])) + labs(x = NULL) + theme(axis.text.y = element_blank())
+p_ds <- plot_gmm_param(pair_map_clean_plot, "test_components", "delta_sigma") +
+    labs(y = expression(Delta * Sigma[i])) + labs(x = NULL) + theme(axis.text.y = element_blank())
+
+gmm_param_summary <- p_c_barplot %>% 
+    insert_right(p_du, width = 0.8) %>% 
+    insert_right(p_dw, width = 0.8) %>%
+    insert_right(p_ds, width = 0.8)
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/gmm-param-summary_{modeln}_{ref_group}_{Sys.Date()}.png"),
+    gmm_param_summary,
+    width = 9, height = 6
+)
+
+
+```
+
+
+
+### Mapping antigen specific references 
+
+Formatting raw VDJdb data
+
+```{r, eval = FALSE}
+# Methods
+#' from https://vdjdb.cdr3.net/search, we downloaded 
+#' all Human TCRB and TRAB sequences with 
+#' specificity some antigen. We then filter out 
+#' confidence scores ---
+#' antigen filtering --- (leave covid?)
+
+vdjdb_raw <- read_tsv(
+    glue(
+        "{wkdir}/data/input/stitchr_templates/",
+        "VDJDB_SearchTable-2024-02-03 22_01_15.813.tsv"
+    )
+)
+
+# clean and format this table for general use
+vdjdb_formatted <- vdjdb_raw %>%
+    janitor::clean_names() %>%
+    dplyr::rename_at(vars(cdr3, v, j), ~ toupper(.)) %>%
+    select(-c(method, meta, cdr3fix, species, reference, complex_id)) %>%
+    mutate(epitope_species = case_when(
+        epitope_species == "Homo sapiens" ~ "HomoSapiens",
+        epitope_species == "HIV-1" ~ "HIV",
+        epitope_species == "HIV1" ~ "HIV",
+        epitope_species == "HPV-16" ~ "HPV",
+        epitope_species == "TriticumAestivum" ~ "Wheat",
+        TRUE ~ epitope_species
+    )) %>%
+    mutate(epitope_class = case_when(
+        epitope_species %in% c(
+            "AdV", "CMV", "DENV1", "DENV2",
+            "DENV3/4", "EBV", "HCoV-HKU1",
+            "HCV", "HHV", "HIV", "HPV", "HSV-2",
+            "HTLV-1", "InfluenzaA", "MCPyV",
+            "SARS-CoV-2", "YFV"
+        ) ~ "Viral",
+        epitope_species %in% c(
+            "E.Coli",
+            "M.tuberculosis",
+            "PseudomonasAeruginosa",
+            "PseudomonasFluorescens",
+            "SelaginellaMoellendorffii",
+            "StreptomycesKanamyceticus"
+        ) ~ "Bacterial",
+        epitope_species == "HomoSapiens" ~ "Self-Antigen",
+        epitope_species == "Wheat" ~ "Food",
+        TRUE ~ "Other"
+    )) %>%
+    distinct() %>% 
+    dplyr::mutate(receptor_id = row_number()) %>%
+    dplyr::mutate(TCR_name = glue("{epitope_species}_{CDR3}_{receptor_id}")) %>%
+    glimpse
+
+readr::write_tsv(
+    vdjdb_formatted,
+    glue("{wkdir}/data/interim/airr/vdjdb_tcrs_formatted.tsv")
+)
+
+```
+
+
+```{r, eval = FALSE}
+
+vdjdb_formatted <- readr::read_tsv(
+    glue("{wkdir}/data/interim/airr/vdjdb_tcrs_formatted.tsv")
+)
+
+thimble_input_dir <- glue("{wkdir}/data/interim/airr/thimble_stitchr/inputs")
+thimble_output_dir <- glue("{wkdir}/data/interim/airr/thimble_stitchr/outputs")
+
+trab_template <- readr::read_tsv(glue(
+    "{wkdir}/data/input/stitchr_templates/",
+    "input_template_TRA-TRB.tsv"
+))
+trgd_template <- readr::read_tsv(glue(
+    "{wkdir}/data/input/stitchr_templates/",
+    "input_template_TRG-TRD.tsv"
+))
+
+vdjdb_formatted %>%
+    pull(score) %>%
+    table()
+# Breakdown of confidence scores
+#     0     1     2     3 
+# 75019  5564  2213  1592 
+
+
+thimble_input_dir <- glue("{wkdir}/data/interim/airr/thimble_stitchr/inputs")
+thimble_output_dir <- glue("{wkdir}/data/interim/airr/thimble_stitchr/outputs")
+
+trab_template <- readr::read_tsv(glue(
+    "{wkdir}/data/input/stitchr_templates/",
+    "input_template_TRA-TRB.tsv"
+))
+vdjdb_formatted <- readr::read_tsv(
+    glue("{wkdir}/data/interim/airr/vdjdb_tcrs_formatted.tsv")
+)
+
+thibble_inputs_ref <- list()
+thibble_inputs_ref[["TRA"]] <- vdjdb_formatted %>%
+    filter(gene == "TRA") %>%
+    dplyr::select(TCR_name, CDR3, V, J) %>%
+    distinct() %>%
+    dplyr::rename(
+        TRAV = V,
+        TRAJ = J,
+        TRA_CDR3 = CDR3
+    )
+thibble_inputs_ref[["TRB"]] <- vdjdb_formatted %>%
+    filter(gene == "TRB") %>%
+    dplyr::select(TCR_name, CDR3, V, J) %>%
+    distinct() %>%
+    dplyr::rename(
+        TRBV = V,
+        TRBJ = J,
+        TRB_CDR3 = CDR3
+    )
+
+hibble_inputs_ref[["TRA"]] <- bind_rows(
+    trab_template,
+    thibble_inputs_ref[["TRA"]]) %>%
+    mutate_all(~ replace_na(., "")) %>%
+    glimpse()
+thibble_inputs_ref[["TRB"]] <- bind_rows(
+    trab_template,
+    thibble_inputs_ref[["TRB"]]) %>%
+    mutate_all(~ replace_na(., "")) %>%
+    glimpse()
+
+names(thibble_inputs_ref) %>%
+    purrr::walk(
+        ~ readr::write_tsv(
+            thibble_inputs_ref[[.]],
+            glue("{thimble_input_dir}/VDJDB_{.}_{Sys.Date()}.tsv")
+        )
+    )
+
+```
+
+Executing thimble on reference sequences
+
+```{r, eval = FALSE}
+# Running Thimble ----
+thimble_inputs_paths <- list.files(thimble_input_dir) %>%
+    keep(grepl("VDJDB", .))
+names(thimble_inputs_paths) <- thimble_inputs_paths %>%
+    strex::str_before_nth("_", 2) %>%
+    gsub("VDJDB_TR", "", .) %>%
+    tolower()
+
+for (i in 1:length(thimble_inputs_paths)) {
+    cmd <-
+        glue(
+            "thimble -in {thimble_input_dir}/{thimble_inputs_paths[i]}",
+            " -r {names(thimble_inputs_paths)[i]}",
+            " -o {thimble_output_dir}/{thimble_inputs_paths[i]}"
+        )
+    message(cmd)
+    shell_do(cmd)
+}
+```
+
+Analyzing thimble results
+This process results in 71,152 available sequences with 748 stitching failures due to implausible CDR3 sequences bc of deletions incomplete CDR3 regions or other errors.
+
+```{r, eval = FALSE}
+# read in all thimble outputs into a combinded data-frame
+thimble_stitchr_df <- list.files(thimble_output_dir, full.names = TRUE) %>%
+    keep(grepl("VDJDB", .)) %>%
+    purrr::set_names(basename(.)) %>%
+    purrr::map(~ load_thimble_results(., file_prefix = "VDJDB_")) %>%
+    bind_rows(.id = "filepath") %>% 
+    mutate(unique_seq_id = tcr_name)
+
+thimble_stitchr_df_qc <- filter(thimble_stitchr_df, aa != "") %>%
+    distinct()
+thimble_stitchr_df_qc %>% glimpse
+
+saveRDS(
+    thimble_stitchr_df_qc,
+    glue(
+        "{wkdir}/data/interim/airr/",
+        "thimble_stitchr_VDJDB_qc_seqs_{Sys.Date()}.rds"
+    )
+)
+```
+
+Saving thimble/stiTChR sequences into to chunked fasta files
+
+```{r, eval = FALSE}
+# Write processed thimble results to fasta file chunks
+stitchr_tcr_fasta_chk <-
+    glue("{wkdir}/data/interim/airr/stiTChR_VDJDB_fasta_chunks")
+dir.create(stitchr_tcr_fasta_chk, showWarnings = FALSE)
+
+# 4.5gb limit (1500*1024^2 * 3
+# options(future.globals.maxSize= 4718592000)
+write_fasta_chunks(
+    seqs = purrr::map(thimble_stitchr_df_qc$aa, ~ gsub("\\*", "", .)),
+    names = thimble_stitchr_df_qc$unique_seq_id,
+    outdir = stitchr_tcr_fasta_chk,
+    filename = "stitchr_tcrs",
+    nchunks = 10
+)
+
+```
+
+Embedding thimble/stiTChR sequences using TRILL
+
+```{r, eval = FALSE}
+#### Run TRILL on each chunked file
+stitchr_embeddings <- glue("{wkdir}/data/interim/airr/stiTChR_VDJDB_embeddings")
+dir.create(stitchr_embeddings, showWarnings = FALSE)
+chunked_fa_paths <- list.files(stitchr_tcr_fasta_chk,
+    full.names = TRUE
+)
+# generating a data-frame of parameters to run embedding in parallel
+batchtools_params <-
+    expand.grid(chunked_fa_paths, model_list) %>%
+    dplyr::mutate_all(as.character) %>%
+    dplyr::rename(fasta = Var1, model = Var2) %>%
+    dplyr::mutate(
+        run_name = basename(fasta) %>% str_remove(".fasta"),
+        output_dir = stitchr_embeddings,
+        ngpu = 1
+    ) %>%
+    glimpse()
+
+# configure registry ----
+cluster_run <- glue("{get_time()}_TRILL_embed_AIRR_stiTChR_VDJDB")
+message("\n\nRUNNING:  ", cluster_run, "\n")
+breg <- makeRegistry(
+  file.dir = glue(
+    "{wkdir}/.cluster_runs/",
+    cluster_run
+  ),
+  seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+  template = glue("{wkdir}/batchtools_templates/batchtools-trill-embed.tmpl"),
+  scheduler.latency = 0.1,
+  fs.latency = 1
+)
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = trill_embed_parallel,
+  args = batchtools_params,
+
+  reg = breg
+)
+jobs[, chunk := chunk(job.id, chunk.size = 2)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+    resources = list(
+        walltime = 300,
+        memory_gpu = 20000,
+        ncpus = 8,
+        ngpus = 1,
+        max.concurrent.jobs = 9999
+    )
+)
+```
+
+
+```{r}
+sessionInfo()
+```
+
+## References

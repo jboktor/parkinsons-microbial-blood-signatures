@@ -1,0 +1,745 @@
+---
+title: "AIRR-AlignR Benchmarking | SARS-CoV-2 Immunization Analysis"
+editor: source
+author: "Joe Boktor"
+date: '2024-04-17'
+bibliography: references.bib
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    grid:
+      sidebar-width: 300px
+      body-width: 900px
+      margin-width: 300px
+      gutter-width: 1.5rem
+---
+
+```{r}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(fastICA)
+library(parallelDist)
+library(mclust)
+library(seqinr)
+library(progress)
+library(transport)
+library(GEOquery)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+
+bench_raw_dir <- glue("{wkdir}/data/input/airr/benchmark")
+bench_processed_dir <- glue("{wkdir}/data/interim/airr/benchmark")
+
+accession <- "GSE201267"
+fasta_dir <- glue("{bench_processed_dir}/{accession}")
+embd_dir <- glue("{bench_processed_dir}/{accession}/embeddings")
+compiled_dir <- glue("{embd_dir}/compiled")
+analysis_res_dir <- glue("{bench_processed_dir}/GSE201267/analysis_results")
+
+```
+
+
+In this notebook, we analyze splenic TCR and BCR repertoires from mice immunized with one of three SARS-CoV-2 mRNA variants or PBS control. We use the AIRR-AlignR pipeline to explore pLM embedded sequences from a list of models. We then compile the embeddings into a single RDS file for each group of data.
+
+[Paper source:](https://www.sciencedirect.com/science/article/pii/S2666379122001598)
+
+
+Setting file and folder paths for the analysis
+```{r, eval=FALSE}
+
+dir.create(bench_raw_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(bench_processed_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(fasta_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(embd_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(compiled_dir, showWarnings = FALSE, recursive = TRUE)
+
+model_list <- c(
+  "esm2_t12_35M",
+  "esm2_t33_650M",
+  "ProtT5-XL",
+  "ProstT5",
+  "Ankh",
+  "Ankh-Large"
+)
+
+# create subdirectories for each model
+model_list %>%
+  purrr::walk(
+    ~ dir.create(
+      glue("{embd_dir}/{.x}"),
+      showWarnings = FALSE,
+      recursive = TRUE
+    )
+  )
+
+```
+
+Accessing Bulk TCR/BCR-seq data from GEO
+
+```{r, eval=FALSE}
+
+# Access GEO data for the study
+gse <- getGEO(accession, GSEMatrix =TRUE, getGPL=FALSE)
+gseData <- gse[[1]]
+
+# Download sample metadata
+metadata <- pData(phenoData(gseData))
+metadata %<>%
+  janitor::clean_names() %>%
+  mutate(
+    cell_type_ch1 = gsub(" ", "", cell_type_ch1),
+    treatment_ch1 = gsub(" ", "-", treatment_ch1),
+    group_dose =
+      glue(
+        "{cell_type_ch1}_{treatment_ch1}"
+      ),
+    group = case_when(
+      grepl("-", group_dose) ~
+        strex::str_before_first(group_dose, "-"),
+      TRUE ~ group_dose
+    )
+  ) %>%
+  glimpse()
+
+write.csv(metadata,
+  file =
+    glue("{bench_raw_dir}/GSE201267/GSE201267_metadata.csv"),
+    quote = TRUE,
+    row.names = FALSE
+)
+
+#' pull down the supplementary files from GEO
+#' These VDJ report files contain the TCR sequence data
+supp_files <- getGEOSuppFiles(accession,
+  makeDirectory = TRUE,
+  baseDir = bench_raw_dir
+)
+
+# Uncompress tar file
+shell_do(
+  glue(
+    " tar xvf {bench_raw_dir}/{accession}/{accession}.tar ."
+  )
+)
+
+# unzip individual files
+list.files(
+  glue("{bench_raw_dir}/{accession}"),
+  full.names = TRUE,
+  pattern = ".tsv.gz"
+) %>%
+  purrr::map(
+    ~ shell_do(
+      glue("gunzip {.}")
+    )
+  )
+
+
+```
+
+Exploring sample metadata
+
+```{r}
+
+metadata <- read.csv(
+  file = glue("{bench_raw_dir}/{accession}/{accession}_metadata.csv"),
+  stringsAsFactors = FALSE
+)
+
+metadata %>% DT::datatable(
+  extensions = c('Buttons', 'ColReorder', 'FixedHeader', 'Scroller'),
+  options = list(
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf'),
+    scrollX = TRUE,
+    scrollY = 400,
+    scroller = TRUE,
+    colReorder = TRUE,
+    fixedHeader = TRUE
+  )
+)
+
+```
+
+
+Next, we will extract the sequence data from the VDJ reports, select for high quality functional sequences, and format the data into fasta files.
+
+
+```{r, eval=FALSE}
+
+# function to read in tsv file, extract full length aa,
+# and name sequences as list
+format_vdj_aa <- function(file) {
+  vdj_aa <- read_tsv(file) %>%
+    dplyr::mutate(
+      sid = basename(vdj_reports[1]) %>%
+        stringr::str_remove("_airr_rearrangement.tsv")
+    ) %>%
+    tibble::rownames_to_column("rowid") %>%
+    dplyr::mutate(
+      sid = glue("{rowid}_{sid}_{junction_aa}_{duplicate_count}")
+    ) %>%
+    filter(
+      productive,
+      !grepl("\\*", sequence_aa)
+    )
+  return(vdj_aa)
+}
+
+vdj_reports <- list.files(
+  glue("{bench_raw_dir}/{accession}"),
+  full.names = TRUE,
+  pattern = ".tsv"
+)
+
+#' loop through each tsv file, extract full length aa,
+#' trim non-productive sequences with any stop codon
+#' and write out as fasta files
+vdj_reports %>%
+  purrr::walk( ~ {
+    file <- .x
+    vdj_aa <- format_vdj_aa(file)
+    seqinr::write.fasta(
+      sequences = as.list(vdj_aa$sequence_aa),
+      names = vdj_aa$sid,
+      file.out = glue("{fasta_dir}/", 
+        "{strex::str_before_first(basename(file), '_')}.fasta"),
+      as.string = TRUE
+      )
+    })
+
+```
+
+Embedding sequences using the a list of pLM models
+
+```{r, eval=FALSE}
+# generating a data-frame of parameters to run embedding in parallel
+batchtools_params <-
+    expand.grid(
+        c(list.files(fasta_dir, pattern = ".fasta", full.names = TRUE)),
+        model_list
+    ) %>%
+    dplyr::mutate_all(as.character) %>%
+    dplyr::rename(fasta = Var1, model = Var2) %>%
+    dplyr::mutate(
+        run_name = basename(fasta) %>% str_remove(".fasta"),
+        output_dir = glue("{embd_dir}/{model}")
+    ) %>%
+    dplyr::mutate(
+        output_exists = file.exists(
+            glue("{output_dir}/{run_name}_{model}_AVG.csv")),
+        output_size = case_when(
+            output_exists ~ file.size(
+                glue("{output_dir}/{run_name}_{model}_AVG.csv")), 
+            TRUE ~ 0
+        )
+    ) %>%
+    dplyr::filter(output_size < 10) %>%
+    dplyr::select(-c(output_exists, output_size)) %>%
+    glimpse()
+
+# configure registry ----
+cluster_run <- glue("{get_time()}_TRILL_embed_AIRR")
+message("\n\nRUNNING:  ", cluster_run, "\n")
+breg <- makeRegistry(
+  file.dir = glue(
+    "{wkdir}/.cluster_runs/",
+    cluster_run
+  ),
+  seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+  template = glue("{wkdir}/batchtools_templates/batchtools-trill-embed.tmpl"),
+  scheduler.latency = 0.1,
+  fs.latency = 1
+)
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = trill_embed,
+  args = batchtools_params,
+  reg = breg
+)
+jobs[, chunk := chunk(job.id, chunk.size = 1)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = 60,
+    memory_gpu = 30000,
+    ncpus = 2,
+    ngpus = 1,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+Loop through groups of data and compile embeddings into RDS files
+
+```{r, eval=FALSE}
+
+model_list <- c(
+  "esm2_t12_35M",
+  "esm2_t33_650M",
+  "ProtT5-XL",
+  "ProstT5",
+  "Ankh",
+  "Ankh-Large"
+)
+
+future::plan("multisession", workers = 16)
+for (model in model_list) {
+  embd_files <- list.files(
+    path = glue("{embd_dir}/{model}"),
+    pattern = ".csv",
+    full.names = TRUE
+  )
+  paths_df <- data.frame(path = embd_files) %>%
+    mutate(
+      geo_accession = basename(path) %>% str_remove(glue("_{model}_AVG.csv"))
+    )
+
+  for (grp in unique(metadata$group)) {
+    output <- glue("{compiled_dir}/{grp}__{model}.rds")
+
+    if (file.exists(output)) next
+    message("Processing: ", model, " - ", grp, "...")
+
+    meta_sub <- metadata %>%
+      left_join(paths_df, by = "geo_accession") %>%
+      filter(group == grp)
+
+    agg_embd <- meta_sub$path %>%
+      purrr::set_names(basename(.)) %>%
+      furrr::future_map(
+        ~ read.csv(.x) %>% as.data.table()
+      ) %>%
+      bind_rows(.id = "path") %>% 
+      mutate(group = grp)
+    saveRDS(agg_embd, output)
+  }
+}
+
+```
+
+
+### Analysis 
+
+Loading ProstT5 model embeddings for all TCR data, and formatting into dlist object.
+
+```{r, eval=FALSE}
+model <- "ProstT5"
+groups_align <- c(
+  "Tcell_PBS",
+  "Tcell_B.1.351", 
+  "Tcell_WA1", 
+  "Tcell_B.1.617"
+)
+
+res <- groups_align %>%
+  purrr::map(
+    ~ readRDS(
+      glue("{compiled_dir}/{.}__{model}.rds")
+    ) %>%
+      distinct() %>%
+      mutate(Label = 
+        glue("{gsub('_AVG.csv', '', path)}_{Label}__{group}")) %>%
+      dplyr::select(-path) %>% 
+      # TODO: quick fix for duplicate labels
+      dplyr::group_by(Label) %>%
+      dplyr::slice_sample(n = 1) %>% 
+      dplyr::ungroup()
+      ) %>%
+    bind_rows() %>%
+    glimpse()
+
+dlist <- res %>%
+  distinct() %>%
+  column_to_rownames("Label") %>%
+  split_train_test(
+    m = .,
+    split_col = "group",
+    remove_cols = c("group")
+  )
+
+# visualize the data dimensions
+names(dlist) %>%
+  purrr::set_names() %>%
+  purrr::map(~ dim(dlist[[.]]))
+
+```
+
+AIRR-AlignR Exectution. Loop through conditions and align all with PBS Tcell data.
+
+```{r, eval=FALSE}
+reference = "Tcell_PBS"
+
+for (target in c("Tcell_B.1.351", "Tcell_WA1", "Tcell_B.1.617")) {
+  results_dir <- glue(
+    "{analysis_res_dir}/",
+    "REF_{reference}__TARGET_{target}__{model}"
+  )
+  set.seed(42)
+  gmm_aligner(
+    dlist = dlist,
+    ref_group = reference,
+    test_group = target,
+    optimal_cluster_n = 40,
+    threads = 6,
+    n_ica_comp = 30,
+    output_path = results_dir,
+    overwrite = TRUE,
+    verbose = TRUE
+  )
+}
+
+```
+
+
+Aggregating aligned cluster results for all Tcell samples
+```{r, eval=FALSE}
+
+aligned_gmm_paths <- list.dirs(analysis_res_dir) %>%
+  keep(grepl("REF_Tcell_PBS", .) & grepl("_ProstT5", .)) %>% 
+  list.files(., full.names = TRUE) %>% 
+  keep(grepl("GMM-alignment.rds", .))
+
+aligned_gmm_labels <- aligned_gmm_paths %>%
+  purrr::set_names() %>%
+  purrr::map(
+    ~ readRDS(.)[["gmm_class_map"]] %>%
+      dplyr::select(Label, grouping, aligned_mixture)
+  ) %>%
+  bind_rows() %>%
+  distinct() %>% # to remove redundant ref.
+  glimpse()
+
+
+```
+
+Generate a PCA with all Tcell samples
+
+```{r, eval=FALSE}
+d_pca <- prcomp(dplyr::bind_rows(dlist), rank. = 15)
+pca_df <- d_pca[["x"]] %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Label") %>%
+  mutate(group = strex::str_after_last(Label, "__")) %>%
+  glimpse()
+
+saveRDS(
+  pca_df,
+  glue("{bench_processed_dir}/GSE201267/PCA_Tcells_ProstT5_{Sys.Date()}.rds")
+)
+
+```
+
+Plotting PCA data colored by group and aligned mixture
+
+```{r, eval=FALSE}
+pca_df <- readRDS(
+  glue("{bench_processed_dir}/GSE201267/PCA_Tcells_ProstT5_2024-04-01.rds")
+) %>% glimpse()
+
+pca_df %<>%
+  left_join(aligned_gmm_labels, by = "Label") %>%
+  glimpse()
+
+pc_dims <- list(
+  "PC12" = c("PC1", "PC2"),
+  "PC23" = c("PC3", "PC2")
+)
+
+p_fig <- list()
+for (color_var in c("group", "aligned_mixture")) {
+  for (dims in names(pc_dims)) {
+    p_fig[[glue("{color_var}_{dims}")]] <- pca_df %>%
+      ggpca(
+        color_by = color_var,
+        x = pc_dims[[dims]][[1]],
+        y = pc_dims[[dims]][[2]]
+      )
+    ggsave(p_fig[[glue("{color_var}_{dims}")]],
+      file = glue(
+        "{wkdir}/figures/AIRR/benchmarks/",
+        "PCA_Tcells_ProstT5_{dims}_colored-{color_var}_{Sys.Date()}.png"
+      ),
+      width = 9, height = 6
+    )
+  }
+}
+
+p_groups <- p_fig$group_PC12 %>% aplot::insert_right(p_fig$group_PC23)
+p_mix <- p_fig$aligned_mixture_PC12 %>% 
+aplot::insert_right(p_fig$aligned_mixture_PC23)
+# p_all <- p_groups %>% aplot::insert_bottom(p_mix)
+
+ggsave(p_groups,
+  file = glue(
+    "{wkdir}/figures/AIRR/benchmarks/",
+    "PCA_Tcells_ProstT5_group-colored_{Sys.Date()}.png"
+  ),
+  width = 13, height = 6
+)
+
+ggsave(p_mix,
+  file = glue(
+    "{wkdir}/figures/AIRR/benchmarks/",
+    "PCA_Tcells_ProstT5_mixture-colored_{Sys.Date()}.png"
+  ),
+  width = 14, height = 6
+)
+
+
+```
+
+
+
+![PCA colored by GMM component](../figures/AIRR/benchmarks/PCA_Tcells_ProstT5_mixture-colored_2024-04-01.png){#fig-pca-group}
+
+
+![PCA colored by group](../figures/AIRR/benchmarks/PCA_Tcells_ProstT5_group-colored_2024-04-01.png){#fig-pca-group}
+
+
+Parameter analysis of GMM components
+
+```{r, eval=FALSE}
+
+# parameter analysis of GMMs across groups
+
+aligned_gmm_labels <- aligned_gmm_paths %>%
+  purrr::set_names() %>%
+  purrr::map(
+    ~ readRDS(.)[["gmm_class_map"]] %>%
+      dplyr::select(Label, grouping, aligned_mixture)
+  ) %>%
+  bind_rows() %>%
+  distinct() %>% # to remove redundant ref.
+  glimpse()
+
+# Aggregating aligned cluster results for all Tcell samples
+analysis_dirs <- list.dirs(analysis_res_dir) %>%
+  keep(grepl("REF_Tcell_PBS", .) & grepl("_ProstT5", .))
+gmm_param_analysis_df <- tibble()
+
+for (dir in analysis_dirs) {
+  pair_map_df <- readRDS(glue("{dir}/GMM-alignment.rds"))$pair_map_df
+  gmm_res <- readRDS(glue("{dir}/GMMs.rds"))
+  gmm_groups <- names(gmm_res)
+
+  pair_map_clean_plot <- calculate_gmm_param_analysis(
+    pair_map_df = pair_map_df,
+    gmm_ref = gmm_res[[1]],
+    gmm_test = gmm_res[[2]]
+  ) %>%
+    mutate_at(vars(ref_components, test_components), as.character) %>%
+    mutate(
+      analysis_dir = dir,
+      gmm1 = gmm_groups[1],
+      gmm2 = gmm_groups[2],
+    ) %>%
+    glimpse()
+  gmm_param_analysis_df %<>% bind_rows(pair_map_clean_plot)
+}
+
+gmm_param_analysis_df %>% glimpse
+
+p_du <- gmm_param_analysis_df %>%
+  ggplot(aes(x = fct_reorder(ref_components, delta_w), y = delta_mu)) +
+  geom_point(aes(color = gmm2), size = 2) +
+  coord_flip() +
+  scale_color_npg() +
+    labs(
+      color = NULL,
+      x = "Aligned Mixture",
+      y = expression(Delta * mu[i])) +
+    theme_light()
+
+p_w <- gmm_param_analysis_df %>%
+    ggplot(aes(x = fct_reorder(ref_components, delta_w), y = delta_w)) +
+    geom_point(aes(color = gmm2), size = 2) +
+    coord_flip() +
+    scale_color_npg() +
+    labs(
+      color = NULL,
+      x = NULL,
+      y = expression(Delta * omega[i])) +
+    theme_light()
+
+p_sigma <- gmm_param_analysis_df %>%
+    ggplot(aes(x = fct_reorder(ref_components, delta_w), y = delta_sigma)) +
+    geom_point(aes(color = gmm2), size = 2) +
+    coord_flip() +
+    scale_color_npg() +
+    labs(
+      color = NULL,
+      x = NULL,
+      y = expression(Delta * Sigma[i])) +
+    theme_light()
+
+p_gmm_params <- p_du %>%
+  aplot::insert_right(p_w) %>%
+  aplot::insert_right(p_sigma)
+
+ggsave(p_gmm_params,
+  file = glue(
+    "{wkdir}/figures/AIRR/benchmarks/",
+    "Tcells_ProstT5_param-analysis_{Sys.Date()}.png"
+  ),
+  width = 10, height = 7
+)
+
+```
+
+![GMM Parameter Analysis](../figures/AIRR/benchmarks/Tcells_ProstT5_param-analysis_2024-04-01.png){#fig-gmm-param}
+
+Earth movers distance 
+
+```{r, eval=FALSE}
+
+pca_df <- readRDS(
+  glue("{bench_processed_dir}/GSE201267/PCA_Tcells_ProstT5_2024-04-01.rds")) %>%
+  glimpse()
+
+pca_df %>%
+  mutate(sample_id = str_before_first(Label, "_")) %>%
+  pull(sample_id) %>%
+  table()
+
+# Computing earth movers distance between samples
+pca_df_ot <- pca_df %>%
+  mutate(sample_id = str_before_first(Label, "_")) %>%
+  glimpse()
+
+sids <- unique(pca_df_ot$sample_id)
+
+pca_df_ot %>% glimpse
+pca_df_ot$sample_id %>% table()
+
+
+# computing all unique combinations of sample pairs
+sid_pairs <- expand.grid(sids, sids) %>%
+  as.data.frame() %>%
+  dplyr::rename(
+    sample_id1 = Var1,
+    sample_id2 = Var2
+  )
+
+# 100 random subsamples with 50 rec per match
+tic()
+future::plan("multisession", workers = 40)
+earth_movers_distance_df <- furrr::future_map2_dfr(
+    sid_pairs$sample_id1, sid_pairs$sample_id2,
+    ~ run_earth_movers_subsamples(
+      pca_df_ot, s1 = .x, s2 = .y, n = 1000, iter = 50,
+      cols_to_filter = c("sample_id", "Label", "group"),
+      split_var = "sample_id"
+      ),
+      seed=TRUE
+)
+toc()
+
+saveRDS(
+    earth_movers_distance_df,
+    glue(
+        "{wkdir}/data/interim/airr/benchmark/GSE201267",
+        "earth_movers_distance_df_{model}_{Sys.Date()}.rds"
+    )
+)
+
+```
+
+Plotting EMD pairs.
+
+```{r, eval=FALSE}
+
+earth_movers_distance_df <- readRDS(
+    glue(
+        "{wkdir}/data/interim/airr/benchmark/GSE201267",
+        "earth_movers_distance_df_{model}_2024-04-17.rds"
+    )
+)
+
+earth_movers_distance_df %>% glimpse
+
+earth_movers_distance_df_plot <- earth_movers_distance_df %>% 
+  left_join(sid_annot %>% dplyr::rename("group1" = group),
+    by = c("id1" = "sample_id")
+  ) %>%
+  left_join(sid_annot %>% dplyr::rename("group2" = group),
+    by = c("id2" = "sample_id")
+  ) %>%
+      mutate(group_pair = case_when(
+        (group1 == group2) & (group1 == "Tcell_PBS") ~ "Within PBS",
+        (group1 == group2) & (group1 == "Tcell_B.1.351") ~ "Within B.1.351",
+        (group1 == group2) & (group1 == "Tcell_WA1") ~ "Within WA1",
+        (group1 == group2) & (group1 == "Tcell_B.1.617") ~ "Within B.1.617",
+        # other
+        group1 == "Tcell_PBS" & group2 == "Tcell_B.1.351" ~ "PBS to B.1.351",
+        group1 == "Tcell_PBS" & group2 == "Tcell_B.1.617" ~ "PBS to B.1.617",
+        group1 == "Tcell_PBS" & group2 == "Tcell_WA1" ~ "PBS to WA1",
+        TRUE ~ "Other"
+      )) %>%
+      # pull(group_pair) %>% table
+    glimpse()
+
+
+p_emd_dist <- earth_movers_distance_df_plot %>%
+  filter(group_pair != "Other") %>%
+  filter(id1 != id2) %>%
+  ggplot(aes(x = group_pair, y = median)) +
+  geom_boxplot(alpha = 0.5, outlier.alpha = 0) +
+  geom_point(position = position_jitter(width = 0.2)) +
+  labs(x = NULL, y = "Median Earth Movers Distance") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(p_emd_dist,
+  file = glue(
+    "{wkdir}/figures/AIRR/benchmarks/",
+    "Tcells_ProstT5_EMD_distributions_{Sys.Date()}.png"
+  ),
+  width = 5, height = 5
+)
+
+```
+
+
+![GMM Parameter Analysis](../figures/AIRR/benchmarks/Tcells_ProstT5_EMD_distributions_2024-04-01.png){#fig-emd}
+
+
+```{r}
+sessionInfo()
+```

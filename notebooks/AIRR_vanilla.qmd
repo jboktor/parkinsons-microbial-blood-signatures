@@ -1,0 +1,3136 @@
+---
+title: "Adaptive Immune Receptor Repertoire in Parkinson's Disease: Optimal Transport and Probabilistic Modeling Approaches for Latent Space Embeddings"
+editor: source
+author: "Joe Boktor"
+date: '2023-12-07'
+bibliography: references.bib
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    grid:
+      sidebar-width: 300px
+      body-width: 900px
+      margin-width: 300px
+      gutter-width: 1.5rem
+---
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(fastICA)
+library(parallelDist)
+library(mclust)
+library(seqinr)
+library(progress)
+library(transport)
+library(immunarch)
+library(nlme)
+library(broom.mixed)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+library(scico)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+source(paste0(src_dir, "/R_scripts/_airr_analyze-permanova.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+imm_plots_dir <- glue("{wkdir}/figures/AIRR/immunarch")
+hla_dir <- glue("{wkdir}/data/interim/airr/arcasHLA/analysis_cleaned")
+hla_pca_dir <- glue("{hla_dir}/pca_data")
+deconv_outdir <- glue("{wkdir}/data/interim/celltype_deconvolution")
+
+```
+
+
+# Exploratory Analysis
+Reading in metadata
+
+```{r}
+full_meta_df <- readRDS(
+    glue("{wkdir}/data/interim/airr/full_meta_df_2025-06-09.rds")) %>% 
+    glimpse()
+
+mds_tests <- full_meta_df %>%
+    dplyr::select(matches("mds_updrs.*_summary_score")) %>%
+    colnames()
+
+essential_meta <- c(
+    "study", "raw_total_reads", "raw_total_reads_binned",
+    "case_control_other_latest",
+    "DRB1_grouped", "DRB1_risk",
+    "age_at_baseline", "sex", mds_tests
+)
+
+key_meta_df <- full_meta_df %>% 
+    dplyr::select(
+        sample_id, case_control_other_latest,
+        ethnicity, race,
+        visit_month, age_at_baseline, sex, study, participant_id,
+        raw_total_reads, raw_total_reads_binned, DRB1_grouped, DRB1_risk,
+        all_of(mds_tests),
+        contains("x_cell"), contains("epic"), contains("abis")
+    ) %>% 
+    glimpse()
+
+```
+
+
+Is there any difference in sequencing depth between disease groups / study cohorts?
+
+```{r}
+lmm_model_count <- lme(raw_total_reads ~ case_control_other_latest + study,
+    random = ~ 1 | participant_id,
+    data = full_meta_df %>% filter(case_control_other_latest != "Other"),
+    na.action = na.omit
+)
+
+summary(lmm_model_count)
+broom.mixed::tidy(lmm_model_count) %>% 
+    DT::datatable()
+
+# Yes it does look there are sequencing depth differences between disease groups / study cohorts that need to be accounted for.
+lmm_model_tcellreads_xcell <- nlme::lme(
+    tcell_reads_x_cell ~ case_control_other_latest + study,
+    random = ~ 1 | participant_id,
+    data = full_meta_df %>% filter(case_control_other_latest != "Other"),
+    na.action = na.omit
+)
+lmm_model_tcellreads_epic <- nlme::lme(
+    tcell_reads_epic ~ case_control_other_latest + study,
+    random = ~ 1 | participant_id,
+    data = full_meta_df %>% filter(case_control_other_latest != "Other"),
+    na.action = na.omit
+)
+lmm_model_tcellreads_abis <- nlme::lme(
+    tcell_reads_abis ~ case_control_other_latest + study,
+    random = ~ 1 | participant_id,
+    data = full_meta_df %>% filter(case_control_other_latest != "Other"),
+    na.action = na.omit
+)
+
+summary(lmm_model_tcellreads_xcell)
+summary(lmm_model_tcellreads_epic)
+summary(lmm_model_tcellreads_abis)
+
+# It also looks like there are differences in T cell reads between disease groups / study cohorts that need to be accounted for.
+p_seq_depth_dist <- full_meta_df %>% 
+    filter(case_control_other_latest != "Other") %>% 
+    ggplot(aes(y = raw_total_reads, x = case_control_other_latest)) +
+    geom_point(size = 0.2, alpha = 0.75, 
+        position = position_jitter(width = 0.4)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.75, width = 0.5) +
+    facet_wrap(~study) +
+    theme_bw() +
+    scale_y_log10() +
+    labs(y = "Bulk RNA-Seq reads", x = NULL, color = "Quantile") +
+    guides(color = guide_legend(override.aes = list(size = 3))) +
+    theme(legend.position = "top")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/seq_depth_dist_{Sys.Date()}.png"),
+    plot = p_seq_depth_dist,
+    width = 5,
+    height = 4
+)
+
+p_seq_depth_tcell_xcell <- full_meta_df %>% 
+    filter(case_control_other_latest != "Other") %>% 
+    ggplot(aes(y = tcell_reads_x_cell, x = case_control_other_latest)) +
+    geom_point(size = 0.2, alpha = 0.75, 
+        position = position_jitter(width = 0.4)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.75, width = 0.5) +
+    facet_wrap(~study) +
+    theme_bw() +
+    scale_y_log10() +
+    labs(y = "Estimated T-cell reads (xCell)", x = NULL, color = "Quantile") +
+    guides(color = guide_legend(override.aes = list(size = 3))) +
+    theme(legend.position = "top")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/seq_depth_tcell_xcell_{Sys.Date()}.png"),
+    plot = p_seq_depth_tcell_xcell,
+    width = 5,
+    height = 4
+)
+
+p_seq_depth_tcell_abis <- full_meta_df %>% 
+    filter(case_control_other_latest != "Other") %>% 
+    ggplot(aes(y = tcell_reads_abis, x = case_control_other_latest)) +
+    geom_point(size = 0.2, alpha = 0.75, 
+        position = position_jitter(width = 0.4)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.75, width = 0.5) +
+    facet_wrap(~study) +
+    theme_bw() +
+    scale_y_log10() +
+    labs(y = "Estimated T-cell reads (ABIS)", x = NULL, color = "Quantile") +
+    guides(color = guide_legend(override.aes = list(size = 3))) +
+    theme(legend.position = "top")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/seq_depth_tcell_abis_{Sys.Date()}.png"),
+    plot = p_seq_depth_tcell_abis,
+    width = 5,
+    height = 4
+)
+
+p_seq_depth_tcell_epic <- full_meta_df %>% 
+    filter(case_control_other_latest != "Other") %>% 
+    ggplot(aes(y = tcell_reads_epic, x = case_control_other_latest)) +
+    geom_point(size = 0.2, alpha = 0.75, 
+        position = position_jitter(width = 0.4)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.75, width = 0.5) +
+    facet_wrap(~study) +
+    theme_bw() +
+    scale_y_log10() +
+    labs(y = "Estimated T-cell reads (EPIC)", x = NULL, color = "Quantile") +
+    guides(color = guide_legend(override.aes = list(size = 3))) +
+    theme(legend.position = "top")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/seq_depth_tcell_epic_{Sys.Date()}.png"),
+    plot = p_seq_depth_tcell_epic,
+    width = 5,
+    height = 4
+)
+
+```
+
+
+## Sample Summary Plots
+
+Visualzing demographic and clinical data for samples.
+
+```{r}
+# plot the distribution of total samples per participant
+p_sample_counts <- full_meta_df %>% 
+    group_by(participant_id) %>% 
+    dplyr::summarise(n = n()) %>% 
+    left_join(key_meta_df, by = c("participant_id")) %>% 
+    ggplot(aes(x = n, fill = case_control_other_latest)) +
+    geom_bar(position = "stack", width = 0.6) +
+    scale_fill_d3() +
+    theme_bw() +
+    labs(x = "Samples per participant", 
+         y = "Count",
+         fill = "Disease Status")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/sample_counts_{Sys.Date()}.png"),
+    plot = p_sample_counts,
+    width = 4,
+    height = 3.5
+)
+
+baseline_meta <- key_meta_df %>% 
+    select(participant_id, age_at_baseline, case_control_other_latest, sex, study) %>% 
+    distinct()
+
+p_age_density <- baseline_meta %>% 
+    ggplot(aes(x = age_at_baseline, color = case_control_other_latest)) +
+    geom_density(alpha = 0.5, size = 2) +
+    scale_color_d3() +
+    theme_bw() +
+    labs(x = "Age at Baseline",
+         y = "Density",
+         fill = "Disease Status") +
+    theme(legend.position = "none")
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/age_density_{Sys.Date()}.png"),
+    plot = p_age_density,
+    width = 4,
+    height = 3.5
+)
+
+baseline_meta %>%
+    # Plot sex distribution
+    ggplot(aes(x = sex, fill = case_control_other_latest)) +
+    geom_bar(position = "stack", width = 0.6) +
+    scale_fill_d3() +
+    theme_bw() +
+    labs(x = "Sex", 
+         y = "Count",
+         fill = "Disease Status") -> p_sex_dist
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/sex_dist_{Sys.Date()}.png"),
+    plot = p_sex_dist,
+    width = 3.5,
+    height = 3.5
+)
+
+# Plot study distribution
+baseline_meta %>%
+    ggplot(aes(x = study, fill = case_control_other_latest)) +
+    geom_bar(position = "stack", width = 0.6) +
+    scale_fill_d3() +
+    theme_bw() +
+    labs(x = "Study", 
+         y = "Count",
+         fill = "Disease Status") -> p_study_dist
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/sample_summary/study_dist_{Sys.Date()}.png"),
+    plot = p_study_dist,
+    width = 4,
+    height = 3.5
+)
+
+```
+
+
+Visualizing samples x timepoints included in the TRUST4 analysis.
+
+```{r}
+time_point_meta <- full_meta_df %>% 
+    select(participant_id, sample_id, visit_month, study, case_control_other_latest) %>% 
+    distinct()
+
+p_repertoire_samples <- time_point_meta %>% 
+    ggplot(aes(x = visit_month,
+        y = fct_reorder2(participant_id, visit_month, case_control_other_latest)
+    )) +
+    geom_line(aes(color = case_control_other_latest, group = participant_id)) +
+    geom_point() +
+    facet_grid(study ~ ., scales = "free_y", space = "free") +
+    scale_color_d3() +
+    theme_bw() +
+    labs(x = "Visit Month", y = "Participant ID") +
+    theme(axis.text.y = element_blank(), legend.position = "bottom")
+
+ggsave(
+    glue("{wkdir}/figures/AIRR/",
+    "TRUST4-repertoire-samples_{Sys.Date()}.png"),
+    p_repertoire_samples,
+    width = 9, height = 11
+)
+
+```
+
+
+## TRUST4 Data Processing
+
+Loading TRUST4 data and filtering TCRB receptors for full length, in-frame, annotated V/J genes.
+
+```{r}
+trust4_reports <- fread(
+    glue("{wkdir}/data/interim/airr/2023-05-04_TRUST4-reports-all.csv"), 
+    header = TRUE) %>%
+    dplyr::select(-V1) %>% 
+    glimpse()
+
+trust4_reports_tcrb <- trust4_reports %>% 
+    filter(C == "TRBC") %>% 
+    filter(V != "." & J != ".") %>% 
+    filter(CDR3aa != "out_of_frame") %>% 
+    filter(!grepl("_", CDR3aa)) %>%  
+    glimpse()
+
+trust4_reports_tcrb %>% glimpse()
+trust4_reports_tcrb$cid_full_length %>% table()
+
+# trust4_reports_tcrb$CDR3aa %>% unique %>% length
+# trust4_reports_tcrb$CDR3aa %>% length
+```
+
+Resulting dataset contains 5,463,968 TCRB receptors 
+
+
+Visualizing the distribution of TCR and BCR receptor counts per sample and donor
+
+
+```{r}
+trust4_reports_clean_df <- trust4_reports %>%
+    filter(CDR3aa != "out_of_frame") %>%
+    filter(!grepl("_", CDR3aa)) %>%
+    filter(C != ".") %>%
+    left_join(key_meta_df, by = c("sample_id")) %>%
+    glimpse()
+
+sid_counts <- trust4_reports_clean_df %>%
+    group_by(sample_id, C) %>%
+    dplyr::summarise(n = n()) %>%
+    mutate(grouping = "sample") %>%
+    dplyr::rename(unit = sample_id) %>%
+    glimpse()
+pid_counts <- trust4_reports_clean_df %>%
+    group_by(participant_id, C) %>%
+    dplyr::summarise(n = n()) %>%
+    mutate(grouping = "donor") %>%
+    dplyr::rename(unit = participant_id) %>%
+    glimpse()
+
+rec_counts_df <- bind_rows(sid_counts, pid_counts) %>%
+    mutate(cell_type_origin = case_when(
+        grepl("TR", C) ~ "TCR",
+        grepl("IG", C) ~ "BCR",
+        TRUE ~ "ERROR"
+    )) %>%
+    glimpse()
+
+rec_counts_df$C %>% table()
+
+p_ecdf <- rec_counts_df %>%
+    mutate(cell_type_origin = factor(cell_type_origin, levels = c("TCR", "BCR"))) %>%
+    mutate(grouping = factor(grouping, levels = c("sample", "donor"))) %>%
+    ggplot(aes(n)) +
+    stat_ecdf(aes(color = C), geom = "step", linewidth = 1, alpha = 0.8) +
+    facet_grid(cell_type_origin ~ grouping, scales = "free") +
+    scale_x_log10() +
+    theme_bw() +
+    labs(
+        x = "Number of Receptors",
+        y = "Cumulative Proportion",
+        color = NULL
+    ) +
+    scale_color_manual(values = c(
+        "IGHA1" = "#99d8c9",
+        "IGHA2" = "#2ca25f",
+        "IGKC" = "#e31a1c",
+        "IGLC" = "#ff7f00",
+        "IGHD" = "#b15928",
+        "IGHE" = "#fed976",
+        "IGHG1" = "#bfd3e6",
+        "IGHG2" = "#8c96c6",
+        "IGHG3" = "#8856a7",
+        "IGHG4" = "#810f7c",
+        "IGHM" = "#fb9a99",
+        "TRAC" = "#a6cee3",
+        "TRBC" = "#1f78b4",
+        "TRDC" = "#fb9a99",
+        "TRGC" = "#e31a1c"
+    ))
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/ecdf_TRUST4_{Sys.Date()}.png"),
+    plot = p_ecdf,
+    width = 7,
+    height = 4.5
+)
+
+p_ecdf_TCRS <- rec_counts_df %>%
+    filter(cell_type_origin == "TCR") %>% 
+    mutate(grouping = factor(grouping, levels = c("sample", "donor"))) %>%
+    ggplot(aes(n)) +
+    stat_ecdf(aes(color = C), geom = "step", linewidth = 1, alpha = 0.8) +
+    facet_grid(cell_type_origin ~ grouping, scales = "free") +
+    scale_x_log10() +
+    theme_bw() +
+    labs(
+        x = "Number of Receptors",
+        y = "Cumulative Proportion",
+        color = NULL
+    ) +
+    scale_color_manual(values = c(
+        "TRAC" = "#a6cee3",
+        "TRBC" = "#1f78b4",
+        "TRDC" = "#fb9a99",
+        "TRGC" = "#e31a1c"
+    ))
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/ecdf_TRUST4_TCRS_{Sys.Date()}.png"),
+    plot = p_ecdf_TCRS,
+    width = 7,
+    height = 3
+)
+
+```
+
+
+
+Visualizing clonotypes and clonal volume
+
+```{r}
+trust4_reports_tcrb %>% glimpse()
+key_meta_df %>% glimpse()
+
+trust4_reports_tcrb_df <- trust4_reports_tcrb %>%
+    left_join(key_meta_df) %>%
+    filter(case_control_other_latest != "Other") %>%
+    glimpse()
+
+clonotype_counts_df <- trust4_reports_tcrb_df %>%
+    distinct() %>%
+    group_by(sample_id) %>%
+    dplyr::summarise(clonotype_count = n()) %>%
+    left_join(key_meta_df) %>%
+    glimpse()
+clonotype_volume_df <- trust4_reports_tcrb_df %>%
+    group_by(sample_id) %>%
+    dplyr::summarise(clonotype_volume = sum(`#count`)) %>%
+    left_join(key_meta_df) %>%
+    glimpse()
+
+# LMM model stats
+lmm_model_count <- lme(clonotype_count ~ case_control_other_latest + age_at_baseline + sex + tcell_reads_epic,
+    random = ~ 1 | participant_id,
+    data = clonotype_counts_df
+)
+lmm_model_volume <- lme(clonotype_volume ~ case_control_other_latest + age_at_baseline + sex + tcell_reads_epic,
+    random = ~ 1 | participant_id,
+    data = clonotype_volume_df
+)
+summary(lmm_model_count)
+summary(lmm_model_volume)
+count_res_df <- broom.mixed::tidy(lmm_model_count) %>% print()
+volume_res_df <- broom.mixed::tidy(lmm_model_volume) %>% print()
+
+count_pval <- count_res_df %>%
+    filter(term == "case_control_other_latestCase") %>%
+    pull(p.value) %>%
+    signif(2)
+volume_pval <- volume_res_df %>%
+    filter(term == "case_control_other_latestCase") %>%
+    pull(p.value) %>%
+    signif(2)
+
+p_clonotype_count <- clonotype_counts_df %>%
+    ggplot(aes(x = case_control_other_latest, y = clonotype_count)) +
+    geom_point(aes(color = case_control_other_latest),
+        size = 0.3,
+        alpha = 0.2, position = position_jitter(width = 0.3)
+    ) +
+    geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+    theme_bw() +
+    scale_color_d3() +
+    labs(x = NULL, y = "Clonal Count") +
+    theme(legend.position = "none")
+    # # Add p-value annotation using ggsignif package
+    # ggsignif::geom_signif(
+    #     comparisons = list(c("Control", "Case")),
+    #     annotations = glue("*\np = {count_pval}"),
+    #     y_position = max(clonotype_counts_df$clonotype_count) * 0.8,
+    #     tip_length = 0,
+    #     vjust = 0.6
+    # )
+p_clonotype_volume <- clonotype_volume_df %>%
+    ggplot(aes(x = case_control_other_latest, y = clonotype_volume)) +
+    geom_point(aes(color = case_control_other_latest),
+        size = 0.3,
+        alpha = 0.2, position = position_jitter(width = 0.3)
+    ) +
+    geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+    theme_bw() +
+    scale_color_d3() +
+    labs(x = NULL, y = "Clonal Volume") +
+    theme(legend.position = "none")
+    # # Add p-value annotation using ggsignif package
+    # ggsignif::geom_signif(
+    #     comparisons = list(c("Control", "Case")),
+    #     annotations = glue("ns\np = {volume_pval}"),
+    #     y_position = max(clonotype_volume_df$clonotype_volume) * 0.8,
+    #     tip_length = 0,
+    #     vjust = 0.6
+    # )
+
+p_clonotype_count_volume <- p_clonotype_count + p_clonotype_volume
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/clonotype_count_volume_{Sys.Date()}.png"),
+    plot = p_clonotype_count_volume,
+    width = 3.5,
+    height = 3.5
+)
+
+# ggsave(
+#     filename = glue("{wkdir}/figures/AIRR/clonotype_count_{Sys.Date()}.png"),
+#     plot = p_clonotype_count,
+#     width = 2,
+#     height = 3.5
+# )
+# ggsave(
+#     filename = glue("{wkdir}/figures/AIRR/clonotype_volume_{Sys.Date()}.png"),
+#     plot = p_clonotype_volume,
+#     width = 2,
+#     height = 3.5
+# )
+
+clonotype_volume_df %>% glimpse()
+clonotype_counts_df %>% glimpse()
+
+p_clonotype_count_raw_reads <- clonotype_counts_df %>%
+    ggplot(aes(x = clonotype_count, y = raw_total_reads, color = study)) +
+    geom_point(alpha = 0.1, size = 0.4) +
+    geom_smooth(method = "lm", se = TRUE) +
+    theme_bw() +
+    scale_x_log10() +
+    scale_y_log10() +
+    scale_color_nejm() +
+    ggpubr::stat_regline_equation(
+        label.x.npc = "left",
+        label.y.npc = "top"
+    ) +
+    ggside::geom_xsidedensity(alpha = 0.5, show.legend = FALSE) +
+    ggside::geom_ysidedensity(alpha = 0.5, show.legend = FALSE) +
+    ggside::scale_xsidey_continuous(breaks = NULL) +
+    ggside::scale_ysidex_continuous(breaks = NULL) +
+    coord_fixed() +
+    labs(x = "Clonal Count", y = "Bulk RNAseq Reads") +
+    theme(legend.position = "none")
+
+p_clonotype_volume_raw_reads <- clonotype_volume_df %>%
+    ggplot(aes(x = clonotype_volume, y = raw_total_reads, color = study)) +
+    geom_point(alpha = 0.1, size = 0.4) +
+    geom_smooth(method = "lm", se = TRUE) +
+    theme_bw() +
+    scale_x_log10() +
+    scale_y_log10() +
+    scale_color_nejm() +
+    ggpubr::stat_regline_equation(
+        label.x.npc = "left",
+        label.y.npc = "top"
+    ) +
+    ggside::geom_xsidedensity(alpha = 0.5, show.legend = FALSE) +
+    ggside::geom_ysidedensity(alpha = 0.5, show.legend = FALSE) +
+    ggside::scale_xsidey_continuous(breaks = NULL) +
+    ggside::scale_ysidex_continuous(breaks = NULL) +
+    coord_fixed() +
+    labs(x = "Clonal Volume", y = NULL)
+
+p_clonotype_volumecount_raw_reads <- p_clonotype_count_raw_reads + p_clonotype_volume_raw_reads
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/clonotype_volume_count_raw_reads_{Sys.Date()}.png"),
+    plot = p_clonotype_volumecount_raw_reads,
+    width = 10,
+    height = 3.5
+)
+
+p_clonotype_count_tcell_reads <- clonotype_counts_df %>%
+    ggplot(aes(x = clonotype_count, y = tcell_reads_abis, color = study)) +
+    geom_point(alpha = 0.1, size = 0.4) +
+    geom_smooth(method = "lm", se = TRUE) +
+    theme_bw() +
+    scale_x_log10() +
+    scale_y_log10() +
+    scale_color_nejm() +
+    ggpubr::stat_regline_equation(
+        label.x.npc = "left",
+        label.y.npc = "top"
+    ) +
+    ggside::geom_xsidedensity(alpha = 0.5, show.legend = FALSE) +
+    ggside::geom_ysidedensity(alpha = 0.5, show.legend = FALSE) +
+    ggside::scale_xsidey_continuous(breaks = NULL) +
+    ggside::scale_ysidex_continuous(breaks = NULL) +
+    coord_fixed() +
+    labs(x = "Clonal Count", y = "Estimated T-Cell Reads (ABIS)") +
+    theme(legend.position = "none")
+
+p_clonotype_volume_tcell_reads <- clonotype_volume_df %>%
+    ggplot(aes(x = clonotype_volume, y = tcell_reads_abis, color = study)) +
+    geom_point(alpha = 0.1, size = 0.4) +
+    geom_smooth(method = "lm", se = TRUE) +
+    theme_bw() +
+    scale_x_log10() +
+    scale_y_log10() +
+    scale_color_nejm() +
+    ggpubr::stat_regline_equation(
+        label.x.npc = "left",
+        label.y.npc = "top"
+    ) +
+    ggside::geom_xsidedensity(alpha = 0.5, show.legend = FALSE) +
+    ggside::geom_ysidedensity(alpha = 0.5, show.legend = FALSE) +
+    ggside::scale_xsidey_continuous(breaks = NULL) +
+    ggside::scale_ysidex_continuous(breaks = NULL) +
+    coord_fixed() +
+    labs(x = "Clonal Volume", y = NULL)
+
+p_clonotype_volumecount_tcell_reads <- p_clonotype_count_tcell_reads + p_clonotype_volume_tcell_reads
+
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/clonotype_volume_count_tcell_reads_{Sys.Date()}.png"),
+    plot = p_clonotype_volumecount_tcell_reads,
+    width = 10,
+    height = 3.5
+)
+
+
+# Patchwork version
+seq_depth_plots <- p_clonotype_volumecount_raw_reads /p_clonotype_volumecount_tcell_reads 
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/clonotype_volume_count_raw_reads_&_tcell_reads_{Sys.Date()}.png"),
+    plot = seq_depth_plots,
+    width = 12,
+    height = 8
+)
+
+# # aplot version
+# p_clonotype_volumecount_tcell_reads_aplot <- p_clonotype_count_tcell_reads  %>%  aplot::insert_right(p_clonotype_volume_tcell_reads)
+# p_clonotype_volumecount_raw_reads_aplot <- p_clonotype_count_raw_reads  %>%  aplot::insert_right(p_clonotype_volume_raw_reads)
+# seq_depth_plots <- p_clonotype_volumecount_raw_reads_aplot  %>%  aplot::insert_bottom(p_clonotype_volumecount_tcell_reads_aplot)
+
+# ggsave(
+#     filename = glue("{wkdir}/figures/AIRR/clonotype_volume_count_raw_reads_&_tcell_reads_{Sys.Date()}.png"),
+#     plot = seq_depth_plots,
+#     width = 10,
+#     height = 8
+# )
+
+```
+
+
+
+### Formatting TRUST4 data for Immunarch
+```{r}
+immunarch_formatted <- trust4_reports %>%
+  dplyr::rename(
+    Clones = `#count`,
+    Proportion = frequency,
+    CDR3.nt = CDR3nt,
+    CDR3.aa = CDR3aa,
+    V.name = V,
+    D.name = D,
+    J.name = J
+  ) %>%
+  dplyr::mutate(
+    VJ.ins = NA_character_,
+    VD.ins = NA_character_,
+    DJ.ins = NA_character_,
+    V.end = NA_integer_,
+    D.start = NA_integer_,
+    D.end = NA_integer_,
+    J.start = NA_integer_,
+    Sequence = NA_character_
+  ) %>%
+  glimpse()
+
+# Split data into immunarch format and metadata
+immunarch_data <- immunarch_formatted %>%
+  dplyr::select(Clones, Proportion, CDR3.nt, CDR3.aa, V.name, D.name, J.name,
+                VJ.ins, VD.ins, DJ.ins, Sequence)
+
+metadata <- immunarch_formatted %>%
+  dplyr::select(C, cid, cid_full_length, sample_id) %>% 
+  glimpse()
+
+# Adding in sample metadata
+
+rna_metadata <- readRDS(
+    glue("{wkdir}/data/interim/metadata/2023-07-14_phyloseq-metadata.rds")
+    )$RNASEQ %>%
+    glimpse()
+
+metadata %<>% 
+    left_join(rna_metadata, by = c("sample_id")) %>%
+    glimpse()
+
+# Create list structure expected by immunarch
+immdata <- list(
+  data = split(immunarch_data, immunarch_formatted$sample_id),
+  meta = metadata
+)
+
+saveRDS(
+    immdata,
+    glue("{wkdir}/data/interim/airr/immunarch/immunarch-obj_{Sys.Date()}.rds")
+)
+
+```
+
+
+### 
+
+```{r}
+immdata <- readRDS(
+    glue("{wkdir}/data/interim/airr/immunarch/immunarch-obj_2024-11-21.rds")
+)
+
+#' Computes basic statistics, 
+#' including clones/distributions of lengths and counts.
+#' https://immunarch.com/articles/web_only/v3_basic_analysis.html
+clonal_metrics = c("volume", "count", "len", "clones")
+for (m in clonal_metrics) {
+    message(glue("Calculating {m} clonal metrics"))
+    metric_data <- repExplore(immdata$data, .method = m, .col = c("aa")) %>% 
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{wkdir}/data/interim/airr/immunarch/metrics/",
+            "rep-explore-{m}_{Sys.Date()}.rds"
+            )
+    )
+}
+
+# Exploring Clonality
+# https://immunarch.com/reference/repClonality.html
+clone_mets <- c("clonal.prop", "homeo", "top", "rare")
+for (m in clone_mets) {
+    message(glue("Calculating {m} clonal metrics"))
+    metric_data <- repClonality(immdata$data, .method = m) %>% 
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{wkdir}/data/interim/airr/immunarch/metrics/",
+            "rep-clonality-{m}_{Sys.Date()}.rds"
+            )
+    )
+}
+
+# Gene Usage Analysis
+# https://immunarch.com/reference/geneUsage.html
+gene_metrics <- c("hs.trbv", "HomoSapiens.TRBJ", "macmul.IGHV")
+for (g in gene_metrics) {
+    message(glue("Calculating {g} gene usage metrics"))
+    metric_data <- geneUsage(immdata$data, g) %>%
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{wkdir}/data/interim/airr/immunarch/metrics/",
+            "gene-usage-{g}_{Sys.Date()}.rds"
+            )
+    )
+}
+
+# Analyzing Repertoire Diversity
+# https://immunarch.com/articles/web_only/v6_diversity.html
+div_metrics <- c(
+    "chao1", "hill", "div", "gini.simp", "inv.simp", 
+    "gini", "raref", "d50", 
+    "dxx"
+)
+for (d in div_metrics) {
+    message(glue("Calculating {d} diversity metrics"))
+    metric_data <- repDiversity(immdata$data, .method = d) %>%
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{wkdir}/data/interim/airr/immunarch/metrics/",
+            "rep-diversity-{d}_{Sys.Date()}.rds"
+            )
+    )
+}
+
+
+# TAKES FOREVER !
+# Considering Repertoire Overlap (Metric of Similarity)
+# https://immunarch.com/reference/repOverlap.html
+overlap_methods = c(
+  "jaccard"
+    # "cosine", "morisita", "inc+public", "inc+morisita",
+    # "public", "overlap", "jaccard", "tversky"
+)
+for (m in overlap_methods) {
+    message(glue("Calculating {m} overlap metrics"))
+    metric_data <- repOverlap(immdata$data,
+        .method = m,
+        .downsample = TRUE,
+        .verbose = TRUE
+    ) %>% 
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{wkdir}/data/interim/airr/immunarch/metrics/",
+            "rep-overlap-{m}_{Sys.Date()}.rds"
+            )
+    )
+}
+
+# # TAKES FOREVER !
+# # Considering Repertoire Overlap (Metric of Similarity)
+# # https://immunarch.com/reference/repOverlap.html
+# overlap_methods = c(
+#   "jaccard"
+#     # "cosine", "morisita", "inc+public", "inc+morisita",
+#     # "public", "overlap", "jaccard", "tversky"
+# )
+# for (m in overlap_methods) {
+#     message(glue("Calculating {m} overlap metrics"))
+#     metric_data <- repOverlap(immdata$data,
+#         .method = m,
+#         .downsample = TRUE,
+#         .verbose = TRUE
+#     ) %>% 
+#         glimpse()
+#     saveRDS(
+#         metric_data,
+#         glue("{wkdir}/data/interim/airr/immunarch/metrics/",
+#             "rep-overlap-{m}_{Sys.Date()}.rds"
+#             )
+#     )
+# }
+
+```
+
+### Calculating overlap metrics in parallel
+
+```{r}
+# Function to calculate overlap for a single method
+calculate_overlap <- function(method, immdata_path, wkdir) {
+    require(immunarch)
+    require(glue)
+
+    # Load the immdata object
+    immdata <- readRDS(immdata_path)
+
+    message(glue("Calculating {method} overlap metrics"))
+    metric_data <- repOverlap(
+        immdata$data,
+        .method = method,
+        .downsample = TRUE,
+        .verbose = TRUE
+    )
+    saveRDS(
+        metric_data,
+        glue("{wkdir}/data/interim/airr/immunarch/metrics/",
+            "rep-overlap-{method}_{Sys.Date()}.rds"
+        )
+    )
+}
+
+# Create parameter list for each method
+overlap_methods = c(
+    "cosine", "morisita"
+#   "jaccard", 
+    # "public", "overlap", "jaccard", "tversky"
+)
+
+# Setup batchtools registry
+cluster_run <- glue("{get_time()}_Repertoire_Overlap")
+message("\n\nRUNNING: ", cluster_run, "\n")
+breg <- makeRegistry(
+    file.dir = glue(
+        "{wkdir}/.cluster_runs/",
+        cluster_run
+    ),
+    seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+    template = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+    scheduler.latency = 0.1,
+    fs.latency = 1
+)
+
+# Create parameter list for each method
+immdata_path <- glue("{wkdir}/data/interim/airr/immunarch/",
+    "immunarch-obj_2024-11-21.rds")
+
+batchtools_params <- data.frame(method = overlap_methods) %>% 
+    mutate(
+        immdata_path = immdata_path,
+        wkdir = wkdir
+    )
+
+# Submit jobs
+jobs <- batchMap(
+    fun = calculate_overlap,
+    args = batchtools_params,
+    reg = breg
+)
+
+submitJobs(jobs,
+    resources = list(
+        walltime = "7-00:00:00",
+        memory = "300GB",
+        ncpus = 8,
+        max.concurrent.jobs = 9999
+    )
+)
+
+```
+
+
+
+### Formatting TRUST4 TCRBdata for Immunarch
+
+
+
+```{r}
+immunarch_formatted <- trust4_reports_tcrb %>%
+  dplyr::rename(
+    Clones = `#count`,
+    Proportion = frequency,
+    CDR3.nt = CDR3nt,
+    CDR3.aa = CDR3aa,
+    V.name = V,
+    D.name = D,
+    J.name = J
+  ) %>%
+  dplyr::mutate(
+    VJ.ins = NA_character_,
+    VD.ins = NA_character_,
+    DJ.ins = NA_character_,
+    V.end = NA_integer_,
+    D.start = NA_integer_,
+    D.end = NA_integer_,
+    J.start = NA_integer_,
+    Sequence = NA_character_
+  ) %>%
+  glimpse()
+
+# Split data into immunarch format and metadata
+immunarch_data <- immunarch_formatted %>%
+  dplyr::select(Clones, Proportion, CDR3.nt, CDR3.aa, V.name, D.name, J.name,
+                VJ.ins, VD.ins, DJ.ins, Sequence)
+
+metadata <- immunarch_formatted %>%
+  dplyr::select(C, cid, cid_full_length, sample_id) %>% 
+  glimpse()
+
+# Adding in sample metadata
+rna_metadata <- readRDS(
+    glue("{wkdir}/data/interim/metadata/2023-07-14_phyloseq-metadata.rds")
+    )$RNASEQ %>%
+    glimpse()
+
+metadata %<>% 
+    left_join(rna_metadata, by = c("sample_id")) %>%
+    glimpse()
+
+# Create list structure expected by immunarch
+immdata <- list(
+  data = split(immunarch_data, immunarch_formatted$sample_id),
+  meta = metadata
+)
+
+saveRDS(
+    immdata,
+    glue("{wkdir}/data/interim/airr/immunarch/immunarch-obj_TCRB_{Sys.Date()}.rds")
+)
+
+```
+
+
+### 
+
+```{r}
+immdata <- readRDS(
+    glue("{wkdir}/data/interim/airr/immunarch/immunarch-obj_TCRB_2024-12-18.rds")
+)
+immdata %>% glimpse()
+
+#' Computes basic statistics, 
+#' including clones/distributions of lengths and counts.
+#' https://immunarch.com/articles/web_only/v3_basic_analysis.html
+clonal_metrics = c("volume", "count", "len", "clones")
+for (m in clonal_metrics) {
+    message(glue("Calculating {m} clonal metrics"))
+    metric_data <- repExplore(immdata$data, .method = m, .col = c("aa")) %>% 
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{metrics_dir}/rep-explore-{m}_{Sys.Date()}.rds")
+    )
+}
+
+# Exploring Clonality
+# https://immunarch.com/reference/repClonality.html
+clone_mets <- c("clonal.prop", "homeo", "top", "rare")
+for (m in clone_mets) {
+    message(glue("Calculating {m} clonal metrics"))
+    metric_data <- repClonality(immdata$data, .method = m) %>% 
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{metrics_dir}/rep-clonality-{m}_{Sys.Date()}.rds"
+            )
+    )
+}
+
+# Gene Usage Analysis
+# https://immunarch.com/reference/geneUsage.html
+gene_metrics <- c("hs.trbv", "HomoSapiens.TRBJ")
+for (g in gene_metrics) {
+    message(glue("Calculating {g} gene usage metrics"))
+    metric_data <- geneUsage(immdata$data, g) %>%
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{metrics_dir}/gene-usage-{g}_{Sys.Date()}.rds"
+            )
+    )
+}
+
+# Analyzing Repertoire Diversity
+# https://immunarch.com/articles/web_only/v6_diversity.html
+div_metrics <- c(
+    # "chao1", "hill", 
+    "div", "gini.simp", "inv.simp", 
+    "gini", "raref", "d50", 
+    "dxx"
+)
+for (d in div_metrics) {
+    message(glue("Calculating {d} diversity metrics"))
+    metric_data <- repDiversity(immdata$data, .method = d) %>%
+        glimpse()
+    saveRDS(
+        metric_data,
+        glue("{metrics_dir}/rep-diversity-{d}_{Sys.Date()}.rds"
+            )
+    )
+}
+
+```
+
+### Calculating overlap metrics in parallel
+
+```{r}
+# Function to calculate overlap for a single method
+calculate_overlap <- function(method, immdata_path, wkdir, metrics_dir) {
+    require(immunarch)
+    require(glue)
+
+    # Load the immdata object
+    immdata <- readRDS(immdata_path)
+
+    message(glue("Calculating {method} overlap metrics"))
+    metric_data <- repOverlap(
+        immdata$data,
+        .method = method,
+        .downsample = TRUE,
+        .verbose = TRUE
+    )
+    saveRDS(
+        metric_data,
+        glue("{metrics_dir}/rep-overlap-{method}_{Sys.Date()}.rds"
+        )
+    )
+}
+
+# Create parameter list for each method
+overlap_methods = c(
+#   "jaccard", "public", "overlap", "tversky", 
+    "cosine", "morisita"
+)
+
+# Setup batchtools registry
+cluster_run <- glue("{get_time()}_Repertoire_Overlap")
+message("\n\nRUNNING: ", cluster_run, "\n")
+breg <- makeRegistry(
+    file.dir = glue(
+        "{wkdir}/.cluster_runs/",
+        cluster_run
+    ),
+    seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+    template = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+    scheduler.latency = 0.1,
+    fs.latency = 1
+)
+
+# Create parameter list for each method
+immdata_path <- glue(
+    "{wkdir}/data/interim/airr/immunarch/",
+    "immunarch-obj_TCRB_2024-12-18.rds")
+
+batchtools_params <- data.frame(method = overlap_methods) %>% 
+    mutate(
+        immdata_path = immdata_path,
+        wkdir = wkdir,
+        metrics_dir = metrics_dir
+    )
+
+# Submit jobs
+jobs <- batchMap(
+    fun = calculate_overlap,
+    args = batchtools_params,
+    reg = breg
+)
+
+submitJobs(jobs,
+    resources = list(
+        walltime = "12:00:00",
+        memory = "300GB",
+        ncpus = 8,
+        max.concurrent.jobs = 9999
+    )
+)
+
+```
+
+
+# Diversity Analysis of Beta Chain Repertoires
+
+V-gene usage analysis
+
+```{r}
+# Visualizing v-gene usage
+v_gene_usage <- readRDS(
+    glue("{metrics_dir}/gene-usage-hs.trbv_2024-12-19.rds")
+)
+v_gene_usage_long <- v_gene_usage %>%
+    pivot_longer(-Names, names_to = "sample_id", values_to = "counts") %>%
+    mutate(counts = ifelse(is.na(counts), 0, counts)) %>%
+    left_join(key_meta_df, by = c("sample_id")) %>%
+    filter(case_control_other_latest != "Other") %>%
+    group_by(sample_id) %>%
+    mutate(vgenefreq = counts / sum(counts) * 100) %>%
+    glimpse()
+
+p_v_gene_usage <- v_gene_usage_long %>%
+    ggplot(aes(
+        x = fct_reorder(Names, vgenefreq, .desc = TRUE),
+        y = vgenefreq
+    )) +
+    geom_point(aes(color = case_control_other_latest),
+        position = position_jitterdodge(), alpha = 0.1, size = 0.05) +
+    geom_boxplot(
+        aes(group = interaction(Names, case_control_other_latest)),
+        outlier.alpha = 0, # fill.alpha = 0.2,
+        position = position_dodge(width = 0.75), alpha = 0.3, color = "black"
+    ) +
+    scale_color_d3() +
+    scale_fill_d3() +
+    theme_bw() +
+    labs(
+        x = "V-Gene", y = "V-Gene Frequency (%)",
+        fill = "Disease Status",
+        color = "Disease Status"
+    ) +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top"
+    )
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/immunarch/v_gene_usage_{Sys.Date()}.png"),
+    plot = p_v_gene_usage,
+    width = 14,
+    height = 6
+)
+
+# Grouping by higher level gene id
+v_gene_usage_long %>% glimpse()
+
+v_gene_usage_long_broad <- v_gene_usage_long %>%
+    mutate(vgenebroad = str_extract(Names, "^[A-Z0-9]+")) %>%
+    group_by(sample_id, vgenebroad) %>%
+    dplyr::summarise(counts = sum(counts)) %>%
+    group_by(sample_id) %>%
+    mutate(vgenebroadfreq = counts / sum(counts) * 100) %>%
+    left_join(key_meta_df, by = c("sample_id")) %>%
+    filter(case_control_other_latest != "Other") %>%
+    mutate(case_control_other_latest = factor(case_control_other_latest, 
+        levels = c("Control", "Case"))) %>%
+    glimpse()
+
+vgenebroad_order <- v_gene_usage_long_broad %>% 
+    group_by(vgenebroad) %>% 
+    dplyr::summarise(med_freq = median(vgenebroadfreq)) %>% 
+    arrange(desc(med_freq)) %>% 
+    pull(vgenebroad)
+
+p_v_gene_usage_broad <- v_gene_usage_long_broad %>%
+    filter(case_control_other_latest != "Other") %>%
+    mutate(vgenebroad = factor(vgenebroad, levels = vgenebroad_order)) %>%
+    ggplot(aes(
+        x = vgenebroad,
+        y = vgenebroadfreq, color = case_control_other_latest
+    )) +
+    geom_point(aes(color = case_control_other_latest),
+        position = position_jitterdodge(), alpha = 0.1, size = 0.05) +
+    geom_boxplot(
+        aes(group = interaction(vgenebroad, case_control_other_latest)),
+        outlier.alpha = 0, # fill.alpha = 0.2,
+        position = position_dodge(width = 0.75), alpha = 0.3, color = "black"
+    ) +
+    scale_color_d3() +
+    scale_fill_d3() +
+    theme_bw() +
+    labs(
+        x = "V-Gene", y = "V-Gene Frequency (%)",
+        fill = "Disease Status",
+        color = "Disease Status"
+    ) +
+    guides(color = guide_legend(override.aes = list(size = 3))) +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/immunarch/v_gene_usage_broad_{Sys.Date()}.png"),
+    plot = p_v_gene_usage_broad,
+    width = 14,
+    height = 6
+)
+
+vgene_data %>% glimpse()
+unique_vgenes <- unique(v_gene_usage_long_broad$vgenebroad)
+lmm_results <- list()
+# lmm_anova_res <- list()
+
+# Iterate through each vgenebroad
+for (vgene in unique_vgenes) {
+    # Subset data for current vgene
+    vgene_data <- v_gene_usage_long_broad %>%
+        filter(vgenebroad == vgene)
+
+    # Skip if not enough data
+    if (nrow(vgene_data) < 10) {
+        message(glue("Insufficient data for {vgene}"))
+        lmm_results[[vgene]] <- NULL
+        next
+    }
+
+    # Run linear mixed model
+    tryCatch(
+        {
+            lmm_model <- nlme::lme(vgenebroadfreq ~ case_control_other_latest + age_at_baseline + sex + abis_t_cell ,
+                random = ~ 1 | participant_id,
+                data = vgene_data,
+                control = lmeControl(opt = "optim")
+            )
+
+            # Store model summary
+            lmm_results[[vgene]] <- lmm_model
+
+            # Print basic results
+            cat("Results for", vgene, ":\n")
+            print(anova(lmm_model))
+            cat("\n")
+        },
+        error = function(e) {
+            cat("Error in model for", vgene, ":", e$message, "\n\n")
+            lmm_results[[vgene]] <- NULL
+        }
+    )
+}
+
+vgene_lmm_res <- lmm_results %>%
+    purrr::set_names(names(.)) %>%
+    purrr::map(~ broom.mixed::tidy(.)) %>%
+    bind_rows(.id = "vgene") %>%
+    glimpse()
+
+vgene_lmm_res_better <- tibble()
+for (v in names(lmm_results)) {
+    d <- lmm_results[[v]] %>% anova() %>% 
+        rownames_to_column(var = "term") %>% 
+        mutate(vgene = v)
+    vgene_lmm_res_better %<>% bind_rows(d)
+}
+vgene_lmm_res_better %>% glimpse()
+
+vgene_lmm_res_better <- vgene_lmm_res_better %>%
+    dplyr::rename(p.value = `p-value`, f.value = `F-value`) %>% 
+    filter(term == "case_control_other_latest") %>%
+    glimpse()
+
+# vgene_lmm_res_better %>% View()
+
+# Create a plot of LMM results
+vgene_lmm_plot <- vgene_lmm_res_better %>%
+    # filter(term == "case_control_other_latestCase") %>%
+    # Match the order of vgenes from the previous plot
+    mutate(vgene = factor(vgene, levels = vgenebroad_order)) %>%
+    # Add significance flag
+    mutate(is_significant = p.value <= 0.05) %>%
+    ggplot(aes(x = vgene, y = f.value)) +
+    geom_point(aes(color = is_significant)) +
+    # geom_pointrange(aes(
+    #     ymin = estimate - std.error, 
+    #     ymax = estimate + std.error,
+    #     color = is_significant
+    # ), size = 0.2) +
+    scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red")) +
+    theme_bw() +
+    labs(x = NULL, y = "F-Statistic",
+         title = "Linear Mixed Model Results for V Gene Usage") +
+    theme(axis.text.x = element_blank(), legend.position = "top") +
+    guides(color = "none")
+
+# Stack the plots vertically using aplot
+p_v_gene_usage_broad_lmm <- p_v_gene_usage_broad %>%
+    aplot::insert_top(vgene_lmm_plot, 
+                     height = 0.3)
+
+ggsave(
+    filename = glue("{wkdir}/figures/AIRR/immunarch/v_gene_usage_broad_lmm_{Sys.Date()}.png"),
+    plot = p_v_gene_usage_broad_lmm,
+    width = 12,
+    height = 6
+)
+
+# vgene_lmm_res %>%
+#     filter(term == "case_control_other_latestCase") %>% 
+#     DT::datatable()
+
+lmm_results[["TRBV27"]] %>% anova()
+lmm_results[["TRBV27"]] %>% broom.mixed::tidy() %>% print
+# lmm_results[["TRBV27"]] %>% broom.mixed::tidy() %>% 
+#     filter(term == "case_control_other_latestCase") %>% print()
+
+```
+
+Since data is not log-scaled and is in percentages, the interpretation of this result is that only one V-gene has a significant difference in frequency between control and case. However, the effect size is about a 0.11% difference in frequency between control and case - which is unlikely to be biologically meaningful.
+
+
+```{r}
+
+# gliph2_dir <- "/central/groups/MazmanianLab/joeB/software/gliph2"
+
+# out_prefix=Prefix #entry after this pound sign will be ignored
+# cdr3_file=cdr3_file.txt
+# hla_file =hla_file.txt
+# refer_file=ref_file.txt
+# v_usage_freq_file=ref_V.txt
+# cdr3_length_freq_file=ref_L.txt
+# local_min_pvalue=0.001
+# p_depth = 1000
+# global_convergence_cutoff = 1
+# simulation_depth=1000
+# kmer_min_depth=3
+# local_min_OVE=10
+# algorithm=GLIPH2
+# all_aa_interchangeable=1
+
+
+```
+
+
+Shannon entropy and clonality can be calculated as follows:
+
+$$
+e = - \sum_{i = 1}^N p_i \log p_i
+$$
+
+and
+
+$$
+\text{clonality} = 1 - \frac{e}{\log N}
+$$
+
+
+Reading in and adding q0 to the hill diversity data
+
+```{r, eval = FALSE}
+immdata <- readRDS(
+    glue("{wkdir}/data/interim/airr/immunarch/immunarch-obj_2024-11-21.rds")
+)
+
+hill_q0 <- names(immdata$data) %>% 
+    purrr::set_names() %>% 
+    purrr::map(~immdata$data[[.]] %>% nrow()) %>% 
+    bind_rows(.id = "sample_id") %>% 
+    pivot_longer(cols = everything(), 
+        names_to = "Sample", values_to = "Value") %>% 
+        mutate(Q = 0) %>% 
+    glimpse()
+
+hill_diversity <- readRDS(
+    glue("{metrics_dir}/rep-diversity-hill_2024-12-19.rds")) %>% 
+    bind_rows(hill_q0) %>% 
+    glimpse()
+
+saveRDS(hill_diversity, 
+    glue("{metrics_dir}/rep-diversity-hill_2024-12-19_plus_q0.rds")
+)
+
+```
+
+
+```{r}
+hill_diversity <- readRDS(
+    glue("{metrics_dir}/rep-diversity-hill_2024-12-19_plus_q0.rds")
+)
+
+hill_diversity_df <- hill_diversity %>%
+    left_join(key_meta_df, by = c("Sample" = "sample_id")) %>%
+    filter(!is.na(case_control_other_latest)) %>%
+    glimpse()
+
+hill_diversity_df %>% glimpse()
+
+hill_lme_mods <- list()
+for (q in unique(hill_diversity_df$Q)) {
+    clonotype_counts_df <- hill_diversity_df %>% filter(Q == q) %>% glimpse()
+    q_name <- as.character(q)
+    hill_lme_mods[[q_name]] <- nlme::lme(
+        Value ~ case_control_other_latest + age_at_baseline + sex + study + tcell_reads_abis,
+        random = ~ 1 | participant_id,
+        data = clonotype_counts_df,
+        na.action = na.omit
+    )
+    print(summary(hill_lme_mods[[q_name]]))
+}
+
+hill_lme_mods_df <- names(hill_lme_mods) %>% 
+    purrr::set_names() %>% 
+    purrr::map(~hill_lme_mods[[.]] %>% broom.mixed::tidy()) %>% 
+    bind_rows(.id = "Q") %>% 
+    glimpse()
+
+hill_lme_mods_df %>% 
+    filter(term == "case_control_other_latestCase")  %>% 
+    print()
+
+
+p_hill_div_detailed <- hill_diversity_df %>%
+    filter(Q > 0) %>% 
+    ggplot(aes(
+        x = Q, y = Value,
+        color = case_control_other_latest, fill = case_control_other_latest
+    )) +
+    geom_line(aes(group = interaction(case_control_other_latest, Sample)),
+        alpha = 0.1, size = 0.1) +
+    geom_smooth(method = "loess", se = TRUE) +
+    labs(x = "Q Value", y = "Hill Diversity") +
+    scale_color_d3() +
+    scale_fill_d3() +
+    scale_y_log10() +
+    theme_bw() +
+    theme(legend.position = "top")
+
+ggsave(
+    glue("{imm_plots_dir}/hill_diversity_beta_chain_detailed_{Sys.Date()}.png"),
+    p_hill_div_detailed,
+    width = 5,
+    height = 4
+)
+
+
+
+# Plotting Hill Diversity
+p_hill_div <- hill_diversity_df %>%
+    filter(Q > 0) %>% 
+    ggplot(aes(
+        x = Q, y = Value,
+        color = case_control_other_latest, fill = case_control_other_latest
+    )) +
+    geom_smooth(method = "loess", se = TRUE) +
+    labs(x = "Q Value", y = "Hill Diversity") +
+    scale_color_d3() +
+    scale_fill_d3() +
+    # scale_y_log10() +
+    theme_bw() +
+    theme(legend.position = "top")
+
+ggsave(
+    glue("{imm_plots_dir}/hill_diversity_beta_chain_{Sys.Date()}.png"),
+    p_hill_div,
+    width = 5,
+    height = 4
+)
+
+p_hill_div_bx <- hill_diversity_df %>%
+    ggplot(aes(x = Q, y = Value)) +
+    geom_point(
+        aes(color = case_control_other_latest),
+        position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+        alpha = 0.3, size = 0.8
+    ) +
+    geom_boxplot(
+        aes(group = interaction(case_control_other_latest, Q)),
+        outlier.alpha = 0, position = position_dodge(width = 0.8), alpha = 0.5) +
+    labs(x = "Q Value", y = "Hill Diversity") +
+    scale_y_log10() +
+    scale_color_d3() +
+    scale_fill_d3() +
+    theme_bw() +
+    theme(legend.position = "top")
+
+ggsave(
+    glue("{imm_plots_dir}/hill_diversity_beta_chain_boxplot_{Sys.Date()}.png"),
+    p_hill_div_bx,
+    width = 6.5,
+    height = 4
+)
+
+
+
+hill_diversity_df %>% glimpse()
+p_seqdepth_vs_hill_div <- hill_diversity_df %>%
+    ggplot(aes(x = Value, y = raw_total_reads)) +
+    geom_point(size = 0.3, alpha = 0.1) +
+    geom_smooth(method = "lm") +
+    labs(x = "Hill Diversity", y = "Total Reads") +
+    theme_bw() +
+    facet_wrap(~Q,
+        scales = "free",
+        labeller = labeller(Q = function(x) paste("Q: ", x))
+    ) +
+    scale_y_log10() +
+    theme(legend.position = "top") +
+    stat_regline_equation(label.x.npc = 0.2, label.y.npc = 0.9) +
+    stat_cor(method = "pearson", label.x.npc = 0.2, label.y.npc = 0.8)
+
+ggsave(
+    glue("{imm_plots_dir}/seqdepth_vs_hill_div_{Sys.Date()}.png"),
+    p_seqdepth_vs_hill_div,
+    width = 10,
+    height = 8
+)
+
+p_mds4_vs_hill <- hill_diversity_df %>%
+    ggplot(aes(x = Value, y = mds_updrs_part_iv_summary_score)) +
+    geom_point(size = 0.3, alpha = 0.1) +
+    geom_smooth(method = "lm") +
+    labs(x = "Hill Diversity", y = "MDS-UPDRS Part IV") +
+    theme_bw() +
+    facet_wrap(~Q,
+        scales = "free",
+        labeller = labeller(Q = function(x) paste("Q: ", x))
+    ) +
+    theme(legend.position = "top") +
+    stat_regline_equation(label.x.npc = 0.2, label.y.npc = 0.9) +
+    stat_cor(method = "pearson", label.x.npc = 0.2, label.y.npc = 0.8)
+
+ggsave(
+    glue("{imm_plots_dir}/mds4_vs_hill_div_{Sys.Date()}.png"),
+    p_mds4_vs_hill,
+    width = 10,
+    height = 8
+)
+
+p_age_vs_hill <- hill_diversity_df %>%
+    ggplot(aes(x = Value, y = age_at_baseline)) +
+    geom_point(size = 0.3, alpha = 0.1) +
+    geom_smooth(method = "loess") +
+    labs(x = "Hill Diversity", y = "Age at Baseline") +
+    theme_bw() +
+    facet_wrap(~Q,
+        scales = "free",
+        labeller = labeller(Q = function(x) paste("Q: ", x))
+    ) +
+    theme(legend.position = "top") +
+    stat_regline_equation(label.x.npc = 0.2, label.y.npc = 0.9) +
+    stat_cor(method = "pearson", label.x.npc = 0.2, label.y.npc = 0.8)
+
+ggsave(
+    glue("{imm_plots_dir}/age_vs_hill_div_{Sys.Date()}.png"),
+    p_age_vs_hill,
+    width = 10,
+    height = 8
+)
+
+```
+
+
+
+
+```{r}
+# Create a named list where each element contains Values arranged by Q
+hill_diversity_df %>% 
+    select(Sample, Q, Value) %>% 
+    glimpse()
+
+# Create a named list where names are Sample IDs and values are vectors of diversity values by Q
+hill_diversity_list <- hill_diversity_df %>%
+    select(Sample, Q, Value) %>%
+    group_by(Sample) %>%
+    arrange(Sample, Q) %>%
+    group_split() %>%
+    setNames(unique(hill_diversity_df$Sample))
+
+# Convert each group to a named vector where names are Q values
+hill_diversity_list <- lapply(hill_diversity_list, function(df) {
+    values <- df$Value
+    names(values) <- df$Q
+    return(values)
+})
+
+# Check the structure of the first few elements
+str(hill_diversity_list[1:3])
+
+# Create all pairwise combinations of samples
+sample_names <- names(hill_diversity_list)
+sample_pairs <- expand.grid(sample1 = sample_names, sample2 = sample_names, stringsAsFactors = FALSE) %>%
+  filter(sample1 != sample2)  # Exclude self-comparisons
+
+# Function to calculate correlation between two samples
+calculate_correlation <- function(sample1, sample2) {
+  # Extract diversity values for both samples
+  values1 <- hill_diversity_list[[sample1]]
+  values2 <- hill_diversity_list[[sample2]]
+  
+  # Ensure both vectors have the same Q values (names)
+  common_qs <- intersect(names(values1), names(values2))
+  
+  # Calculate correlation if there are common Q values
+  if (length(common_qs) > 1) {
+    cor_result <- stats::cor(values1[common_qs], values2[common_qs], method = "pearson")
+    return(tibble(sample1 = sample1, sample2 = sample2, correlation = cor_result))
+  } else {
+    return(tibble(sample1 = sample1, sample2 = sample2, correlation = NA_real_))
+  }
+}
+
+# Set up parallel processing
+plan(multisession, workers = availableCores() - 1)
+
+# Run correlations in parallel
+correlation_results <- furrr::future_map2_dfr(
+  sample_pairs$sample1,
+  sample_pairs$sample2,
+  ~calculate_correlation(.x, .y),
+  .options = furrr_options(seed = TRUE)
+)
+
+saveRDS(correlation_results,
+    glue("{metrics_dir}/hill_diversity_pearson_correlations_{Sys.Date()}.rds")
+)
+
+```
+
+
+```{r}
+correlation_results <- readRDS(
+    glue("{metrics_dir}/hill_diversity_pearson_correlations_2025-03-17.rds")
+)
+
+# Convert to a matrix format if needed
+correlation_matrix <- correlation_results %>%
+    pivot_wider(
+        id_cols = sample1,
+        names_from = sample2,
+        values_from = correlation,
+        values_fill = 1 # Should only be same pairs
+    ) %>%
+    column_to_rownames("sample1") %>%
+    as.matrix()
+
+# Preview results
+head(correlation_results)
+head(correlation_matrix)
+
+# # Seriate the matrix
+# sid_order_hillcor <- seriate_matrix_rows(correlation_matrix, seriate_method = "OLO")
+
+# saveRDS(
+#     sid_order_hillcor,
+#     glue("{metrics_dir}/repertoire_stats/hill_diversity_pearson_cor_seriation_{Sys.Date()}.rds")
+# )
+
+sid_order_hillcor <- readRDS(
+    glue("{metrics_dir}/repertoire_stats/hill_diversity_pearson_cor_seriation_2025-03-24.rds")
+)
+
+# Create a custom theme for heatmaps
+theme_massive_heatmap <- function() {
+  theme_void() +
+    theme(
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        panel.border = element_blank()
+    )
+}
+
+
+p_hill_cor_heatmap <- correlation_results %>%
+    mutate(sample1 = factor(sample1, levels = sid_order_hillcor)) %>%
+    mutate(sample2 = factor(sample2, levels = sid_order_hillcor)) %>%
+    ggplot(aes(
+        x = fct_relevel(sample1, sid_order_hillcor), 
+        y = fct_relevel(sample2, sid_order_hillcor), 
+        fill = correlation
+    )) +
+    geom_tile() +
+    scale_fill_viridis_c(option = "mako") +
+    labs(x = NULL, y = NULL, fill = "Hill Diversity \nPearson Correlation") +
+    theme_void() +
+    theme(
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        panel.border = element_blank()
+    )
+
+ggsave(
+    glue("{imm_plots_dir}/hill_diversity_pearson_cor_heatmap_{Sys.Date()}.png"),
+    p_hill_cor_heatmap,
+    width = 10,
+    height = 8
+)
+
+correlation_results_meta <- correlation_results %>%
+    left_join(
+        full_meta_df %>%
+            select(sample_id, participant_id, case_control_other_latest, study) %>%
+            rename_with(~ paste0(., "1"), everything()),
+        by = c("sample1" = "sample_id1")
+    ) %>%
+    # Join metadata for sample2
+    left_join(
+        full_meta_df %>%
+            select(sample_id, participant_id, case_control_other_latest, study) %>%
+            rename_with(~ paste0(., "2"), everything()),
+        by = c("sample2" = "sample_id2")
+    ) %>%
+    # Add comparison columns
+    mutate(
+        disease_grouping = case_when(
+            (case_control_other_latest1 == "Case" & case_control_other_latest2 == "Case") ~ "Within \nCase",
+            (case_control_other_latest1 == "Control" & case_control_other_latest2 == "Control") ~ "Within \nControl",
+            (case_control_other_latest1 == "Case" & case_control_other_latest2 == "Control") |
+                (case_control_other_latest1 == "Control" & case_control_other_latest2 == "Case") ~ "Between \nCase and Control",
+            TRUE ~ "other"
+        ),
+        participant_grouping = if_else(
+            participant_id1 == participant_id2,
+            "Within Participant",
+            "Between Participants"
+        ),
+        study_grouping = case_when(
+            study1 == study2 ~ paste0("Within \n", study1),
+            TRUE ~ paste0("Between \n", study1, " and ", study2)
+        )
+    ) %>%
+    glimpse()
+
+p_hill_div_vs_disease <- correlation_results_meta %>%
+    ggplot(aes(x = disease_grouping, y = correlation)) +
+    geom_boxplot() +
+    # geom_violin() +
+    theme_bw()
+
+ggsave(
+    glue("{imm_plots_dir}/hill_diversity_vs_disease_{Sys.Date()}.png"),
+    p_hill_div_vs_disease,
+    width = 6,
+    height = 4
+)
+
+```
+
+PERMANOVA 
+
+```{r}
+# Convert correlation matrix to distance matrix (1 - correlation)
+distance_matrix <- 1 - correlation_matrix
+
+# Define metadata columns for PERMANOVA
+key_meta_df %>% glimpse()
+full_meta_df %>% glimpse()
+target_metadata <- c(
+    "study", "raw_total_reads", "raw_total_reads_binned",
+    "case_control_other_latest", # "participant_id",
+    "DRB1_grouped", "DRB1_risk",
+    "age_at_baseline", "sex", mds_tests
+)
+
+# Get sample metadata for PERMANOVA
+permanova_metadata <- full_meta_df %>%
+    filter(sample_id %in% rownames(distance_matrix)) %>%
+    column_to_rownames("sample_id") %>%
+    select(all_of(target_metadata), participant_id) %>%
+    glimpse()
+
+permanova_metadata %>% glimpse()
+common_samples <- intersect(rownames(distance_matrix), rownames(permanova_metadata))
+
+permanova_resdir <- glue("{metrics_dir}/permanova_hill_div_corr")
+dir.create(permanova_resdir, showWarnings = FALSE, recursive = TRUE)
+
+subsample_resdir <- glue(
+    "{metrics_dir}/permanova_hill_div_corr_sid_subsample")
+subsample_resdir_input <- glue(
+    "{subsample_resdir}/model_input")
+perm_resdir <- glue("{subsample_resdir}/results")
+
+dir.create(subsample_resdir_input, showWarnings = FALSE, recursive = TRUE)
+dir.create(perm_resdir, showWarnings = FALSE, recursive = TRUE)
+
+# Saving subsampled distance matrix and metadata
+for (i in 1:50) {
+    set.seed(i)
+    sid_subsample <- permanova_metadata %>% 
+        rownames_to_column(var = "sample_id") %>%
+        group_by(participant_id) %>%
+        dplyr::slice_sample(n = 1) %>%
+        ungroup() %>%
+        glimpse() %>% 
+        pull(sample_id)
+
+    i_common_samples <- intersect(common_samples, sid_subsample)
+    distance_matrix_filtered <- as.dist(distance_matrix[i_common_samples, i_common_samples])
+    permanova_metadata_filtered <- permanova_metadata[i_common_samples, ] %>% glimpse()
+    
+    # Saving distance matrix and metadata
+    saveRDS(
+        distance_matrix_filtered,
+        glue("{subsample_resdir_input}/",
+        "distance_matrix_filtered_subsample_{i}.rds")
+    )
+    saveRDS(
+        permanova_metadata_filtered,
+        glue("{subsample_resdir_input}/",
+        "permanova_metadata_filtered_subsample_{i}.rds")
+    )
+}
+
+# Run PERMANOVA for each metadata variable
+slurm_logs <- glue("{wkdir}/.cluster_runs/{Sys.Date()}_permanova_hill_div_corr_sid_subsample")
+dir.create(slurm_logs, showWarnings = FALSE, recursive = TRUE)
+
+nperms <- 9999
+nthreads <- 1
+
+for (i in 26:50) {
+    for (var in target_metadata) {
+        message("Running PERMANOVA for: ", var)
+
+        # Important that distance_matrix is used here below
+        form <- glue("distance_matrix ~ {var}")
+        breg <- easy_batch(
+            cluster_name = glue("pm_{i}_{var}"),
+            fun = run_permanova,
+            params = data.frame(
+                "dmat_path" = glue("{subsample_resdir_input}/", 
+                    "distance_matrix_filtered_subsample_{i}.rds"),
+                "meta_path" = glue("{subsample_resdir_input}/",
+                    "permanova_metadata_filtered_subsample_{i}.rds"),
+                "model_formula_string" = form,
+                "outpath" = glue("{perm_resdir}/permanova_{var}_nperms_{nperms}_subsample_{i}_{Sys.Date()}.rds"),
+                "n_perms" = nperms,
+                "n_cores" = nthreads
+            ),
+            template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+            log_dir = slurm_logs,
+            walltime = "20:00:00",
+            memory = "50GB",
+            ncpus = nthreads,
+            max_jobs = 9999
+        )
+        
+    }
+}
+
+
+res_paths <- list.files(perm_resdir, full.names = TRUE, 
+    pattern = "_9999_")
+
+permanova_results <- res_paths %>%
+    purrr::set_names(basename(.)) %>%
+    purrr::map(~ readRDS(.) %>% broom::tidy()) %>%
+    bind_rows(.id = "model_info") %>%
+    janitor::clean_names() %>%
+    mutate(r2_percent = round(r2 * 100, 3)) %>%
+    arrange(p_value) %>%
+    glimpse()
+
+p_permanova <- permanova_results %>%
+    filter(term %nin% c("Residual", "Total")) %>%
+    arrange(p_value) %>%
+    mutate(
+        significant = p_value < 0.05,
+        p_value_formatted = format.pval(p_value, digits = 3)
+    ) %>%
+    ggplot(aes(y = fct_reorder(term, r2), x = r2*100)) +
+    geom_point(aes(color = significant), size = 0.8,
+        position = position_jitter(height = 0.2, width = 0), alpha = 0.85) +
+    geom_boxplot(alpha = 0.3, outlier.shape = NA, width = 0.5) +
+    scale_color_manual(values = c("grey70", "red")) +
+    theme_bw() +
+    labs(
+        title = "PERMANOVA Results: TCR Repertoire Similarity",
+        x = "R² % (Effect Size)",
+        y = NULL
+    ) +
+    theme(legend.position = "bottom")
+
+ggsave(
+    glue("{imm_plots_dir}/tcr_permanova_results_{Sys.Date()}.png"),
+    p_permanova,
+    width = 8,
+    height = 4
+)
+
+```
+
+
+overlap coefficient (.method = "overlap") - a normalised measure of overlap similarity. It is defined as the size of the intersection divided by the smaller of the size of the two sets.
+
+```{r}
+pub_ovov <- readRDS(
+    glue("{metrics_dir}/rep-overlap-overlap_2024-12-19.rds")
+)
+pub_ovov_df <- pub_ovov %>% as.data.frame() %>% 
+    glimpse()
+
+pub_ovov_df_long <- pub_ovov_df %>% 
+    rownames_to_column("sample_id1") %>%
+    pivot_longer(
+        cols = -sample_id1,
+        names_to = "sample_id2",
+        values_to = "overlap_counts"
+    ) %>%
+    mutate(overlap_counts = replace_na(overlap_counts, 1)) %>%
+    glimpse()
+
+# Convert the long format data back to a matrix
+pub_ovov_matrix <- pub_ovov_df_long %>%
+  pivot_wider(
+    id_cols = sample_id1,
+    names_from = sample_id2,
+    values_from = overlap_counts
+  ) %>%
+  column_to_rownames("sample_id1") %>%
+  as.matrix()
+
+# Display the first few rows and columns
+pub_ovov_matrix[1:5, 1:5]
+# sid_order_ovov <- seriate_matrix_rows(pub_ovov_matrix, seriate_method = "OLO")
+# saveRDS(sid_order_ovov, 
+#     glue("{metrics_dir}/repertoire_stats/sid_order_ovov_HC_average_{Sys.Date()}.rds")
+#     )
+sid_order_ovov <- readRDS( 
+    glue("{metrics_dir}/repertoire_stats/sid_order_ovov_HC_average_2025-03-24.rds")
+    )
+
+p_ovov_heatmap <- pub_ovov_df_long %>%
+    mutate(sample_id1 = factor(sample_id1, levels = sid_order_ovov)) %>%
+    mutate(sample_id2 = factor(sample_id2, levels = sid_order_ovov)) %>%
+    filter(sample_id1 != sample_id2) %>%
+    ggplot(aes(x = sample_id1, y = sample_id2, fill = overlap_counts)) +
+    geom_tile() +
+    scale_fill_viridis_c(
+        option = "mako",
+        trans = "log10",
+        name = "Overlap Count",
+        na.value = "white",
+        direction = -1
+    ) +
+    labs(x = NULL, y = NULL, fill = "Overlap Count") +
+    theme_massive_heatmap()
+
+# ggsave(
+#     glue("{imm_plots_dir}/public_overlap_overlap_heatmap_v2_{Sys.Date()}.png"),
+#     p_ovov_heatmap,
+#     width = 10,
+#     height = 8,
+#     bg = "white"
+# )
+
+pub_ovov_df_long %>% glimpse()
+
+pub_ovov_df_long_full <- pub_ovov_df_long %>% 
+  # Join metadata for first sample
+  left_join(
+    key_meta_df %>% 
+      select(all_of(essential_meta), sample_id, participant_id) %>%
+      rename_with(~paste0(., "1"), everything()),
+    by = c("sample_id1")
+  ) %>%
+  # Join metadata for second sample  
+  left_join(
+    key_meta_df %>%
+      select(all_of(essential_meta), sample_id, participant_id) %>%
+      rename_with(~paste0(., "2"), everything()),
+    by = c("sample_id2")
+  ) %>%
+    filter(!is.na(case_control_other_latest1)) %>%
+    filter(!is.na(case_control_other_latest2)) %>%
+  glimpse()
+
+pub_ovov_df_long_full_annot <- pub_ovov_df_long_full %>% 
+    mutate(disease_condition = case_when(
+        participant_id1 == participant_id2 & case_control_other_latest1 == "Case" ~ "Within\nCase (Donors)",
+        participant_id1 == participant_id2 & case_control_other_latest1 == "Control" ~ "Within\nControl (Donors)",
+        case_control_other_latest1 == "Case" & case_control_other_latest2 == "Case" ~ "Between\nCase",
+        case_control_other_latest1 == "Control" & case_control_other_latest2 == "Control" ~ "Between\nControl",
+        case_control_other_latest1 == "Case" & case_control_other_latest2 == "Control" ~ "Between\nCase-Control",
+        case_control_other_latest1 == "Control" & case_control_other_latest2 == "Case" ~ "Between\nCase-Control",
+        TRUE ~ "ERROR"
+    )) %>%
+    mutate(disease_condition = factor(disease_condition, 
+        levels = c(
+            "Within\nCase (Donors)",
+            "Within\nControl (Donors)",
+            "Between\nCase",
+            "Between\nControl",
+            "Between\nCase-Control"
+        ))) %>% 
+    mutate(HLA_DRB1_risk_grouping = case_when(
+        DRB1_risk1 == "risk" & DRB1_risk2 == "risk" ~ "Witihin\nRisk",
+        DRB1_risk1 == "protective" & DRB1_risk2 == "protective" ~ "Witihin\nProtective",
+        DRB1_risk1 == "mixed" & DRB1_risk2 == "mixed" ~ "Witihin\n Mixed",
+        (DRB1_risk1 == "risk" & DRB1_risk2 == "protective") | 
+            (DRB1_risk1 == "protective" & DRB1_risk2 == "risk") ~ "Between\nRisk & Protective",
+        DRB1_risk1 == "none" & DRB1_risk2 == "none" ~ "Within\nDRX/DRX",
+        TRUE ~ "OTHER"
+    )) %>%
+    glimpse()
+
+pub_ovov_df_long_full_annot %>% glimpse()
+# pub_ovov_df_long_full_annot$DRB1_risk1 %>% table()
+
+
+```
+
+### Hypothesis Testing: Do PD patients share more clones with other PD patients than Controls? More specifically - we want to test the below three hypotheses. Using pairwise overlap scores as iyr data, we utilize mixed effects models (dyadic regression) treating each overlap as the outcome and include crossed random effects for both individuals:
+
+1) Do PD Patients share more receptors amongst their own tiempoints than Ctrl
+
+2) Do PD Patients share more rec with other random PD patients than Healthy Ctrl with one another
+
+3) Do PD patients share more rec with other random PD patients than with Healthy controls
+
+```{r}
+pub_ovov_df_long_full_annot$disease_condition %>% table()
+
+pairs_df <- pub_ovov_df_long_full_annot %>% 
+    filter(sample_id1 != sample_id2) %>% 
+    glimpse()
+eps <- 1e-4
+pairs_df <- within(pairs_df, {
+  logit_ov <- stats::qlogis(pmin(pmax(overlap_counts, eps), 1 - eps))
+  s1 <- factor(sample_id1)               # make sure they’re factors
+  s2 <- factor(sample_id2)
+})
+pairs_df$disease_condition %>% table()
+
+# TESTING Question 1)
+h1_groups <- c("Within\nCase (Donors)", "Within\nControl (Donors)")
+h2_groups <- c("Between\nCase", "Between\nControl")
+h3_groups <- c("Between\nCase", "Between\nCase-Control")
+
+mod_within_donors <- nlme::lme(
+  fixed  = logit_ov ~ disease_condition,
+  random = list(
+            s1 = pdIdent(~ 1),          # random intercept for the first sample
+            s2 = pdIdent(~ 1)           # random intercept for the second
+          ),
+        data = pairs_df %>% 
+            filter(disease_condition %in% c("Within\nCase (Donors)", "Within\nControl (Donors)")),
+  method = "REML",
+  control = lmeControl(opt = "optim")
+)
+summary(mod_within_donors)
+broom.mixed::tidy(mod_within_donors)
+
+# TESTING Question 2)
+mod_btwn_case_btwn_ctrl <- nlme::lme(
+  fixed  = logit_ov ~ disease_condition,
+  random = list(
+            s1 = pdIdent(~ 1),          # random intercept for the first sample
+            s2 = pdIdent(~ 1)           # random intercept for the second
+          ),
+        data = pairs_df %>% 
+            filter(disease_condition %in% h2_group),
+  method = "REML",
+  control = lmeControl(opt = "optim")
+)
+summary(mod_btwn_case_btwn_ctrl)
+broom.mixed::tidy(mod_btwn_case_btwn_ctrl)
+
+# TESTING Question 3)
+mod_btwn_case_btwn_casectrl <- nlme::lme(
+  fixed  = logit_ov ~ disease_condition,
+  random = list(
+            s1 = pdIdent(~ 1),          # random intercept for the first sample
+            s2 = pdIdent(~ 1)           # random intercept for the second
+          ),
+        data = pairs_df %>% 
+            filter(disease_condition %in% h3_groups),
+  method = "REML",
+  control = lmeControl(opt = "optim")
+)
+summary(mod_btwn_case_btwn_casectrl)
+broom.mixed::tidy(mod_btwn_case_btwn_casectrl)
+
+# A less fancy stat test --  Collapse to per-DONOR summaries (breaks the dependence)
+# 1.	For every PD DONOR, compute its mean overlap to other PD and mean overlap to controls; take the within-patient difference.
+# 2.	Test these paired differences with a Wilcoxon signed-rank (H1).
+# 3.	Analogously, compare the per-sample “within-group means” between PD and CTRL with a rank-sum (H2)
+
+pairs_summary_df <- pub_ovov_df_long_full_annot %>% 
+    filter(sample_id1 != sample_id2) %>% 
+    group_by(participant_id1, disease_condition) %>% 
+    dplyr::summarize(mean_overlap_score = mean(overlap_counts)) %>% 
+    glimpse()
+
+p_donor_avgs_ovov_boxplot <- pairs_summary_df %>% 
+    ggplot(aes(x = disease_condition, y=mean_overlap_score)) +
+    scale_y_log10() +
+    geom_boxplot() +
+    theme_bw() +
+    labs(x = NULL, y = "Mean Overlap Score") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+    glue("{imm_plots_dir}/public_overlap_overlap_boxplot_donoravgs_{Sys.Date()}.png"),
+    p_donor_avgs_ovov_boxplot,
+    width = 3.25,
+    height = 2.75
+)
+
+pairs_summary_df %>% glimpse()
+
+wx1 <- wilcox.test(mean_overlap_score ~ disease_condition, 
+    data = pairs_summary_df %>% filter(disease_condition  %in% h1_groups))
+wx2 <- wilcox.test(mean_overlap_score ~ disease_condition, 
+    data = pairs_summary_df %>% filter(disease_condition  %in% h2_groups))
+wx3 <- wilcox.test(mean_overlap_score ~ disease_condition, 
+    data = pairs_summary_df %>% filter(disease_condition  %in% h3_groups))
+
+
+#' No significant differences between distributions with donor summarized testing
+
+#' Next we will test our hypothesis that donors within HLA risk and protective groups share 
+pub_ovov_df_long_full_annot %>% glimpse()
+pairs_summary_df_hlarisk <- pub_ovov_df_long_full_annot %>% 
+    filter(participant_id1 != participant_id2) %>% 
+    group_by(participant_id1, DRB1_risk1) %>% 
+    dplyr::summarize(mean_overlap_score = mean(overlap_counts)) %>% 
+    glimpse()
+
+pairs_summary_df_hlarisk %>% glimpse()
+pairs_summary_df_hlarisk$DRB1_risk1 %>% table()
+
+wx_risk_to_none <- wilcox.test(mean_overlap_score ~ DRB1_risk1, 
+    data = pairs_summary_df_hlarisk %>% filter(DRB1_risk1 %in% c(
+        "risk", "none"
+    )))
+wx_protective_to_none <- wilcox.test(mean_overlap_score ~ DRB1_risk1, 
+    data = pairs_summary_df_hlarisk %>% filter(DRB1_risk1 %in% c(
+        "protective", "none"
+    )))
+wx_protective_to_risk <- wilcox.test(mean_overlap_score ~ DRB1_risk1, 
+    data = pairs_summary_df_hlarisk %>% filter(DRB1_risk1 %in% c(
+        "protective", "risk"
+    )))
+
+p_donor_avgs_ovov_boxplot_hlarisk <- pairs_summary_df_hlarisk %>% 
+    ggplot(aes(x = DRB1_risk1, y = mean_overlap_score)) +
+    scale_y_log10() +
+    geom_boxplot() +
+    theme_bw() +
+    labs(x = NULL, y = "Mean Overlap Score") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+    glue("{imm_plots_dir}/public_overlap_overlap_boxplot_donoravgs_hla-risk_{Sys.Date()}.png"),
+    p_donor_avgs_ovov_boxplot_hlarisk,
+    width = 4,
+    height = 4
+)
+
+# What about different subsets of samples between of HLA risk genes?
+
+pub_ovov_df_long_full_annot %>% glimpse()
+pub_ovov_df_long_full_annot$DRB1_grouped1 %>% table()
+
+pairs_summary_df_hlariskgenes <- pub_ovov_df_long_full_annot %>% 
+    filter(participant_id1 != participant_id2) %>% 
+    group_by(participant_id1, DRB1_grouped1) %>% 
+    dplyr::summarize(mean_overlap_score = mean(overlap_counts)) %>% 
+    glimpse()
+
+wx_risk_dose <- wilcox.test(mean_overlap_score ~ DRB1_grouped1, 
+    data = pairs_summary_df_hlariskgenes %>% filter(DRB1_grouped1 %in% c(
+        "DRB1*15:01/DRB1*15:01", "DRB1*15:01/DRB1X"
+    )))
+wx_risk_dose2 <- wilcox.test(mean_overlap_score ~ DRB1_grouped1, 
+    data = pairs_summary_df_hlariskgenes %>% filter(DRB1_grouped1 %in% c(
+        "DRB1*15:01/DRB1*15:01", "DRB1X/DRB1X"
+    )))
+
+wx_protect_dose <- wilcox.test(mean_overlap_score ~ DRB1_grouped1, 
+    data = pairs_summary_df_hlariskgenes %>% filter(DRB1_grouped1 %in% c(
+        "DRB1*04:01/DRB1*04:01", "DRB1*04:01/DRB1X"
+    )))
+wx_protect_dose2 <- wilcox.test(mean_overlap_score ~ DRB1_grouped1, 
+    data = pairs_summary_df_hlariskgenes %>% filter(DRB1_grouped1 %in% c(
+        "DRB1*04:01/DRB1*04:01", "DRB1X/DRB1X"
+    )))
+wx_protect_dose3 <- wilcox.test(mean_overlap_score ~ DRB1_grouped1, 
+    data = pairs_summary_df_hlariskgenes %>% filter(DRB1_grouped1 %in% c(
+        "DRB1*04:04/DRB1*04:04", "DRB1*04:04/DRB1X"
+    )))
+
+# No difference in any of these tests either
+
+
+
+
+
+
+min_overzero <- pub_ovov_df_long_full_annot$overlap_counts %>% unique() %>% sort() %>% .[2]
+p_ovov_boxplot <- pub_ovov_df_long_full_annot %>%
+    filter(sample_id1 != sample_id2) %>%    
+    # filter(participant_id1 != participant_id2) %>%
+    mutate(overlap_counts_imputed = (overlap_counts + min_overzero/2)) %>%
+    ggplot(aes(x = disease_condition, y = overlap_counts_imputed)) +
+    geom_boxplot(outlier.alpha = 0) +
+    # geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+    scale_y_log10() +
+    theme_bw() +
+    labs(x = NULL, y = "Public Overlap") +
+    ggpubr::stat_compare_means(
+        method = "wilcox.test",
+        comparisons = list(
+            c("Within\nCase (Donors)", "Within\nControl (Donors)"),
+            c("Between\nCase", "Between\nControl"),
+            c("Between\nCase", "Between\nCase-Control"),
+            c("Between\nControl", "Between\nCase-Control")
+        )
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+    glue("{imm_plots_dir}/public_overlap_overlap_boxplot_{Sys.Date()}.png"),
+    p_ovov_boxplot,
+    width = 4,
+    height = 4
+)
+
+p_ovov_boxplot_nonzero <- pub_ovov_df_long_full_annot %>%
+    filter(sample_id1 != sample_id2) %>%    
+    filter(participant_id1 != participant_id2) %>%
+    filter(overlap_counts > 0) %>%
+    ggplot(aes(x = disease_condition, y = overlap_counts)) +
+    geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+    scale_y_log10() +
+    theme_bw() +
+    labs(x = NULL, y = "Public Overlap") +
+    ggpubr::stat_compare_means(
+        method = "wilcox.test",
+        comparisons = list(c("Within\nCase", "Between\nCase-Control"),
+            c("Within\nControl", "Between\nCase-Control")
+        )
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+    glue("{imm_plots_dir}/public_overlap_overlap_boxplot_nonzero_{Sys.Date()}.png"),
+    p_ovov_boxplot_nonzero,
+    width = 3,
+    height = 4
+)
+
+
+p_ovov_boxplot_hlarisk <- pub_ovov_df_long_full_annot %>%
+    filter(sample_id1 != sample_id2) %>%    
+    filter(participant_id1 != participant_id2) %>% 
+    filter(HLA_DRB1_risk_grouping != "OTHER") %>% 
+    filter(overlap_counts > 0) %>%
+    ggplot(aes(x = HLA_DRB1_risk_grouping, y = overlap_counts)) +
+    geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+    scale_y_log10() +
+    theme_bw() +
+    labs(x = NULL, y = "Public Overlap") +
+    ggpubr::stat_compare_means(
+        method = "wilcox.test",
+        comparisons = list(c("Within\nCase", "Between\nCase-Control"),
+            c("Within\nControl", "Between\nCase-Control")
+        )
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+    glue("{imm_plots_dir}/public_overlap_overlap_boxplot_hlarisk_{Sys.Date()}.png"),
+    p_ovov_boxplot_hlarisk,
+    width = 3,
+    height = 4
+)
+
+```
+
+
+
+PERMANOVA for public overlap (overlap coefficient)
+
+```{r}
+# Convert correlation matrix to distance matrix (1 - correlation)
+distance_matrix <- 1 - pub_ovov_matrix
+
+# Define metadata columns for PERMANOVA
+key_meta_df %>% glimpse()
+full_meta_df %>% glimpse()
+
+target_metadata <- colnames(full_meta_df) %>% 
+    discard(. %in% c("sample_id"))
+# target_metadata <- c(
+#     "study", "raw_total_reads", "raw_total_reads_binned",
+#     "case_control_other_latest",
+#     "DRB1_grouped", "DRB1_risk",
+#     "age_at_baseline", "sex", mds_tests
+# )
+
+# Get sample metadata for PERMANOVA
+permanova_metadata <- full_meta_df %>%
+    filter(!is.na(case_control_other_latest)) %>%
+    filter(sample_id %in% rownames(distance_matrix)) %>%
+    column_to_rownames("sample_id") %>%
+    select(all_of(target_metadata), participant_id) %>%
+    glimpse()
+
+subsample_resdir <- glue("{metrics_dir}/permanova_public_overlap_sid_subsample")
+subsample_resdir_input <- glue("{subsample_resdir}/model_input")
+perm_resdir <- glue("{subsample_resdir}/results")
+dir.create(subsample_resdir_input, showWarnings = FALSE, recursive = TRUE)
+dir.create(perm_resdir, showWarnings = FALSE, recursive = TRUE)
+# Saving subsampled distance matrix and metadata
+common_samples <- intersect(
+    rownames(distance_matrix), rownames(permanova_metadata)
+)
+
+# Saving 50 random subsamples of distance matrix and metadata
+for (i in 1:50) {
+    message("Processing iter: ", i)
+    set.seed(i)
+    # already filtered for samples in dist matrix
+    i_common_samples <- permanova_metadata %>%
+        rownames_to_column(var = "sample_id") %>%
+        group_by(participant_id) %>%
+        dplyr::slice_sample(n = 1) %>%
+        ungroup() %>%
+        pull(sample_id)
+
+    distance_matrix_filtered <- as.dist(distance_matrix[i_common_samples, i_common_samples])
+    permanova_metadata_filtered <- permanova_metadata[i_common_samples, ] %>% glimpse()
+
+    # Saving distance matrix and metadata
+    saveRDS(
+        distance_matrix_filtered,
+        glue(
+            "{subsample_resdir_input}/",
+            "distance_matrix_filtered_subsample_{i}.rds"
+        )
+    )
+    saveRDS(
+        permanova_metadata_filtered,
+        glue(
+            "{subsample_resdir_input}/",
+            "permanova_metadata_filtered_subsample_{i}.rds"
+        )
+    )
+}
+
+# # Run PERMANOVA for each metadata variable
+# slurm_logs <- glue("{wkdir}/.cluster_runs/",
+#     "{Sys.Date()}_permanova_public_overlap_sid_subsample")
+# dir.create(slurm_logs, showWarnings = FALSE, recursive = TRUE)
+
+# nperms <- 9999
+# nthreads <- 2
+# for (i in 1:50) {
+#     for (var in target_metadata) {
+#         message("Running PERMANOVA for: ", var)
+
+#         # Important that distance_matrix is used here below
+#         form <- glue("distance_matrix ~ {var}")
+#         breg <- easy_batch(
+#             cluster_name = glue("pm_{i}_{var}"),
+#             fun = run_permanova,
+#             params = data.frame(
+#                 "dmat_path" = glue(
+#                     "{subsample_resdir_input}/",
+#                     "distance_matrix_filtered_subsample_{i}.rds"
+#                 ),
+#                 "meta_path" = glue(
+#                     "{subsample_resdir_input}/",
+#                     "permanova_metadata_filtered_subsample_{i}.rds"
+#                 ),
+#                 "model_formula_string" = form,
+#                 "outpath" = glue("{perm_resdir}/permanova_{var}_nperms_{nperms}_subsample_{i}_{Sys.Date()}.rds"),
+#                 "n_perms" = nperms,
+#                 "n_cores" = nthreads
+#             ),
+#             template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+#             log_dir = slurm_logs,
+#             walltime = "20:00:00",
+#             memory = "50GB",
+#             ncpus = nthreads,
+#             max_jobs = 9999
+#         )
+#     }
+# }
+
+
+batch_params <- expand.grid("var" = target_metadata, "i" = 1:50) %>% 
+    mutate(
+        dmat_path = glue(
+            "{subsample_resdir_input}/",
+            "distance_matrix_filtered_subsample_{i}.rds"
+        ),
+        meta_path = glue(
+            "{subsample_resdir_input}/",
+            "permanova_metadata_filtered_subsample_{i}.rds"
+        ),
+        model_formula_string = glue("distance_matrix ~ {var}"),
+        outpath = glue("{perm_resdir}/",
+            "permanova_{var}_nperms_{nperms}_subsample_{i}_{Sys.Date()}.rds"),
+        n_perms = 9999,
+        n_cores = 2        
+    ) %>%
+    dplyr::select(-c(var, i)) %>% 
+    glimpse()
+
+# configure registry ----
+breg <- breg_setup(cluster_name = "PERM_POVOV", 
+    log_dir = glue("{wkdir}/.cluster_runs/"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl")
+    )
+
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = run_permanova,
+  args = batch_params[21:26800, ],
+  reg = breg
+)
+nrow(batch_params)
+
+jobs[, chunk := chunk(job.id, chunk.size = 10)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = "2-00:00:00",
+    memory = "50GB",
+    ncpus = 2,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+Visualizing Public Overlap PERMANOVA Screen
+# TODO FIXME update filters for new outputs
+
+```{r}
+subsample_resdir <- glue("{metrics_dir}/permanova_public_overlap_sid_subsample")
+perm_resdir <- glue("{subsample_resdir}/results")
+
+res_paths <- list.files(perm_resdir, 
+    full.names = TRUE, pattern = "_9999_") %>% 
+    keep(grepl("2025-06-06|2025-06-07", .))
+
+future::plan("multisession", workers = 7)
+permanova_results <- res_paths %>%
+    purrr::set_names(basename(.)) %>%
+    furrr::future_map(~ readRDS(.) %>% broom::tidy()) %>%
+    bind_rows(.id = "model_info") %>%
+    janitor::clean_names() %>%
+    mutate(r2_percent = round(r2 * 100, 3)) %>%
+    arrange(p_value) %>%
+    glimpse()
+
+# Visualize PERMANOVA results
+permanova_results %>% glimpse()
+
+# permanova_results %>%
+#     filter(term %nin% c("Residual", "Total")) %>%
+#     arrange(p_value) %>%
+#     slice_min(p_value, n=100) %>% 
+#     View
+
+passing_meta <- permanova_results %>%   
+    filter(term %nin% c("Residual", "Total")) %>% 
+    filter(p_value <= 0.05) %>% 
+    pull(term) %>% unique
+
+p_permanova <- permanova_results %>%
+    filter(term %nin% c("Residual", "Total")) %>%
+    filter(term  %in% passing_meta) %>% 
+    arrange(p_value) %>%
+    mutate(
+        significant = p_value < 0.05,
+        p_value_formatted = format.pval(p_value, digits = 3)
+    ) %>%
+    ggplot(aes(y = fct_reorder(term, r2), x = r2 * 100)) +
+    geom_point(aes(color = significant),
+        size = 0.8,
+        position = position_jitter(height = 0.2, width = 0), alpha = 0.85
+    ) +
+    geom_boxplot(alpha = 0.3, outlier.shape = NA, width = 0.5) +
+    scale_color_manual(values = c("grey70", "red")) +
+    theme_bw() +
+    labs(
+        title = "PERMANOVA Results: TCR Repertoire Similarity",
+        x = "R² % (Effect Size)",
+        y = NULL
+    ) +
+    theme(legend.position = "bottom")
+
+ggsave(
+    glue("{imm_plots_dir}/tcr_permanova_results_public_overlap_{Sys.Date()}.png"),
+    p_permanova,
+    width = 8,
+    height = 20
+)
+
+
+# Summarize
+perm_summary_df <- permanova_results %>%
+  group_by(term) %>%
+  summarise(
+    mean_log10_p = mean(-log10(p_value), na.rm = TRUE),
+    sd_log10_p = sd(-log10(p_value), na.rm = TRUE),
+    mean_r2_percent = mean(r2 * 100, na.rm = TRUE),
+    sd_r2_percent = sd(r2 * 100, na.rm = TRUE),
+    mean_statistic = mean(statistic, na.rm = TRUE),
+    sd_statistic = sd(statistic, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  filter(!grepl("guid|GUID", term)) %>% 
+  glimpse()
+
+# Flag terms above threshold
+pval_thresh <- -log10(0.05)
+labeled_points <- perm_summary_df %>%
+  filter(mean_log10_p > pval_thresh)
+
+View(labeled_points)
+
+# Plot
+p_perm_base <- ggplot(perm_summary_df, aes(x = mean_log10_p, y = mean_r2_percent)) +
+  geom_point(alpha = 0.8,) +
+  geom_errorbar(aes(ymin = mean_r2_percent - sd_r2_percent,
+                    ymax = mean_r2_percent + sd_r2_percent),
+                width = 0.01, alpha = 0.5) +
+  geom_errorbarh(aes(xmin = mean_log10_p - sd_log10_p,
+                     xmax = mean_log10_p + sd_log10_p),
+                 height = 0.01, alpha = 0.5) +
+    scale_y_log10() +
+    geom_vline(xintercept = -log10(0.05)) +
+  labs(
+    x = expression("Mean -log"[10]*"(p-value)"),
+    y = "Mean R² (%)",
+    title = "PERMANOVA Summary by Term"
+  ) +
+  theme_bw()
+
+p_perm_annot <- p_perm_base +
+  ggrepel::geom_text_repel(
+    data = labeled_points,
+    aes(label = term),
+    size = 3,
+    max.overlaps = Inf,
+    force = 50,
+    force_pull = 0,
+    nudge_x = ifelse(labeled_points$mean_log10_p > 0, 1, -1),
+    nudge_y = 1,
+    box.padding = 0.8,
+    point.padding = 0.5,
+    segment.color = "grey",
+    segment.size = 0.2,
+    segment.alpha = 0.75,
+    direction = "both",
+    segment.curvature = 0.3,
+    segment.ncp = 3,
+    segment.angle = 10
+  )
+
+ggsave(
+    glue("{imm_plots_dir}/tcr_permanova_results_public_overlap_summary_base_{Sys.Date()}.png"),
+    p_perm_base,
+    width = 10,
+    height = 10
+)
+ggsave(
+    glue("{imm_plots_dir}/tcr_permanova_results_public_overlap_summary_annot_{Sys.Date()}.png"),
+    p_perm_annot,
+    width = 10,
+    height = 10
+)
+
+```
+
+
+
+
+PERMANOVA on Morisita Horn distance
+
+# TODO FIXME Swap out data with MH index instead and change up code
+
+```{r}
+pub_ovov <- readRDS(
+    glue("{metrics_dir}/rep-overlap-overlap_2024-12-19.rds")
+)
+pub_ovov_df <- pub_ovov %>% as.data.frame() %>% 
+    glimpse()
+
+pub_ovov_df_long <- pub_ovov_df %>% 
+    rownames_to_column("sample_id1") %>%
+    pivot_longer(
+        cols = -sample_id1,
+        names_to = "sample_id2",
+        values_to = "overlap_counts"
+    ) %>%
+    mutate(overlap_counts = replace_na(overlap_counts, 1)) %>%
+    glimpse()
+
+# Convert the long format data back to a matrix
+pub_ovov_matrix <- pub_ovov_df_long %>%
+  pivot_wider(
+    id_cols = sample_id1,
+    names_from = sample_id2,
+    values_from = overlap_counts
+  ) %>%
+  column_to_rownames("sample_id1") %>%
+  as.matrix()
+
+distance_matrix <- 1 - pub_ovov_matrix
+
+# Define metadata columns for PERMANOVA
+key_meta_df %>% glimpse()
+full_meta_df %>% glimpse()
+
+target_metadata <- colnames(full_meta_df) %>% 
+    discard(. %in% c("sample_id"))
+
+# Get sample metadata for PERMANOVA
+permanova_metadata <- full_meta_df %>%
+    filter(!is.na(case_control_other_latest)) %>%
+    filter(sample_id %in% rownames(distance_matrix)) %>%
+    column_to_rownames("sample_id") %>%
+    select(all_of(target_metadata), participant_id) %>%
+    glimpse()
+
+subsample_resdir <- glue("{metrics_dir}/permanova_public_overlap_sid_subsample")
+subsample_resdir_input <- glue("{subsample_resdir}/model_input")
+perm_resdir <- glue("{subsample_resdir}/results")
+dir.create(subsample_resdir_input, showWarnings = FALSE, recursive = TRUE)
+dir.create(perm_resdir, showWarnings = FALSE, recursive = TRUE)
+# Saving subsampled distance matrix and metadata
+common_samples <- intersect(
+    rownames(distance_matrix), rownames(permanova_metadata)
+)
+
+
+batch_params <- expand.grid("var" = target_metadata, "i" = 1:50) %>% 
+    mutate(
+        dmat_path = glue(
+            "{subsample_resdir_input}/",
+            "distance_matrix_filtered_subsample_{i}.rds"
+        ),
+        meta_path = glue(
+            "{subsample_resdir_input}/",
+            "permanova_metadata_filtered_subsample_{i}.rds"
+        ),
+        model_formula_string = glue("distance_matrix ~ {var}"),
+        outpath = glue("{perm_resdir}/",
+            "permanova_{var}_nperms_{nperms}_subsample_{i}_{Sys.Date()}.rds"),
+        n_perms = 9999,
+        n_cores = 2        
+    ) %>%
+    dplyr::select(-c(var, i)) %>% 
+    glimpse()
+
+# configure registry ----
+breg <- breg_setup(cluster_name = "PERM_POVOV", 
+    log_dir = glue("{wkdir}/.cluster_runs/"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl")
+    )
+
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = run_permanova,
+  args = batch_params[21:26800, ],
+  reg = breg
+)
+nrow(batch_params)
+
+jobs[, chunk := chunk(job.id, chunk.size = 10)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = "2-00:00:00",
+    memory = "50GB",
+    ncpus = 2,
+    max.concurrent.jobs = 9999
+  )
+)
+
+
+```
+
+
+
+What fraction of receptors are clones between timepoints within an individual?
+
+overlap coefficient (.method = "overlap") - a normalised measure of overlap similarity. It is defined as the size of the intersection divided by the smaller of the size of the two sets.
+
+```{r}
+pub_ovov <- readRDS(
+    glue("{metrics_dir}/rep-overlap-overlap_2024-12-19.rds")
+)
+
+overlap_df <- pub_ovov %>% as.data.frame() %>% 
+    glimpse()
+
+target_metadata <- c(
+    "sample_id", 
+    "case_control_other_latest", 
+    "participant_id", 
+    "visit_month", 
+    "study"
+    )
+
+overlap_df_long <- overlap_df %>%
+  rownames_to_column("sample_id1") %>%
+  pivot_longer(
+    cols = -sample_id1,
+    names_to = "sample_id2", 
+    values_to = "overlap_score"
+  ) %>%
+  drop_na(overlap_score) %>%
+  # Join metadata for first sample
+  left_join(
+    key_meta_df %>% 
+      select(all_of(target_metadata)) %>%
+      rename_with(~paste0(., "1"), everything()),
+    by = c("sample_id1")
+  ) %>%
+  # Join metadata for second sample  
+  left_join(
+    key_meta_df %>%
+      select(all_of(target_metadata)) %>%
+      rename_with(~paste0(., "2"), everything()),
+    by = c("sample_id2")
+  ) %>%
+  filter(case_control_other_latest1 != "Other") %>%
+  filter(case_control_other_latest2 != "Other") %>%
+  filter(participant_id1 == participant_id2) %>%
+  filter(sample_id1 != sample_id2) %>%
+  mutate(timepoint_delta = visit_month2 - visit_month1) %>%
+  mutate(timepoint_delta_cat = case_when(
+      timepoint_delta < 0 ~ "before",
+      timepoint_delta > 0 ~ "after", 
+      TRUE ~ "same"
+    )
+  )
+
+first_timepoint_ref <- overlap_df_long %>% 
+    # filter(participant_id1 == participant_id2) %>% 
+    filter(timepoint_delta_cat == "after") %>%
+    group_by(participant_id1, visit_month1) %>%
+    slice_min(order_by = visit_month1, n = 1) %>%
+    glimpse()
+
+# Does distance between timepoints correlate with overlap coefficient?
+p_first_timepoint_ref <- first_timepoint_ref %>% 
+    ggplot(aes(x = timepoint_delta, y = overlap_score, 
+        color = case_control_other_latest1)) +
+    geom_point(
+        position = position_jitter(width = 1.6, height = 0), 
+        alpha = 0.4, size = 0.5) +
+    geom_smooth(method = "lm") +
+    labs(x = "Timepoint delta [after - before] (months)", 
+         y = "Overlap coefficient") +
+    ggpubr::stat_regline_equation(
+        label.x.npc = 0.02,
+        label.y.npc = c(0.95, 0.9),
+        aes(label = paste(after_stat(eq.label), after_stat(rr.label), sep = "~")),
+        formula = y ~ x
+    ) +
+    scale_color_d3() +
+    theme_bw() +
+    guides(color = guide_legend(override.aes = list(text = 0))) +
+    labs(color = NULL) +
+    theme(legend.position = "top")
+
+ggsave(
+    glue("{imm_plots_dir}/public_overlap_first_timepoint_ref_overlap_coef_{Sys.Date()}.png"),
+    p_first_timepoint_ref,
+    width = 5,
+    height = 4
+)
+
+
+# Now if we allow all timedelta comparisons within a participant
+
+overlap_df_long %>% glimpse()
+overlap_df_long %>% 
+    filter(participant_id1 == "PD-PDAA503EF5") %>%
+    View()
+
+cross_timepoint_ref <- overlap_df_long %>% 
+    # filter(timepoint_delta_cat == "after") %>%
+    glimpse()
+
+# Does distance between timepoints correlate with overlap coefficient?
+p_cross_timepoint_ref <- cross_timepoint_ref %>% 
+    ggplot(aes(x = timepoint_delta, y = overlap_score, 
+        color = case_control_other_latest1)) +
+    geom_point(
+        position = position_jitter(width = 1.6, height = 0), 
+        alpha = 0.4, size = 0.5) +
+    geom_smooth(method = "loess", se = TRUE) +
+    labs(x = "Timepoint delta [after - before] (months)", 
+         y = "Overlap coefficient") +
+    scale_color_d3() +
+    theme_bw() +
+    guides(color = guide_legend(override.aes = list(text = 0))) +
+    labs(color = NULL) +
+    theme(legend.position = "top")
+
+ggsave(
+    glue("{imm_plots_dir}/public_overlap_cross_timepoint_ref_overlap_coef_{Sys.Date()}.png"),
+    p_cross_timepoint_ref,
+    width = 5,
+    height = 4
+)
+
+
+
+```
+
+
+
+
+
+```{r}
+pub_ov <- readRDS(
+    glue("{metrics_dir}/rep-overlap-public_2024-12-19.rds")
+)
+
+public_overlap_df <- pub_ov %>% as.data.frame() %>% 
+    glimpse()
+
+target_metadata <- c(
+    "sample_id", 
+    "case_control_other_latest", 
+    "participant_id", 
+    "visit_month", 
+    "study",
+    "DRB1_risk"
+    )
+
+public_overlap_df_long <- public_overlap_df %>%
+  rownames_to_column("sample_id1") %>%
+  pivot_longer(
+    cols = -sample_id1,
+    names_to = "sample_id2",
+    values_to = "overlap_score"
+  ) %>%
+  drop_na(overlap_score) %>%
+  # Join metadata for first sample
+  left_join(
+    key_meta_df %>% 
+      select(all_of(target_metadata)) %>%
+      rename_with(~paste0(., "1"), everything()),
+    by = c("sample_id1")
+  ) %>%
+  # Join metadata for second sample  
+  left_join(
+    key_meta_df %>%
+      select(all_of(target_metadata)) %>%
+      rename_with(~paste0(., "2"), everything()),
+    by = c("sample_id2")
+  ) %>%
+  mutate(
+    timepoint_delta = case_when(
+      participant_id1 == participant_id2 ~ visit_month2 - visit_month1,
+      TRUE ~ NA_real_
+    )
+  ) %>% 
+  mutate(
+    timepoint_delta_cat = case_when(
+      timepoint_delta < 0 ~ "before",
+      timepoint_delta > 0 ~ "after",
+      TRUE ~ "same"
+    )
+  ) %>% 
+    mutate(disease_condition = case_when(
+        participant_id1 == participant_id2 & case_control_other_latest1 == "Case" ~ "Within\nCase (Donors)",
+        participant_id1 == participant_id2 & case_control_other_latest1 == "Control" ~ "Within\nControl (Donors)",
+        case_control_other_latest1 == "Case" & case_control_other_latest2 == "Case" ~ "Between\nCase",
+        case_control_other_latest1 == "Control" & case_control_other_latest2 == "Control" ~ "Between\nControl",
+        case_control_other_latest1 == "Case" & case_control_other_latest2 == "Control" ~ "Between\nCase-Control",
+        case_control_other_latest1 == "Control" & case_control_other_latest2 == "Case" ~ "Between\nCase-Control",
+        TRUE ~ "ERROR"
+    )) %>%
+    mutate(disease_condition = factor(disease_condition, 
+        levels = c(
+            "Within\nCase (Donors)",
+            "Within\nControl (Donors)",
+            "Between\nCase",
+            "Between\nControl",
+            "Between\nCase-Control"
+        ))) %>% 
+    mutate(HLA_DRB1_risk_grouping = case_when(
+        DRB1_risk1 == "risk" & DRB1_risk2 == "risk" ~ "Witihin\nRisk",
+        DRB1_risk1 == "protective" & DRB1_risk2 == "protective" ~ "Witihin\nProtective",
+        DRB1_risk1 == "mixed" & DRB1_risk2 == "mixed" ~ "Witihin\n Mixed",
+        (DRB1_risk1 == "risk" & DRB1_risk2 == "protective") | 
+            (DRB1_risk1 == "protective" & DRB1_risk2 == "risk") ~ "Between\nRisk & Protective",
+        DRB1_risk1 == "none" & DRB1_risk2 == "none" ~ "Within\nDRX/DRX",
+        TRUE ~ "OTHER"
+    )) %>%
+    glimpse()
+
+public_overlap_df_long %>% glimpse()
+public_overlap_df_long$overlap_score %>% summary()
+
+within_pid_overlap <- public_overlap_df_long %>% 
+    filter(participant_id1 == participant_id2, 
+        timepoint_delta_cat == "after") %>%
+        group_by(sample_id1, visit_month1) %>%
+        slice_min(order_by = timepoint_delta, n = 1) %>%
+    glimpse()
+
+# Does distance between timepoints correlate with overlap?
+p_public_overlap <- within_pid_overlap %>% 
+    ggplot(aes(x = timepoint_delta, y = overlap_score, 
+        color = case_control_other_latest1)) +
+    geom_point(position = position_jitter(width = 1.6, height = 0), alpha = 0.2, size = 0.5) +
+    geom_smooth(method = "loess", se = TRUE) +
+    labs(x = "Timepoint delta [after - before] (months)", y = "Shared clones \n within donors") +
+    scale_color_d3() +
+    ggpubr::stat_regline_equation(
+        label.x.npc = 0.02,
+        label.y.npc = c(0.9, 0.85),
+        aes(label = paste(after_stat(eq.label), after_stat(rr.label), sep = "~")),
+        formula = y ~ x
+    ) +
+    guides(color = guide_legend(override.aes = list(text = 0))) +
+    theme_bw() +
+    theme(legend.position = "top")
+
+ggsave(
+    glue("{imm_plots_dir}/public_overlap_within_pid.png"),
+    p_public_overlap,
+    width = 5,
+    height = 4 
+)
+
+  # Keep only one direction of each pair by comparing string values
+# public_overlap_df_long %>%
+#   filter(stringr::str_compare(sample_id1, sample_id2) < 0) %>%
+#   glimpse
+    # filter(
+    #     (sample_id1 == "BF-1001-SVM0_5T1" & sample_id2 == "BF-1002-SVM0_5T1") | 
+    #     (sample_id1 == "BF-1002-SVM0_5T1" & sample_id2 == "BF-1001-SVM0_5T1")
+    # )
+
+
+
+```
+
+
+Individual participants should have greater overlap between timepoints than between participants
+
+```{r}
+public_overlap_df_long %>% 
+    mutate(pair_desc = case_when(
+        participant_id1 == participant_id2 ~ "within_pid",
+        TRUE ~ "between_pid"
+    )) %>%
+    group_by(pair_desc) %>%
+    summarise(mean_overlap = mean(overlap_score)) %>%
+    glimpse()
+
+```
+
+
+```{r}
+# Pulling total unique clones per sample from Hill diversity
+unique_clones_per_sample <- readRDS( 
+    glue("{metrics_dir}/rep-diversity-hill_2024-12-19_plus_q0.rds")) %>% 
+    filter(Q == 0) %>% 
+    mutate(sample_id1 = Sample, sample_id2 = Sample) %>% 
+    dplyr::rename(overlap_counts = Value) %>% 
+    dplyr::select(sample_id1, sample_id2, overlap_counts) %>% 
+    glimpse()
+
+public_overlap_df_long_full <- public_overlap_df %>% 
+    rownames_to_column("sample_id1") %>%
+    pivot_longer(
+        cols = -sample_id1,
+        names_to = "sample_id2",
+        values_to = "overlap_counts"
+    ) %>%
+    # Create a full join with unique_clones_per_sample
+    full_join(unique_clones_per_sample, 
+              by = c("sample_id1", "sample_id2"),
+              suffix = c("", "_unique")) %>%
+    # Give priority to unique_clones_per_sample values
+    mutate(overlap_counts = coalesce(overlap_counts_unique, overlap_counts)) %>%
+    select(-overlap_counts_unique) %>%
+    glimpse()
+
+public_overlap_df_long_full %>% glimpse()
+
+
+# Convert the long format data back to a matrix
+public_overlap_matrix_full <- public_overlap_df_long_full %>%
+  pivot_wider(
+    id_cols = sample_id1,
+    names_from = sample_id2,
+    values_from = overlap_counts
+  ) %>%
+  column_to_rownames("sample_id1") %>%
+  as.matrix()
+
+# Display the first few rows and columns
+public_overlap_matrix_full[1:5, 1:5]
+
+# # Seriating the matrix
+# sid_order_ov_counts <- seriate_matrix_rows(public_overlap_matrix_full, 
+#     seriate_method = "HC_average")
+
+# saveRDS(
+#     sid_order_ov_counts,
+#     glue("{metrics_dir}/repertoire_stats/sid_order_ov_counts_{Sys.Date()}.rds")
+# )
+
+sid_order_ov_counts <- readRDS(
+    glue("{metrics_dir}/repertoire_stats/sid_order_ov_counts_2025-03-24.rds")
+)
+
+p_overlap_heatmap <- public_overlap_df_long_full %>%
+    mutate(sample_id1 = factor(sample_id1, levels = sid_order_ov_counts)) %>%
+    mutate(sample_id2 = factor(sample_id2, levels = sid_order_ov_counts)) %>%
+    filter(sample_id1 != sample_id2) %>%
+    ggplot(aes(x = sample_id1, y = sample_id2, fill = overlap_counts)) +
+    geom_tile() +
+    scale_fill_viridis_c(
+        option = "mako",
+        trans = "log10",
+        name = "Overlap Count",
+        na.value = "white"
+    ) +
+    labs(x = NULL, y = NULL, fill = "Overlap Count") +
+    theme_bw() +
+    theme(
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank()
+    )
+
+ggsave(
+    glue("{imm_plots_dir}/public_overlap_heatmap_{Sys.Date()}.png"),
+    p_overlap_heatmap,
+    width = 10,
+    height = 8
+)
+
+```
+
+
+
+Testing for overlap in McPas and VDJDB
+
+
+```{r}
+mcpas = dbLoad("https://gitlab.com/immunomind/immunarch/raw/dev-0.5.0/private/McPAS-TCR.csv.gz", "mcpas", .species = "Human", .chain = "TRB")
+mcpas
+```

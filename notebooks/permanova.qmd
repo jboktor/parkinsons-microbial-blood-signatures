@@ -1,0 +1,361 @@
+---
+title: "Permutational Analysis of Variance (PERMANOVA) of KrakenUniq Aligned Microbial Reads"
+editor: source
+author: "Joe Boktor"
+date: '2024-02-25'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    column: page
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+In this notebook we preform PERMANOVA on KrakenUniq read profiles against clinical metadata. 
+This analysis will be used to survey microbial profile associations with a broad range of disease relavent metadata including anthropomorphic, behavioral, and medication usage covariates. The analysis will be parallelized using the `batchtools` package and the `slurm` job scheduler for efficient computation.
+
+
+```{r}
+#| warning: false
+#| message: false
+
+pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+wgs_wkdir <- paste0(pdmbs_dir, "/workflow/WGS")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_plot-functions.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_analysis_funcs.R"))
+library(phyloseq)
+library(microbiome)
+library(plotly)
+library(ggsci)
+
+permanova_results_dir <- glue("{wkdir}/data/interim/permanova/distributed")
+permanova_results_norm_dir <- glue("{wkdir}/data/interim/permanova/normalized_distributed")
+
+```
+
+Loading in metadata and KrakenUniq read profiles
+
+```{r, eval=FALSE}
+metadata_categories_df <- readRDS(
+  glue(
+    "{wkdir}/data/interim/metadata/",
+    "2023-06-06_metadata_categories_dataframe.rds"
+  )
+)
+metadata_categories <- readRDS(
+    glue(
+      "{wkdir}/data/interim/metadata/",
+      "2023-06-06_metadata_categories.rds"
+    )
+  )
+
+ps_trim <- readRDS(
+    glue(
+        "{wkdir}/data/processed/",
+        "phyloseq_objects/decontaminated/",
+        "2024-02-25_WGS_KrakenUnique_phyloseq.rds"
+    )
+)
+
+cohorts <- meta(ps_trim)$study %>% unique()
+
+# split the phyloseq object by study into a list
+ps_by_study <- cohorts %>%
+  purrr::set_names() %>%
+  purrr::map(function(x) {
+    filtered_sample_data <- subset(sample_data(ps_trim), study == x)
+    prune_samples(sample_names(filtered_sample_data), ps_trim)
+  })
+
+```
+
+Executing PERMANOVA on KrakenUniq read with batchtools parallelization
+
+
+```{r, eval=FALSE}
+# Parallelizing with slurm ---- 
+batchtools_params <- expand.grid(
+  metadata_column = unlist(metadata_categories,
+      recursive = TRUE, use.names = FALSE
+    ),
+    metadata = cohorts) %>% 
+  as_tibble() %>%
+    mutate(
+      ps_object = map(metadata, ~ ps_by_study[[.x]]),
+      threads = 4,
+      nperm = 10000,
+      output_path = glue(
+        "{permanova_results_dir}/",
+        "{metadata}_{metadata_column}.tsv"
+      )
+    ) %>%
+    filter(
+      metadata_column %nin% c("study", "participant_id"),
+      !grepl("roi|ref", metadata_column)
+    ) %>% 
+    filter(!file.exists(output_path)) %>%
+    glimpse()
+
+# configure registry ----
+cluster_run <- glue("{get_time()}_PERMANOVA")
+message("\n\nRUNNING:  ", cluster_run, "\n")
+breg <- makeRegistry(
+  file.dir = glue(
+    "{wkdir}/.cluster_runs/",
+    cluster_run
+  ),
+  seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+  template = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+  scheduler.latency = 0.1,
+  fs.latency = 1
+)
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = phyloseq_permanova_slurm,
+  args = batchtools_params,
+  reg = breg
+)
+jobs[, chunk := chunk(job.id, chunk.size = 20)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = 200,
+    memory = 5000,
+    ncpus = 4,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+
+Running analysis using counts normalized by human read depth and filtering taxa from each cohort that are undetected.
+
+```{r, eval=FALSE}
+
+wgs_flagstat_meta <- readRDS(
+  glue(
+    "{wkdir}/data/processed/readqc/",
+    "2024-02-25_WGS_flagstat-metrics_phyloseq-formatted.rds"
+  )
+)
+all(wgs_flagstat_meta$sample_id == rownames(meta(ps_trim)))
+
+# adding flagstat metrics to phyloseq object
+phyloseq::sample_data(ps_trim)[colnames(wgs_flagstat_meta)] <-
+    wgs_flagstat_meta
+mapped_human_reads <- meta(ps_trim)$flagstat_01_cram_mapped
+
+# normalize by mapped human reads (sample IDS should be aligned)
+ps_trim_norm <- ps_trim
+otu_table(ps_trim_norm) %>% colSums() %>% head
+otu_table(ps_trim_norm) <- otu_table(ps_trim_norm) / mapped_human_reads
+otu_table(ps_trim_norm) %>% colSums() %>% head
+
+ps_by_study_norm <- cohorts %>%
+  purrr::set_names() %>%
+  purrr::map(function(x) {
+    filtered_sample_data <- subset(sample_data(ps_trim_norm), study == x)
+    ps <- prune_samples(sample_names(filtered_sample_data), ps_trim_norm) %>%
+      microbiome::core(., detection = 0, prevalence = 1e-5)
+  })
+
+saveRDS(
+  ps_trim_norm,
+  glue(
+    "{wkdir}/data/processed/",
+    "phyloseq_objects/decontaminated/",
+    "{Sys.Date()}_WGS_KrakenUnique_phyloseq_humanreadnorm.rds"
+  )
+)
+
+```
+
+
+Permanova execution with normalized and filtered phyloseq objects using 50k permutations per metadata.
+
+```{r, eval=FALSE}
+
+# Parallelizing with slurm ---- 
+batchtools_params <- expand.grid(
+  metadata_column = unlist(metadata_categories,
+      recursive = TRUE, use.names = FALSE
+    ),
+    metadata = cohorts) %>% 
+  as_tibble() %>%
+    mutate(
+      ps_object = map(metadata, ~ ps_by_study_norm[[.x]]),
+      threads = 2,
+      nperm = 10000,
+      output_path = glue(
+        "{permanova_results_norm_dir}/",
+        "{metadata}_{metadata_column}.tsv"
+      )
+    ) %>%
+    filter(
+      metadata_column %nin% c("study", "participant_id"),
+      !grepl("roi|ref", metadata_column)
+    ) %>% 
+    filter(!file.exists(output_path)) %>%
+    glimpse()
+
+# configure registry ----
+cluster_run <- glue("{get_time()}_PERMANOVA_norm")
+message("\n\nRUNNING:  ", cluster_run, "\n")
+breg <- makeRegistry(
+  file.dir = glue(
+    "{wkdir}/.cluster_runs/",
+    cluster_run
+  ),
+  seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+  template = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+  scheduler.latency = 0.1,
+  fs.latency = 1
+)
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = phyloseq_permanova_slurm,
+  args = batchtools_params,
+  reg = breg
+)
+jobs[, chunk := chunk(job.id, chunk.size = 50)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = 300,
+    memory = 10000,
+    ncpus = 4,
+    max.concurrent.jobs = 9999
+  )
+)
+
+
+```
+
+
+Aggregating output files
+
+```{r, eval=FALSE}
+permanova_df <- list.files(permanova_results_norm_dir) %>%
+  purrr::set_names() %>%
+  purrr::map(~ read_tsv(glue("{permanova_results_norm_dir}/{.}"))) %>%
+  bind_rows(.id = "filename") %>%
+  glimpse()
+
+permanova_df %>% glimpse()
+
+permanova_df_formatted <- permanova_df %>%
+  left_join(metadata_categories_df) %>%
+  dplyr::mutate(R2_perc = R2 * 100) %>%
+  group_by(additional_metadata) %>%
+  mutate(FDR = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  glimpse()
+
+saveRDS(
+  permanova_df_formatted,
+  glue(
+    "{wkdir}/data/interim/permanova/",
+    "{Sys.Date()}_PERMANOVA_n1000_normalized.rds"
+  )
+)
+
+```
+
+Visualizing results
+
+```{r}
+#| fig-height: 12
+
+permanova_df <- readRDS(
+  glue(
+    "{wkdir}/data/interim/permanova/",
+    "2024-02-27_PERMANOVA_n1000_normalized.rds"
+  )
+)
+
+p_perm_dist_plotly <- permanova_df %>%
+  ggplot(aes(y = -log10(FDR), x = R2_perc, group = metadata)) +
+  geom_point(aes(
+  color = metadata_class, size = n), alpha = 0.8
+  ) +
+  theme_bw() +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  labs(
+    x = "Explained variance R2 (%)",
+    y = "-log10(FDR)",
+    color = "Metadata Category",
+    size = "Analysis N"
+  ) +
+  scale_color_npg()
+ggplotly(p_perm_dist_plotly)
+
+```
+
+
+```{r, eval=FALSE}
+
+p_perm_dist <- permanova_df %>%
+  ggplot(aes(y = -log10(FDR), x = R2_perc)) +
+  geom_point(aes(
+    color = metadata_class, size = n), alpha = 0.8
+    ) +
+  theme_bw() +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  scale_x_log10() +
+  labs(
+    x = expression("Explained variance" ~ R^2 ~ "(%)"),
+    y = expression(-log[10] ~ "(FDR)"),
+    color = "Metadata Category",
+    size = "Analysis N"
+  ) +
+  scale_color_npg()
+
+ggsave(
+  filename = glue("{wkdir}/figures/permanova/permanova_distribution.png"),
+  plot = p_perm_dist,
+  width = 9,
+  height = 6
+)
+
+```
+
+![](../figures/permanova/permanova_distribution.png)
+
+Visualizing a table of the top hits with detection in multiple cohorts.
+
+
+```{r}
+permanova_df %>%
+  filter(FDR <= 0.05) %>%
+  janitor::get_dupes(metadata) %>%
+  DT::datatable(
+    extensions =
+      c("Buttons", "ColReorder", "FixedHeader", "Scroller"),
+    options = list(
+      scrollX = TRUE,
+      scrollY = 400,
+      dom = "Blfrtip",
+      buttons = c("copy", "csv", "excel", "pdf", "print")
+    )
+  )
+
+```
+
+
+```{r}
+sessionInfo()
+
+```

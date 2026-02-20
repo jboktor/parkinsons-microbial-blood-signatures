@@ -1,0 +1,1357 @@
+---
+title: "Clustering TCR repertoires - ML models"
+editor: source
+author: "Joe Boktor"
+date: '2025-08-26'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+
+Environment setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(seqinr)
+library(progress)
+library(immunarch)
+library(nlme)
+library(broom)
+library(broom.mixed)
+library(parallelDist)
+library(tidymodels)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+library(scico)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
+source(paste0(src_dir, "/R_scripts/_airr_analyze-permanova.R"))
+
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+gliph2_plots_dir <- glue("{wkdir}/figures/AIRR/gliph2/")
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+arcasHLA_interim <- glue("{wkdir}/data/interim/airr/arcasHLA")
+gliph2_input_dir <- glue("{wkdir}/data/input/gliph2/param_files")
+gliph2_res_dir <- glue("{wkdir}/data/interim/airr/gliph2/processing")
+clustcr_dir <- glue("{wkdir}/data/interim/clusTCR")
+clustcr_figs <- glue("{wkdir}/figures/clusTCR")
+tcr_cdr3_riskscore_complied <- 
+    glue("{wkdir}/data/interim/cdr3_qtl/scoring_cdr3-risk-scores_complied")
+cohort_subset_dir <- glue("{clustcr_dir}/results/cohort_subsets")
+
+# dir.create(clustcr_figs, showWarnings = FALSE, recursive = TRUE)
+# dir.create(glue("{clustcr_dir}/input"), showWarnings = FALSE, recursive = TRUE)
+# dir.create(glue("{clustcr_dir}/results"), showWarnings = FALSE, recursive = TRUE)
+
+library(doParallel)
+registerDoParallel(cores = 15)
+
+```
+
+
+Loading metadata and TCRB data
+
+```{r, eval=FALSE}
+trust4_reports_tcrb <- readRDS(
+  glue("{wkdir}/data/interim/airr/trust4_reports_tcrb_clean_df_2025-07-08.rds")
+) %>% 
+  glimpse()
+
+trust4_reports_tcrb %>% glimpse()
+
+# clonotype_volume_df <- trust4_reports_tcrb %>% 
+#   group_by(sample_id) %>% 
+#   # group_by(participant_id) %>% 
+#   dplyr::summarize(
+#       clonal_volume = sum(`#count`),
+#       clonal_count = n()
+#       ) %>%
+#   glimpse()
+
+# # clonotype_volume_df$clonal_count %>% summary()
+# # clonotype_volume_df$clonal_volume %>% summary()
+# low_vol_samples <- clonotype_volume_df %>% 
+#   filter(clonal_volume < 200) %>% 
+#   glimpse()
+
+metadata <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  # as.data.table() %>% 
+  # left_join(clonotype_volume_df, by = "sample_id") %>% 
+  glimpse()
+
+# Select samples with complete MHC_II_PC data
+mhc_clustering_data <- metadata %>%
+  select(participant_id, contains("MHC_II_PC")) %>% 
+  distinct() %>% 
+  glimpse()
+mhc_pc_matrix <- mhc_clustering_data %>%
+  select(contains("MHC_II_PC")) %>%
+  scale() %>%
+  as.matrix()
+
+kmeans_result <- kmeans(mhc_pc_matrix, centers = 5, nstart = 25)
+
+# Add cluster assignments to the data
+mhc_clustering_data$mhc_cluster <- factor(kmeans_result$cluster, 
+                                         levels = 1:5,
+                                         labels = paste0("MHCII_Cluster_", 1:5))
+mhc_clustering_data %>% glimpse()
+
+metadata <- metadata %>% 
+  left_join(mhc_clustering_data %>% select(participant_id, mhc_cluster)) %>% 
+  distinct() %>% 
+  glimpse()
+
+# metadata_categories_df <- readRDS(
+#   glue("{wkdir}/data/interim/metadata/metadata_categories_dataframe_2025-07-21.rds")) %>% 
+#   glimpse()
+
+all_cohorts <- unique(metadata$study)
+```
+
+## TRYING TO SETUP DATA FOR ML MODELS
+
+```{r}
+chi2_results_df <- readRDS(
+  glue("{gliph2_res_dir}/chi2_results_df_2025-08-25.rds")) %>% 
+  glimpse()
+sig_cids <- chi2_results_df %>% 
+  filter(chi2_p_value <= 0.05) %>% 
+  pull(cluster_id) %>% 
+  unique()
+
+# # select only PDBP cohort
+# pdbp_sids <- metadata %>% 
+#   filter(study == "PDBP") %>% 
+#   pull(sample_id)
+
+clust_mat_binary <- readRDS(
+  glue("{clustcr_dir}/results/clust_mat_binary_SSxRS_2025-08-26.rds")) %>% 
+  as.data.table() %>% 
+  # filter(sample_id %in% pdbp_sids) %>% 
+  tibble::column_to_rownames(var = "sample_id") %>% 
+  select(all_of(sig_cids)) %>% 
+  as.matrix()
+
+dim(clust_mat_binary)
+
+# Processes to aggregate binary data to participant level ----
+pid_sid_map <- metadata %>% select(sample_id, participant_id) %>% 
+  filter(sample_id %in% rownames(clust_mat_binary)) %>% 
+  glimpse()
+
+# Initialize the matrix with proper dimensions and column names
+clust_mat_binary_pid <- matrix(
+  nrow = length(unique(pid_sid_map$participant_id)),
+  ncol = ncol(clust_mat_binary),
+  dimnames = list(
+    unique(pid_sid_map$participant_id),
+    colnames(clust_mat_binary)
+  )
+)
+for (pid in unique(pid_sid_map$participant_id)) {
+  print(pid)
+  sid_vec <- pid_sid_map %>% 
+    filter(participant_id == pid) %>% 
+    pull(sample_id)
+  if (length(sid_vec) > 1) {
+    clust_mat_binary_pid[pid, ] <- as.integer(colSums(clust_mat_binary[sid_vec, ]) > 0)
+  } else {
+    clust_mat_binary_pid[pid, ] <- clust_mat_binary[sid_vec, ]
+  }
+}
+
+clust_mat_binary_pid %>% dim()
+clust_mat_binary_pid[1:5, 1:5]
+
+meta_pid_casecontrol <- metadata %>% 
+  # select(participant_id, case_control_other_latest, mhc_cluster) %>% 
+  select(participant_id, case_control_other_latest) %>% 
+  distinct()
+
+model_df <- clust_mat_binary_pid %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "participant_id") %>% 
+  left_join(meta_pid_casecontrol) %>% 
+  dplyr::rename(predict_var = case_control_other_latest) %>% 
+  mutate(predict_var = factor(predict_var, levels = c("Case", "Control")))
+
+dim(model_df)
+model_df$predict_var %>% table()
+model_df$mhc_cluster %>% table()
+
+```
+
+
+
+Spliting the data into training and testing sets.
+
+```{r}
+set.seed(123)
+data_split <- initial_split(model_df, strata = predict_var)
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+# Building a recipe
+rec <- recipe(predict_var ~ ., data = train_data) %>%
+  update_role(participant_id, new_role = "id") %>% 
+  step_zv(all_predictors()) %>% 
+  step_pca(all_predictors(), num_comp = 100)        # Reduce to 100 principal components
+
+# Building a model specification
+lasso_spec <- logistic_reg(
+  penalty = tune(),
+  # penalty = 0.01,    # Reasonable default LASSO penalty
+  mixture = 1         # 1 = LASSO, 0 = Ridge, in between = Elastic Net
+) %>%
+  set_engine("glmnet")
+
+lasso_spec <- logistic_reg(
+  penalty = tune(),
+  # penalty = 0.01,    # Reasonable default LASSO penalty
+  mixture = 1         # 1 = LASSO, 0 = Ridge, in between = Elastic Net
+) %>%
+  set_engine("glmnet")
+
+# Building a workflow
+wf <- workflow() %>%
+  add_model(lasso_spec) %>%
+  add_recipe(rec)
+
+# Tuning the grid of lambda values
+lambda_grid <- grid_regular(penalty(), levels = 10)  # 10 values from min to max
+set.seed(123)
+folds <- vfold_cv(train_data, v = 5, strata = predict_var)
+tune_res <- tune_grid(
+  wf,
+  resamples = folds,
+  grid = lambda_grid,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+# Selecting the best models and evaluating performance
+best_lambda <- select_best(tune_res, "roc_auc")
+final_wf <- finalize_workflow(wf, best_lambda)
+final_fit <- fit(final_wf, data = train_data)
+# Predict on test set
+test_pred <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+# test_pred <- test_pred %>%
+#   mutate(
+#     predict_var = factor(predict_var, levels = c("Case", "Control")),
+#     # .pred_class = factor(.pred_class, levels = c("Control", "Case"))
+#   )
+
+test_pred %>%
+  select(predict_var, .pred_Case) %>%
+  head(10) %>%
+  print()
+
+# Now evaluate
+roc_auc(test_pred, truth = predict_var, .pred_Case)
+# accuracy(test_pred, truth = predict_var, .pred_c)
+
+```
+
+Testing LASSO models per MHC bin
+
+```{r}
+library(tidymodels)
+library(dplyr)
+library(purrr)
+
+# Split within bins first
+set.seed(123)
+splits <- model_df %>% 
+  group_by(mhc_cluster) %>% 
+  group_map(~ initial_split(.x, strata = predict_var))
+
+# Define a function to train/evaluate a single bin model
+train_bin_model <- function(split) {
+  train_data <- training(split)
+  test_data  <- testing(split)
+  
+  rec <- recipe(predict_var ~ ., data = train_data) %>%
+    update_role(participant_id, new_role = "id") %>%
+    step_zv(all_predictors())
+    # step_pca(all_predictors(), num_comp = 100)
+  
+  lasso_spec <- logistic_reg(penalty = tune(), mixture = 1) %>%
+    set_engine("glmnet")
+  
+  wf <- workflow() %>%
+    add_model(lasso_spec) %>%
+    add_recipe(rec)
+  
+  folds <- vfold_cv(train_data, v = 5, strata = predict_var)
+  
+  lambda_grid <- grid_regular(penalty(), levels = 10)
+  
+  tune_res <- tune_grid(
+    wf,
+    resamples = folds,
+    grid = lambda_grid,
+    metrics = metric_set(roc_auc, accuracy)
+  )
+  
+  best_lambda <- select_best(tune_res, "roc_auc")
+  final_wf <- finalize_workflow(wf, best_lambda)
+  
+  final_fit <- fit(final_wf, data = train_data)
+  
+  # Predict on test set
+  preds <- predict(final_fit, test_data, type = "prob") %>%
+    bind_cols(test_data)
+  
+  roc <- roc_auc(preds, truth = predict_var, .pred_Case)
+  # acc <- accuracy(preds, truth = predict_var, .pred_class)
+  
+  return(list(model = final_fit, roc_auc = roc))
+}
+
+# Apply the function across bins
+bin_results <- purrr::map(splits, train_bin_model)
+
+# Inspect performance per bin
+purrr::map(bin_results, ~ .x$roc_auc)
+
+```
+
+
+## Random Forests Models
+
+```{r}
+library(tidymodels)
+library(vip)
+library(dplyr)
+library(purrr)
+
+set.seed(123)
+
+# ----------------------------------------------------------
+# 1. Assume your data already has an MHC bin column
+# ----------------------------------------------------------
+# model_df$mhc_bin <- factor(model_df$mhc_bin)  # Ensure it's a factor
+
+# Split by MHC bin
+splits <- model_df %>%
+  group_by(mhc_cluster) %>%
+  group_map(~ initial_split(.x, strata = predict_var))
+
+# ----------------------------------------------------------
+# 2. Define a function to train/evaluate RF model per bin
+# ----------------------------------------------------------
+
+# TO TEST 
+# split <- splits[[1]]
+train_rf_per_bin <- function(split) {
+  train_data <- training(split)
+  test_data  <- testing(split)
+  
+  # Build recipe
+  rec <- recipe(predict_var ~ ., data = train_data) %>%
+    update_role(participant_id, new_role = "id") %>%
+    step_zv(all_predictors())
+
+  # RF specification
+  rf_spec <- rand_forest(
+    mtry = tune(),
+    trees = 500,
+    min_n = 5
+  ) %>%
+    set_engine("ranger", importance = "impurity") %>%
+    set_mode("classification")
+
+  # Workflow
+  wf <- workflow() %>%
+    add_model(rf_spec) %>%
+    add_recipe(rec)
+
+  # Tuning grid
+  rf_grid <- grid_regular(
+    mtry(range = c(20, 80)),
+    levels = 3
+  )
+
+  # CV folds within bin
+  folds <- vfold_cv(train_data, v = 5, strata = predict_var)
+
+  # Tune model
+  tune_res <- tune_grid(
+    wf,
+    resamples = folds,
+    grid = rf_grid,
+    metrics = metric_set(roc_auc, accuracy)
+  )
+
+  # Select best model
+  best_params <- select_best(tune_res, "roc_auc")
+  final_wf <- finalize_workflow(wf, best_params)
+  final_fit <- fit(final_wf, data = train_data)
+  
+  # Predict probabilities **and** classes
+  test_pred <- predict(final_fit, test_data, type = "prob") %>%
+    bind_cols(predict(final_fit, test_data, type = "class")) %>%
+    bind_cols(test_data)
+
+  # Evaluate ROC AUC and accuracy
+  roc <- roc_auc(test_pred, truth = predict_var, .pred_Case)
+  acc <- accuracy(test_pred, truth = predict_var, estimate = .pred_class)
+
+  # Get feature importance
+  importance <- final_fit %>%
+    extract_fit_parsnip() %>%
+    vip::vip(num_features = 20)
+
+  list(
+    model = final_fit,
+    roc_auc = roc,
+    accuracy = acc,
+    importance_plot = importance
+  )
+}
+
+# ----------------------------------------------------------
+# 3. Apply the function to all bins
+# ----------------------------------------------------------
+rf_results <- purrr::map(splits, train_rf_per_bin)
+
+# ----------------------------------------------------------
+# 4. Summarize per-bin AUROC + accuracy
+# ----------------------------------------------------------
+rf_summary <- purrr::map_df(seq_along(rf_results), function(i) {
+  tibble(
+    mhc_bin = i,
+    auc = rf_results[[i]]$roc_auc$.estimate,
+    accuracy = rf_results[[i]]$accuracy$.estimate
+  )
+})
+
+rf_summary
+```
+
+
+
+Main Random Forest function for cross-cohort testing
+
+```{r}
+library(tidymodels)
+library(ranger)
+library(vip)
+library(dplyr)
+library(purrr)
+
+rf_train_and_test <- function(data, cohort_col, train_cohort, test_cohorts, include_train_eval = TRUE) {
+  
+  # ----------------------------
+  # 1. Subset training data
+  # ----------------------------
+  train_data <- data %>% filter(!!sym(cohort_col) == train_cohort)
+  
+  # Add training cohort to test list if needed
+  if (include_train_eval && !(train_cohort %in% test_cohorts)) {
+    test_cohorts <- c(train_cohort, test_cohorts)
+  }
+  
+  # ----------------------------
+  # 2. Build recipe
+  # ----------------------------
+  rec <- recipe(predict_var ~ ., data = train_data) %>%
+    step_rm(all_of(cohort_col)) %>%
+    update_role(participant_id, new_role = "id") %>%
+    step_zv(all_predictors())
+  
+  # ----------------------------
+  # 3. Random Forest specification
+  # ----------------------------
+  rf_spec <- rand_forest(
+    mtry = tune(),
+    trees = 500,
+    min_n = 5
+  ) %>%
+    set_engine("ranger", importance = "impurity") %>%
+    set_mode("classification")
+  
+  wf <- workflow() %>%
+    add_model(rf_spec) %>%
+    add_recipe(rec)
+  
+  # ----------------------------
+  # 4. Tune model
+  # ----------------------------
+  rf_grid <- grid_regular(
+    mtry(range = c(20, 80)),
+    levels = 3
+  )
+  
+  set.seed(123)
+  folds <- vfold_cv(train_data, v = 3, strata = predict_var)
+  
+  tune_res <- tune_grid(
+    wf,
+    resamples = folds,
+    grid = rf_grid,
+    metrics = metric_set(roc_auc, accuracy)
+  )
+  
+  best_params <- select_best(tune_res, "roc_auc")
+  final_wf <- finalize_workflow(wf, best_params)
+  final_fit <- fit(final_wf, data = train_data)
+  
+  # ----------------------------
+  # 5. Evaluate on test cohorts
+  # ----------------------------
+  results <- purrr::map_df(test_cohorts, function(cohort) {
+    test_data <- data %>% filter(!!sym(cohort_col) == cohort)
+    
+    if (cohort == train_cohort) {
+      # ---- Within-cohort performance via cross-validation ----
+      folds_inner <- vfold_cv(train_data, v = 5, strata = predict_var)
+      
+      cv_res <- fit_resamples(
+        final_wf,
+        resamples = folds_inner,
+        metrics = metric_set(roc_auc, accuracy)
+      ) %>%
+        collect_metrics() %>%
+        select(.metric, mean) %>%   # <-- Use 'mean' instead of '.estimate'
+        pivot_wider(names_from = .metric, values_from = mean)
+      
+      tibble(
+        train_cohort = train_cohort,
+        test_cohort = cohort,
+        roc_auc = cv_res$roc_auc,
+        accuracy = cv_res$accuracy
+      )
+      
+    } else {
+      # ---- External cohort predictions ----
+      test_pred <- predict(final_fit, test_data, type = "prob") %>%
+        bind_cols(predict(final_fit, test_data, type = "class")) %>%
+        bind_cols(test_data)
+      
+      roc <- roc_auc(test_pred, truth = predict_var, .pred_Case)$.estimate
+      acc <- accuracy(test_pred, truth = predict_var, estimate = .pred_class)$.estimate
+      
+      tibble(
+        train_cohort = train_cohort,
+        test_cohort = cohort,
+        roc_auc = roc,
+        accuracy = acc
+      )
+    }
+  })
+  
+  list(
+    trained_model = final_fit,
+    performance = results
+  )
+}
+
+```
+
+
+
+```{r}
+meta_pid_casecontrol <- metadata %>% 
+  select(participant_id, case_control_other_latest, study) %>% 
+  distinct()
+meta_pid_casecontrol
+
+model_df <- clust_mat_binary_pid %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "participant_id") %>% 
+  left_join(meta_pid_casecontrol) %>% 
+  dplyr::rename(predict_var = case_control_other_latest) %>% 
+  mutate(predict_var = factor(predict_var, levels = c("Case", "Control")))
+
+dim(model_df)
+model_df$predict_var %>% table()
+model_df$study %>% table()
+
+# rf_results <- rf_train_and_test(
+#   data = model_df,
+#   cohort_col = "study",
+#   train_cohort = "PPMI",
+#   test_cohorts = c("PDBP", "HBS")
+# )
+
+# rf_results$trained_model
+# rf_results$performance
+
+```
+
+Study to Study Transfer Models
+
+```{r}
+all_cohorts <- unique(metadata$study)
+
+cross_cohort_results <- purrr::map_df(all_cohorts, function(train_c) {
+  rf_out <- rf_train_and_test(
+    data = model_df,
+    cohort_col = "study",
+    train_cohort = train_c,
+    test_cohorts = setdiff(all_cohorts, train_c),
+    include_train_eval = TRUE
+  )
+  rf_out$performance %>% 
+    mutate(train_cohort = train_c)
+})
+
+cross_cohort_results
+saveRDS(
+    cross_cohort_results, 
+    glue("{clustcr_dir}/results/ML_models/RandomForest_cross-cohort_AUROC_results_{Sys.Date()}.rds")
+    )
+
+# PLotting ---
+cross_cohort_results <- readRDS(
+    glue("{clustcr_dir}/results/ML_models/RandomForest_cross-cohort_AUROC_results_2025-08-27.rds")
+    )
+
+p_rf_heatmap <- cross_cohort_results %>%
+  ggplot(aes(x = train_cohort, y = test_cohort, fill = roc_auc)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", roc_auc)), size = 4, color = "white") +
+  scale_fill_scico(palette = 'berlin', midpoint = 0.5) + 
+  # scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0.7) +
+  labs(
+    title = "Random Forests Study Transfer Models",
+    subtitle = "Cross-Cohort AUROC",
+    x = "Training Cohort",
+    y = "Testing Cohort",
+    fill = "AUROC"
+  ) +
+  # theme_bw(base_size = 14) +
+  theme_minimal(base_size = 14) +
+  coord_fixed() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),    
+    axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  filename = glue("{clustcr_figs}/ML_models/RandomForest_cross-cohort_AUROC_heatmap.png"),
+  plot = p_rf_heatmap,
+  width = 6,
+  height = 5,
+  dpi = 600
+)
+
+```
+
+Leave one study out Analysis
+
+```{r}
+loso_results <- purrr::map_df(all_cohorts, function(train_c) {
+    meta_pid_casecontrol <- metadata %>% 
+      mutate(loso_cohort = if_else(study == train_c, 
+        glue("loso_test_{train_c}"), glue("loso_train_{train_c}"))) %>% 
+      select(participant_id, case_control_other_latest, loso_cohort) %>% 
+      distinct()
+  
+  model_df <- clust_mat_binary_pid %>% 
+    as.data.frame() %>% 
+    rownames_to_column(var = "participant_id") %>% 
+    left_join(meta_pid_casecontrol) %>% 
+    dplyr::rename(predict_var = case_control_other_latest) %>% 
+    mutate(predict_var = factor(predict_var, levels = c("Case", "Control")))
+  
+  rf_out <- rf_train_and_test(
+    data = model_df,
+    cohort_col = "loso_cohort",
+    train_cohort = glue("loso_train_{train_c}"),
+    test_cohorts = glue("loso_test_{train_c}"),
+    include_train_eval = TRUE
+  )
+  rf_out$performance %>%
+    mutate(
+      train_test_type = if_else(test_cohort == glue("loso_test_{train_c}"), "LOSO", "CV")
+    )
+})
+
+saveRDS(loso_results, 
+  glue("{clustcr_dir}/results/ML_models/RandomForest_loso_AUROC_results_{Sys.Date()}.rds")
+  )
+
+# PLotting ---
+
+loso_results <- readRDS(
+  glue("{clustcr_dir}/results/ML_models/RandomForest_loso_AUROC_results_2025-08-27.rds")
+  )
+
+
+p_loso_barplot <- loso_results %>% 
+  mutate(train_cohort_name = str_after_last(train_cohort, "_")) %>% 
+  mutate(xcolname = glue("{train_cohort_name} \n Held-out")) %>% 
+  # mutate(train_test_type_name = 
+  #   if_else(train_test_type == "LOSO", "Prediction on \n Held-out cohort", "CV Training \n all other cohorts")) %>% 
+  ggplot(aes(x = xcolname, y = roc_auc, fill = train_test_type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  scale_fill_manual(
+    values = c("CV" = "grey", "LOSO" = "#AA4A44"),
+    name = NULL,
+    labels = c("5-fold CV training \non all other cohorts", "Prediction on \nheld-out cohort")
+  ) +
+  labs(
+    # title = "Random Forests Study Transfer Models",
+    # subtitle = "Leave-One-Study-Out (LOSO) AUROC",
+    x = NULL,
+    y = "AUROC"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    # axis.title = element_text(face = "bold"),
+    legend.position = "bottom",
+    panel.grid.major.x = element_blank()
+  ) +
+  # Add value labels on bars
+  geom_text(
+    aes(label = sprintf("%.2f", roc_auc)),
+    position = position_dodge(width = 0.8),
+    vjust = -0.5,
+    size = 2.5,
+    fontface = "bold"
+  ) +
+  # Set y-axis limits to accommodate labels
+  ylim(0, max(loso_results$roc_auc) * 1.1)
+
+ggsave(
+  filename = glue("{clustcr_figs}/ML_models/RandomForest_loso_AUROC_barplot.png"),
+  plot = p_loso_barplot,
+  width = 3.5,
+  height = 3,
+  dpi = 600
+)
+
+```
+
+
+Testing a workflow for random permutations
+
+```{r}
+get_random_baseline <- function(data, cohort_col, train_cohort, test_cohorts, n_perm = 50) {
+  perm_results <- purrr::map_dfr(1:n_perm, function(i) {
+    
+    # Shuffle predict_var labels
+    shuffled_data <- data %>%
+      mutate(predict_var = sample(predict_var))
+    
+    # Re-run your existing RF training/testing
+    rf_out <- rf_train_and_test(
+      data = shuffled_data,
+      cohort_col = cohort_col,
+      train_cohort = train_cohort,
+      test_cohorts = test_cohorts,
+      include_train_eval = FALSE
+    )
+    
+    rf_out$performance %>% 
+      mutate(iteration = i)
+  })
+  
+  perm_results
+}
+
+meta_pid_casecontrol <- metadata %>% 
+  select(participant_id, case_control_other_latest, study) %>% 
+  distinct()
+model_df <- clust_mat_binary_pid %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "participant_id") %>% 
+  left_join(meta_pid_casecontrol) %>% 
+  dplyr::rename(predict_var = case_control_other_latest) %>% 
+  mutate(predict_var = factor(predict_var, levels = c("Case", "Control")))
+
+# Example usage — random baseline for PPMI training, predicting on PDBP + HBS
+baseline_ppmi <- get_random_baseline(
+  data = model_df,
+  cohort_col = "study",
+  train_cohort = "PPMI",
+  test_cohorts = c("PDBP", "HBS"),
+  n_perm = 3
+)
+
+# baseline_ppmi %>% 
+#   group_by(test_cohort) %>% 
+#   summarise(mean_auroc = mean(roc_auc), sd_auroc = sd(roc_auc))
+
+
+
+purrr::walk(all_cohorts, function(train_c) {
+  baseline_models <- get_random_baseline(
+    data = model_df,
+    cohort_col = "study",
+    train_cohort = train_c,
+    test_cohorts = setdiff(all_cohorts, train_c),
+    n_perm = 50
+  )
+  saveRDS(baseline_models, 
+    glue(
+      "{clustcr_dir}/results/ML_models/",
+      "RandomForest_cross-cohort_AUROC_randompermutation__{train_c}__{Sys.Date()}.rds")
+      )
+})
+
+baseline_models <- list()
+for (train_c in all_cohorts) {
+  baseline_models[[train_c]] <- readRDS(
+    glue(
+      "{clustcr_dir}/results/ML_models/",
+      "RandomForest_cross-cohort_AUROC_randompermutation__{train_c}__2025-08-28.rds")
+      )
+}
+
+baseline_models <- all_cohorts %>% 
+  purrr::map(function(train_c) {
+    readRDS(
+      glue(
+        "{clustcr_dir}/results/ML_models/",
+        "RandomForest_cross-cohort_AUROC_randompermutation__{train_c}__2025-08-28.rds")
+      )
+  }) %>% 
+  bind_rows()
+
+baseline_models_summary <- baseline_models %>% 
+  group_by(train_cohort) %>% 
+  # group_by(train_cohort, test_cohort) %>% 
+  summarise(mean_auroc = mean(roc_auc), sd_auroc = sd(roc_auc)) %>% 
+  dplyr::rename(roc_auc = mean_auroc) %>% 
+  mutate(test_cohort = "Random Baseline")
+
+# Remaking heatmap with random baseline
+
+# PLotting ---
+cross_cohort_results <- readRDS(
+    glue("{clustcr_dir}/results/ML_models/RandomForest_cross-cohort_AUROC_results_2025-08-27.rds")
+    )
+cross_cohort_results_wbase <- cross_cohort_results %>% 
+  bind_rows(baseline_models_summary)
+
+p_rf_heatmap <- +  %>%
+  ggplot(aes(x = train_cohort, y = test_cohort, fill = roc_auc)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", roc_auc)), size = 4, color = "white") +
+  scale_fill_scico(palette = 'berlin', midpoint = 0.5) + 
+  # scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0.7) +
+  labs(
+    title = "Random Forests Study Transfer Models",
+    subtitle = "Cross-Cohort AUROC",
+    x = "Training Cohort",
+    y = "Testing Cohort",
+    fill = "AUROC"
+  ) +
+  # theme_bw(base_size = 14) +
+  theme_minimal(base_size = 14) +
+  coord_fixed() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),    
+    axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  filename = glue("{clustcr_figs}/ML_models/RandomForest_cross-cohort_AUROC_heatmap_wbase.png"),
+  plot = p_rf_heatmap,
+  width = 6,
+  height = 6,
+  dpi = 600
+)
+
+
+
+```
+
+
+
+
+
+
+NNOTHER TEMP - this time using inner and outer CV
+
+```{r}
+library(tidymodels)
+library(ranger)
+library(vip)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+
+# --------------------------------------------------
+# 1. Helper: Run nested CV for train→train evaluation
+# --------------------------------------------------
+rf_nested_cv <- function(data, cohort_col, train_cohort,
+                         v_outer = 5, v_inner = 3,
+                         rf_trees = 500,
+                         mtry_range = c(20, 80),
+                         mtry_levels = 3) {
+  
+  # Subset training data
+  train_data <- data %>% filter(!!sym(cohort_col) == train_cohort)
+  
+  # Outer folds for unbiased evaluation
+  outer_folds <- vfold_cv(train_data, v = v_outer, strata = predict_var)
+  
+  # Recipe
+  rec <- recipe(predict_var ~ ., data = train_data) %>%
+    step_rm(all_of(cohort_col)) %>%
+    update_role(participant_id, new_role = "id") %>%
+    step_zv(all_predictors())
+  
+  # Model spec
+  rf_spec <- rand_forest(
+    mtry = tune(),
+    trees = rf_trees,
+    min_n = 5
+  ) %>%
+    set_engine("ranger", importance = "impurity") %>%
+    set_mode("classification")
+  
+  wf <- workflow() %>%
+    add_model(rf_spec) %>%
+    add_recipe(rec)
+  
+  rf_grid <- grid_regular(
+    mtry(range = mtry_range),
+    levels = mtry_levels
+  )
+  
+  # Fit nested CV
+  nested_res <- fit_resamples(
+    wf,
+    resamples = outer_folds,
+    metrics = metric_set(roc_auc, accuracy),
+    control = control_resamples(save_pred = TRUE)
+  )
+  
+  # Collect unbiased metrics
+  cv_metrics <- nested_res %>%
+    collect_metrics() %>%
+    select(.metric, mean, std_err) %>%
+    pivot_wider(names_from = .metric, values_from = c(mean, std_err))
+  
+  # Hyperparameter tuning on entire training set (for predicting other cohorts)
+  folds_inner <- vfold_cv(train_data, v = v_inner, strata = predict_var)
+  tune_res <- tune_grid(
+    wf,
+    resamples = folds_inner,
+    grid = rf_grid,
+    metrics = metric_set(roc_auc)
+  )
+  best_params <- select_best(tune_res, "roc_auc")
+  final_wf <- finalize_workflow(wf, best_params)
+  final_fit <- fit(final_wf, data = train_data)
+  
+  list(
+    cv_metrics = cv_metrics,
+    final_fit = final_fit
+  )
+}
+
+# --------------------------------------------------
+# 2. Master function: Train on each cohort, test on all others
+# --------------------------------------------------
+rf_cross_cohort <- function(data, cohort_col, v_outer = 5, v_inner = 3) {
+  
+  all_cohorts <- unique(data[[cohort_col]])
+  results <- list()
+  
+  for (train_c in all_cohorts) {
+    message("Training on: ", train_c)
+    
+    # Step 1: Nested CV for unbiased within-cohort performance
+    nested <- rf_nested_cv(
+      data = data,
+      cohort_col = cohort_col,
+      train_cohort = train_c,
+      v_outer = v_outer,
+      v_inner = v_inner
+    )
+    
+    # Extract within-cohort results
+    train_metrics <- nested$cv_metrics %>%
+      mutate(train_cohort = train_c,
+             test_cohort = train_c,
+             roc_auc = mean_roc_auc,
+             accuracy = mean_accuracy) %>%
+      select(train_cohort, test_cohort, roc_auc, accuracy)
+    
+    # Step 2: Predict on all other cohorts using tuned RF
+    other_results <- map_df(setdiff(all_cohorts, train_c), function(test_c) {
+      test_data <- data %>% filter(!!sym(cohort_col) == test_c)
+      
+      test_pred <- predict(nested$final_fit, test_data, type = "prob") %>%
+        bind_cols(predict(nested$final_fit, test_data, type = "class")) %>%
+        bind_cols(test_data)
+      
+      roc <- roc_auc(test_pred, truth = predict_var, .pred_Case)$.estimate
+      acc <- accuracy(test_pred, truth = predict_var, estimate = .pred_class)$.estimate
+      
+      tibble(
+        train_cohort = train_c,
+        test_cohort = test_c,
+        roc_auc = roc,
+        accuracy = acc
+      )
+    })
+    
+    # Combine results for this training cohort
+    results[[train_c]] <- bind_rows(train_metrics, other_results)
+  }
+  
+  bind_rows(results)
+}
+
+# --------------------------------------------------
+# 3. Visualization: Cross-Cohort AUROC Heatmap
+# --------------------------------------------------
+plot_cross_cohort_heatmap <- function(results) {
+  results %>%
+    ggplot(aes(x = train_cohort, y = test_cohort, fill = roc_auc)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = sprintf("%.2f", roc_auc)), size = 3) +
+    scale_fill_gradient2(
+      low = "red", mid = "white", high = "blue",
+      midpoint = 0.7, limits = c(0, 1)
+    ) +
+    labs(
+      title = "Cross-Cohort AUROC",
+      x = "Training Cohort",
+      y = "Testing Cohort",
+      fill = "AUROC"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+
+cross_results <- rf_cross_cohort(
+  data = model_df,
+  cohort_col = "study",
+  v_outer = 5,
+  v_inner = 3
+)
+
+# Check results table
+cross_results
+
+# Visualize cross-cohort generalization
+plot_cross_cohort_heatmap(cross_results)
+
+```
+
+
+
+Example using the MHCII clusters 
+```{r}
+library(ranger)
+rf_spec <- rand_forest(
+  mtry = tune(),      # Keep tuning this - it's important
+  trees = 500,        # Reduced from 1000 (still plenty)
+  min_n = 5           # Fixed reasonable value
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+# Building a recipe
+rec <- recipe(predict_var ~ ., data = train_data) %>%
+  update_role(participant_id, new_role = "id") %>% 
+  step_zv(all_predictors())  
+  # step_pca(all_predictors(), num_comp = 100)     
+
+# Update workflow
+wf <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(rec)
+
+# Much smaller tuning grid
+rf_grid <- grid_regular(
+  mtry(range = c(20, 80)),  # Narrower range, fewer values
+  levels = 3                 # Only 3 values instead of 5
+)
+
+# Faster cross-validation
+set.seed(123)
+folds <- vfold_cv(train_data, v = 3, strata = predict_var)  # 3-fold instead of 5-fold
+tune_res <- tune_grid(
+  wf,
+  resamples = folds,
+  grid = rf_grid,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+# Selecting the best model
+best_params <- select_best(tune_res, "roc_auc")
+final_wf <- finalize_workflow(wf, best_params)
+final_fit <- fit(final_wf, data = train_data)
+
+# Predict probabilities **and** classes
+test_pred <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(predict(final_fit, test_data, type = "class")) %>%
+  bind_cols(test_data)
+
+# Evaluate ROC AUC and accuracy
+roc <- roc_auc(test_pred, truth = predict_var, .pred_Case)
+acc <- accuracy(test_pred, truth = predict_var, estimate = .pred_class)
+
+# # Optional: Get feature importance
+final_fit %>%
+  extract_fit_parsnip() %>%
+  vip::vip(num_features = 20)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# OLD STUFF
+```{r}
+chi2_results_df <- readRDS(
+  glue("{gliph2_res_dir}/chi2_results_df_2025-05-26.rds"))
+cluster_id_annotation <- chi2_results_df %>% 
+    mutate(
+        significant = case_when(
+            abs(log2(odds_ratio)) >= 0.5 & chi2_p_value <= 0.05 ~ case_when(
+                odds_ratio > 1 ~ "Enriched in Cases",
+                odds_ratio < 1 ~ "Enriched in Controls"
+            ),
+            TRUE ~ "Not Significant"
+        )
+    )  %>% 
+    select(index, type, significant) %>% 
+    distinct() %>% 
+    glimpse()
+
+useful_cluster_ids <- cluster_id_annotation %>% 
+  filter(significant != "Not Significant") %>% 
+  pull(type)
+
+cluster_pid_comp <- cluster_df_meta %>% 
+    dplyr::select(index, participant_id) %>% 
+    distinct() %>% 
+    group_by(index) %>% 
+    dplyr::summarise(n_participants = n()) %>% 
+    ungroup()
+
+unique_pid_thresh_inx <- cluster_pid_comp %>% 
+    filter(n_participants >= 10) %>% 
+    pull(index)
+
+cluster_df_meta_f1 <- cluster_df_meta %>% 
+    filter(index %in% unique_pid_thresh_inx) %>% 
+    glimpse()
+# cluster_df_meta_f1 %>% glimpse()
+
+# Filter 3 clusters with pattern length > 3 fixed pos AAs
+cluster_df_meta_f3 <- cluster_df_meta_f1 %>% 
+    mutate(pattern_len = gsub("\\%", "", pattern) %>% nchar()) %>% 
+    filter(pattern_len > 3) %>% 
+    glimpse()
+```
+
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+
+cluster_df_meta_f3 %>% glimpse()
+full_meta_df %>% glimpse()
+
+# random sample_id selection per participant_id
+set.seed(42)
+rand_sids <- cluster_df_meta_f3  %>% 
+    select(sample_id, participant_id) %>% 
+    distinct() %>% 
+    group_by(participant_id) %>%
+    slice_sample(n = 1) %>% 
+    pull(sample_id)
+
+# Aggregate features per sample_id (example: sum Freq by sample_id and type)
+features_df <- cluster_df_meta_f3 %>%
+    filter(sample_id %in% rand_sids) %>% 
+      # FILTERING WITH CHI2 results (this time not using 2nd filter round)
+    filter(type %in% useful_cluster_ids) %>%  
+    dplyr::group_by(sample_id, type) %>% 
+    dplyr::summarise(count = sum(Freq, na.rm = TRUE), .groups = "drop") %>% 
+    # sample_n(1000) %>% 
+    pivot_wider(names_from = type, values_from = count, values_fill = 0)
+
+feat_cols <- colnames(features_df)[-1]
+length(feat_cols)
+# Find columns with >0 in at least 5 samples
+cols_to_keep <- feat_cols[
+  colSums(features_df[feat_cols] > 0, na.rm = TRUE) >= 5
+]
+length(cols_to_keep)
+
+filtered_features_df <- features_df %>%
+  select(sample_id, all_of(cols_to_keep))
+filtered_features_df %>% dim()
+
+# Join with case/control status
+meta_status <- full_meta_df %>%
+  filter(case_control_other_latest %in% c("Case", "Control")) %>% 
+  select(sample_id, predict_var = mds_updrs_part_iii_summary_score) %>% 
+  drop_na(predict_var) %>% 
+  glimpse()
+
+model_df <- filtered_features_df %>%
+  inner_join(meta_status, by = "sample_id")
+
+model_df %>% dim()
+```
+
+
+Spliting the data into training and testing sets.
+
+```{r}
+set.seed(123)
+data_split <- initial_split(model_df, strata = predict_var)
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+# Building a recipe
+rec <- recipe(predict_var ~ ., data = train_data) %>%
+  update_role(sample_id, new_role = "id")
+#   step_zv(all_predictors()) %>%
+#   step_normalize(all_predictors())
+
+# Building a model specification
+lasso_spec <- logistic_reg(
+  penalty = tune(),   # LASSO penalty
+  mixture = 1         # 1 = LASSO, 0 = Ridge, in between = Elastic Net
+) %>%
+  set_engine("glmnet")
+
+lasso_spec <- logistic_reg(
+  penalty = tune(),   # LASSO penalty
+  mixture = 1         # 1 = LASSO, 0 = Ridge, in between = Elastic Net
+) %>%
+  set_engine("glmnet")
+
+# Building a workflow
+wf <- workflow() %>%
+  add_model(lasso_spec) %>%
+  add_recipe(rec)
+
+# Tuning the grid of lambda values
+lambda_grid <- grid_regular(penalty(), levels = 10)  # 10 values from min to max
+set.seed(123)
+folds <- vfold_cv(train_data, v = 5, strata = predict_var)
+tune_res <- tune_grid(
+  wf,
+  resamples = folds,
+  grid = lambda_grid,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+# Selecting the best models and evaluating performance
+best_lambda <- select_best(tune_res, "roc_auc")
+final_wf <- finalize_workflow(wf, best_lambda)
+final_fit <- fit(final_wf, data = train_data)
+# Predict on test set
+test_pred <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+# Evaluate
+roc_auc(test_pred, truth = predict_var, .pred_Case)
+accuracy(test_pred, truth = predict_var, 
+.pred_class = ifelse(.pred_Case > 0.5, "Case", "Control"))
+
+
+```
+
+
+Trying with Random Forests
+
+```{r}
+# future::plan(future::multisession, workers = 7)
+
+# Building a recipe (keep this the same)
+rec <- recipe(predict_var ~ ., data = train_data) %>%
+  update_role(sample_id, new_role = "id")
+
+# Random Forest Model - no tuning
+rf_spec <- rand_forest(
+  trees = 500,  # reasonable default
+  min_n = 5     # reasonable default
+) %>%
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+# Building a workflow
+wf <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(rec)
+
+# Fit the model directly (no tuning)
+set.seed(123)
+final_fit <- fit(wf, data = train_data)
+
+# Predict on test set
+test_pred <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+# Evaluate
+roc_auc(test_pred, truth = predict_var, .pred_Case)
+accuracy(test_pred, truth = predict_var, 
+         .pred_class = ifelse(.pred_Case > 0.5, "Case", "Control"))
+
+# Get feature importance
+rf_fit <- extract_fit_parsnip(final_fit)
+var_imp <- vip::vip(rf_fit, num_features = 20)
+print(var_imp)
+```
+

@@ -1,0 +1,185 @@
+
+@article{song2021,
+	title = {TRUST4: immune repertoire reconstruction from bulk and single-cell RNA-seq data},
+	author = {Song, Li and Cohen, David and Ouyang, Zhangyi and Cao, Yang and Hu, Xihao and Liu, X. Shirley},
+	year = {2021},
+	month = {06},
+	date = {2021-06},
+	journal = {Nature Methods},
+	pages = {627--630},
+	volume = {18},
+	number = {6},
+	doi = {10.1038/s41592-021-01142-2},
+	url = {https://www.nature.com/articles/s41592-021-01142-2},
+	note = {Bandiera{\_}abtest: a
+Cg{\_}type: Nature Research Journals
+Number: 6
+Primary{\_}atype: Research
+Publisher: Nature Publishing Group
+Subject{\_}term: Cancer genomics;Genomics;Immunology;Software
+Subject{\_}term{\_}id: cancer-genomics;genomics;immunology;software},
+	langid = {en}
+}
+
+@article{bernhofer_tmbed_2022,
+	title = {{TMbed}: transmembrane proteins predicted through language model embeddings},
+	volume = {23},
+	issn = {1471-2105},
+	shorttitle = {{TMbed}},
+	url = {https://doi.org/10.1186/s12859-022-04873-x},
+	doi = {10.1186/s12859-022-04873-x},
+	abstract = {Despite the immense importance of transmembrane proteins (TMP) for molecular biology and medicine, experimental 3D structures for TMPs remain about 4–5 times underrepresented compared to non-TMPs. Today’s top methods such as AlphaFold2 accurately predict 3D structures for many TMPs, but annotating transmembrane regions remains a limiting step for proteome-wide predictions.},
+	number = {1},
+	urldate = {2023-03-13},
+	journal = {BMC Bioinformatics},
+	author = {Bernhofer, Michael and Rost, Burkhard},
+	month = aug,
+	year = {2022},
+	keywords = {Protein language models, Protein structure prediction, Transmembrane protein prediction},
+	pages = {326},
+}
+
+@article{eddy_accelerated_2011,
+	title = {Accelerated {Profile} {HMM} {Searches}},
+	volume = {7},
+	issn = {1553-7358},
+	url = {https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1002195},
+	doi = {10.1371/journal.pcbi.1002195},
+	abstract = {Profile hidden Markov models (profile HMMs) and probabilistic inference methods have made important contributions to the theory of sequence database homology search. However, practical use of profile HMM methods has been hindered by the computational expense of existing software implementations. Here I describe an acceleration heuristic for profile HMMs, the “multiple segment Viterbi” (MSV) algorithm. The MSV algorithm computes an optimal sum of multiple ungapped local alignment segments using a striped vector-parallel approach previously described for fast Smith/Waterman alignment. MSV scores follow the same statistical distribution as gapped optimal local alignment scores, allowing rapid evaluation of significance of an MSV score and thus facilitating its use as a heuristic filter. I also describe a 20-fold acceleration of the standard profile HMM Forward/Backward algorithms using a method I call “sparse rescaling”. These methods are assembled in a pipeline in which high-scoring MSV hits are passed on for reanalysis with the full HMM Forward/Backward algorithm. This accelerated pipeline is implemented in the freely available HMMER3 software package. Performance benchmarks show that the use of the heuristic MSV filter sacrifices negligible sensitivity compared to unaccelerated profile HMM searches. HMMER3 is substantially more sensitive and 100- to 1000-fold faster than HMMER2. HMMER3 is now about as fast as BLAST for protein searches.},
+	language = {en},
+	number = {10},
+	urldate = {2023-03-13},
+	journal = {PLOS Computational Biology},
+	author = {Eddy, Sean R.},
+	month = oct,
+	year = {2011},
+	keywords = {BLAST algorithm, Computational pipelines, Computer software, Database searching, Heuristic alignment procedure, Hidden Markov models, Multiple alignment calculation, Sequence alignment},
+	pages = {e1002195},
+}
+
+@techreport{lin_evolutionary-scale_2022,
+	type = {preprint},
+	title = {Evolutionary-scale prediction of atomic level protein structure with a language model},
+	url = {http://biorxiv.org/lookup/doi/10.1101/2022.07.20.500902},
+	abstract = {Abstract 
+          Artificial intelligence has the potential to open insight into the structure of proteins at the scale of evolution. It has only recently been possible to extend protein structure prediction to two hundred million cataloged proteins. Characterizing the structures of the exponentially growing billions of protein sequences revealed by large scale gene sequencing experiments would necessitate a break-through in the speed of folding. Here we show that direct inference of structure from primary sequence using a large language model enables an order of magnitude speed-up in high resolution structure prediction. Leveraging the insight that language models learn evolutionary patterns across millions of sequences, we train models up to 15B parameters, the largest language model of proteins to date. As the language models are scaled they learn information that enables prediction of the three-dimensional structure of a protein at the resolution of individual atoms. This results in prediction that is up to 60x faster than state-of-the-art while maintaining resolution and accuracy. Building on this, we present the ESM Metage-nomic Atlas. This is the first large-scale structural characterization of metagenomic proteins, with more than 617 million structures. The atlas reveals more than 225 million high confidence predictions, including millions whose structures are novel in comparison with experimentally determined structures, giving an unprecedented view into the vast breadth and diversity of the structures of some of the least understood proteins on earth.},
+	language = {en},
+	urldate = {2023-03-13},
+	institution = {Synthetic Biology},
+	author = {Lin, Zeming and Akin, Halil and Rao, Roshan and Hie, Brian and Zhu, Zhongkai and Lu, Wenting and Smetanin, Nikita and Verkuil, Robert and Kabeli, Ori and Shmueli, Yaniv and Dos Santos Costa, Allan and Fazel-Zarandi, Maryam and Sercu, Tom and Candido, Salvatore and Rives, Alexander},
+	month = jul,
+	year = {2022},
+	doi = {10.1101/2022.07.20.500902},
+}
+
+@article{altschul_basic_1990,
+	title = {Basic local alignment search tool},
+	volume = {215},
+	issn = {0022-2836},
+	doi = {10.1016/S0022-2836(05)80360-2},
+	abstract = {A new approach to rapid sequence comparison, basic local alignment search tool (BLAST), directly approximates alignments that optimize a measure of local similarity, the maximal segment pair (MSP) score. Recent mathematical results on the stochastic properties of MSP scores allow an analysis of the performance of this method as well as the statistical significance of alignments it generates. The basic algorithm is simple and robust; it can be implemented in a number of ways and applied in a variety of contexts including straightforward DNA and protein sequence database searches, motif searches, gene identification searches, and in the analysis of multiple regions of similarity in long DNA sequences. In addition to its flexibility and tractability to mathematical analysis, BLAST is an order of magnitude faster than existing sequence comparison tools of comparable sensitivity.},
+	language = {eng},
+	number = {3},
+	journal = {Journal of Molecular Biology},
+	author = {Altschul, S. F. and Gish, W. and Miller, W. and Myers, E. W. and Lipman, D. J.},
+	month = oct,
+	year = {1990},
+	pmid = {2231712},
+	keywords = {Algorithms, Amino Acid Sequence, Base Sequence, Databases, Factual, Mutation, Sensitivity and Specificity, Sequence Homology, Nucleic Acid, Software},
+	pages = {403--410},
+}
+
+@article{klein2012,
+	title = {Genetics of Parkinson{\textquoteright}s Disease},
+	author = {Klein, Christine and Westenberger, Ana},
+	year = {2012},
+	month = {01},
+	date = {2012-01-01},
+	journal = {Cold Spring Harbor Perspectives in Medicine},
+	pages = {a008888},
+	volume = {2},
+	number = {1},
+	doi = {10.1101/cshperspect.a008888},
+	url = {http://perspectivesinmedicine.cshlp.org/content/2/1/a008888},
+	note = {Publisher: Cold Spring Harbor Laboratory Press
+PMID: 22315721},
+	langid = {en}
+}
+
+@article{matheoud2019,
+	title = {Intestinal infection triggers Parkinson{\textquoteright}s disease-like symptoms in Pink1{-}/{-} mice},
+	author = {Matheoud, Diana and Cannon, Tyler and Voisin, Aurore and Penttinen, Anna-Maija and Ramet, Lauriane and Fahmy, Ahmed M. and Ducrot, Charles and Laplante, Annie and Bourque, {Marie-Josée} and Zhu, Lei and Cayrol, Romain and Le Campion, Armelle and McBride, Heidi M. and Gruenheid, Samantha and Trudeau, Louis-Eric and Desjardins, Michel},
+	year = {2019},
+	month = {07},
+	date = {2019-07},
+	journal = {Nature},
+	pages = {565--569},
+	volume = {571},
+	number = {7766},
+	doi = {10.1038/s41586-019-1405-y},
+	url = {https://www.nature.com/articles/s41586-019-1405-y},
+	note = {Number: 7766
+Publisher: Nature Publishing Group},
+	langid = {en}
+}
+
+@article{williams2021,
+	title = {CD4 T cells mediate brain inflammation and neurodegeneration in a mouse model of Parkinson's disease},
+	author = {Williams, Gregory P and Schonhoff, Aubrey M and Jurkuvenaite, Asta and Gallups, Nicole J and Standaert, David G and Harms, Ashley S},
+	year = {2021},
+	month = {07},
+	date = {2021-07-01},
+	journal = {Brain},
+	pages = {2047--2059},
+	volume = {144},
+	number = {7},
+	doi = {10.1093/brain/awab103},
+	url = {https://doi.org/10.1093/brain/awab103}
+}
+
+@article{schonhoff2023,
+	title = {Border-associated macrophages mediate the neuroinflammatory response in an alpha-synuclein model of Parkinson disease},
+	author = {Schonhoff, A. M. and Figge, D. A. and Williams, G. P. and Jurkuvenaite, A. and Gallups, N. J. and Childers, G. M. and Webster, J. M. and Standaert, D. G. and Goldman, J. E. and Harms, A. S.},
+	year = {2023},
+	month = {06},
+	date = {2023-06-26},
+	journal = {Nature Communications},
+	pages = {3754},
+	volume = {14},
+	number = {1},
+	doi = {10.1038/s41467-023-39060-w},
+	url = {https://www.nature.com/articles/s41467-023-39060-w},
+	note = {Number: 1
+Publisher: Nature Publishing Group},
+	langid = {en}
+}
+
+@article{abdel-haq2022,
+	title = {A prebiotic diet modulates microglial states and motor deficits in α-synuclein overexpressing mice},
+	author = {Abdel-Haq, Reem and Schlachetzki, Johannes CM and Boktor, Joseph C and Cantu-Jungles, Thaisa M and Thron, Taren and Zhang, Mengying and Bostick, John W and Khazaei, Tahmineh and Chilakala, Sujatha and Morais, Livia H and Humphrey, Greg and Keshavarzian, Ali and Katz, Jonathan E and Thomson, Matthew and Knight, Rob and Gradinaru, Viviana and Hamaker, Bruce R and Glass, Christopher K and Mazmanian, Sarkis K},
+	editor = {Turnbaugh, Peter J and Rothlin, Carla V and Valdearcos, Martin and Turnbaugh, Peter J},
+	year = {2022},
+	month = {11},
+	date = {2022-11-08},
+	journal = {eLife},
+	pages = {e81453},
+	volume = {11},
+	doi = {10.7554/eLife.81453},
+	url = {https://doi.org/10.7554/eLife.81453},
+	note = {Publisher: eLife Sciences Publications, Ltd}
+}
+
+@article{chen2020,
+	title = {Dissecting heterogeneous cell populations across drug and disease conditions with PopAlign},
+	author = {Chen, Sisi and Rivaud, Paul and Park, Jong H. and Tsou, Tiffany and Charles, Emeric and Haliburton, John R. and Pichiorri, Flavia and Thomson, Matt},
+	year = {2020},
+	month = {11},
+	date = {2020-11-17},
+	journal = {Proceedings of the National Academy of Sciences},
+	pages = {28784--28794},
+	volume = {117},
+	number = {46},
+	doi = {10.1073/pnas.2005990117},
+	url = {https://www.pnas.org/doi/full/10.1073/pnas.2005990117},
+	note = {Publisher: Proceedings of the National Academy of Sciences}
+}

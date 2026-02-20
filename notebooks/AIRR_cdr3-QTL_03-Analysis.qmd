@@ -1,0 +1,735 @@
+---
+title: "cdr3-QTL Analysis"
+editor: source
+author: "Joe Boktor"
+date: '2025-05-04'
+eval: false
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    fig-height: 8
+    fig-width: 14
+---
+
+This notebook will be following analysis defined in (Ishigaki et al., 2022) and implemented [here](https://github.com/immunogenomics/cdr3-QTL).
+
+## Analysis Setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor) 
+library(glue)
+library(furrr)
+library(tictoc)
+library(progress)
+library(entropy)
+library(data.table)
+library(seqinr)
+library(progress)
+library(nlme)
+library(broom.mixed)
+library(MVLM)
+# plotting
+library(ggsci)
+library(scico)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/analyze_CDR3qtl.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+entropy_dir <- glue("{wkdir}/data/interim/cdr3_entropy")
+entropy_plots_dir <- glue("{wkdir}/figures/AIRR/cdr3_entropy")
+git_dir <- glue("{home_dir}/git/cdr3-QTL")
+hla_plots_dir <- glue("{wkdir}/figures/AIRR/arcasHLA")
+hla_dir <- glue("{wkdir}/data/interim/airr/arcasHLA/analysis_cleaned")
+
+c3_pheno_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_phenotypes")
+gdata_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_hla_genotypes")
+hla_4d_to_aa_dir <- glue("{wkdir}/data/input/cdr3qtl/hla_4d_to_aa")
+
+# dir.create(gdata_dir, showWarnings = FALSE, recursive = TRUE)
+# dir.create(c3_pheno_dir, showWarnings = FALSE, recursive = TRUE)
+future::plan(multisession, workers = 8)
+```
+
+
+```{r}
+# Loading formatted HLA-site data
+full_aa_hla_sites <- readRDS(glue("{gdata_dir}/all_hla_AA_sites_2025-07-31.rds")) %>% 
+  glimpse()
+
+all_imgt_pos <- c(
+    "P104","P105","P106","P107","P108","P109","P110","P111",
+    "P111.1","P112.2","P112.1",
+    "P112","P113","P114","P115","P116","P117","P118")
+imgt_pos_testable <- all_imgt_pos[4:16]
+
+# ts <- run_qtl_stats(
+#   lm_results_dir = glue("{wkdir}/data/interim/cdr3_qtl/lm_results"),
+#   phenotype_type = "cdr3_p1_unstrat_filtered_cv1k",
+#   hsite = "DRB1_13",
+#   cdr3_pos = "P109",
+#   cdr3length = NULL
+# )
+
+# full_aa_hla_sites %>% glimpse()
+# length(unique(full_aa_hla_sites$hla_site)) * (length(imgt_pos_testable)) * 4 # number of combos
+# 19968 Total number of stat calls (not include all fine-grained LMs)
+
+```
+
+
+Executing slurm parallelized CDR3-QTL analysis.
+
+```{r}
+cdr3_phenotypes <- c(
+  "cdr3_p1_strat_filtered_cv1k", "cdr3_p1_unstrat_filtered_cv1k", 
+  "cdr3_p2_strat_filtered_cv1k", "cdr3_p2_unstrat_filtered_cv1k")
+# slurm batchtools parallelzed alternative
+batch_params <- expand.grid(
+    "phenotype_type" = cdr3_phenotypes, 
+    "hsite" = unique(full_aa_hla_sites$hla_site),
+    "cdr3_pos" = imgt_pos_testable,
+    "cdr3length" = c(12:18)
+    ) %>% 
+    as.data.frame() %>%
+    mutate(
+        results_dir = glue("{wkdir}/data/interim/cdr3_qtl/results/{phenotype_type}"),
+        cdr3length = as.character(cdr3length),
+        wkdir = wkdir,
+        cdr3length = case_when(
+            grepl("_unstrat_", phenotype_type) ~ NA_character_,
+            TRUE ~ cdr3length
+        )
+    ) %>%
+    dplyr::distinct() %>% 
+    mutate_all(as.character) %>% 
+    glimpse()
+
+# configure registry ----
+breg <- breg_setup(cluster_name = "CDR3_QTL", 
+    log_dir = glue("{wkdir}/.cluster_runs/"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl")
+    )
+
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = run_qtl_stats,
+  args = batch_params,
+  reg = breg
+)
+nrow(batch_params)
+
+jobs[, chunk := chunk(job.id, chunk.size = 40)]
+print(jobs[, .N, by = chunk])
+
+# can probably do two per minute so x jobs / 2 = minutes
+submitJobs(jobs,
+  resources = list(
+    walltime = "2:00:00",
+    memory = "10GB",
+    ncpus = 2,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+## Running serially (not parallel)
+
+If you want to run serially (not parallel) you can use the following code.
+
+```{r}
+for (pheno in cdr3_phenotypes) {
+  for (hsite in unique(full_aa_hla_sites$hla_site)) {
+    for (cdr3_pos in imgt_pos_testable) {
+      if (grepl("_unstrat_", pheno)) {
+        message("NO CDR3 length filtering")
+        run_qtl_stats(
+          results_dir = glue("{wkdir}/data/interim/cdr3_qtl/results/{pheno}"), 
+          phenotype_type = pheno,
+          hsite = hsite,
+          cdr3_pos = cdr3_pos,
+          cdr3length = NULL
+        )
+      } else {
+        for (cdr3length in c(12:18)) {
+          message(glue("Processing {pheno} {hsite} {cdr3_pos} {cdr3length}..."))
+          run_qtl_stats(
+            results_dir = glue("{wkdir}/data/interim/cdr3_qtl/results/{pheno}"), 
+            phenotype_type = pheno,
+            hsite = hsite,
+            cdr3_pos = cdr3_pos,
+            cdr3length = cdr3length
+          )
+        }
+      }
+    }
+  }
+}
+
+```
+
+
+This section walks through what the script and slurm jobs are doing in more detail.
+
+Function to normalize AA amino acid frequency into a standard normal distribution (INT-transform). This process will occur for each IMGT position x HLA-AA site combination.
+
+```{r}
+# first prepping the site data into a wide format
+gdata <- full_aa_hla_sites %>% 
+  dplyr::filter(hla_site == "DRB1_13") %>% 
+  dplyr::filter(nchar(HLA_AA_site) == 1) %>%
+  dplyr::select(-c(fdigit, aatype)) %>% 
+  dplyr::group_by(participant_id, HLA_AA_site) %>% 
+  dplyr::summarize(allele_dosage = sum(allele_dosage)) %>% 
+  tidyr::pivot_wider(names_from = HLA_AA_site, values_from = allele_dosage) %>%
+  dplyr::rename_at(vars(-participant_id), ~ paste0(., "_allele")) %>% 
+  glimpse()
+gdata
+
+pdata <- cdr3_p1_strat_filtered_cv1k %>% 
+  dplyr::filter(imgt_pos == "P109") %>% 
+  dplyr::filter(cdr3len == 13) %>% 
+  dplyr::select(participant_id, AA = aa, ratio) %>% 
+  glimpse()
+pdata
+
+# visualzing the distribution of AA frequencies
+pdata %>% ggplot(aes(x=ratio,fill=AA))+
+    geom_histogram(bins = 30)+
+    facet_wrap(~AA)+
+    theme_bw()+
+    theme(legend.position = "none")+
+    labs(title="Distribution of amino acid frequencies (pre-transform, same scale)")
+
+# Same data but relaxed scale 
+pdata %>% ggplot(aes(x=ratio,fill=AA))+
+    geom_histogram(bins = 30)+
+    facet_wrap(~AA,scale="free_x")+
+    theme_bw()+
+    theme(legend.position = "none")+
+    labs(title="Distribution of amino acid frequencies (pre-transform, same scale)")
+
+
+# INT-transform (inverse normal transformation)
+pall <- data.frame()
+pnamelist <- unique(pdata$AA)
+for( ptarget in pnamelist){
+    pdata2 <- subset(pdata, AA==ptarget)
+    pdata2 <- pdata2[,c("participant_id", "ratio")]
+    x <- pdata2$ratio
+    pdata2$normrate <- qnorm( (rank(x, na.last="keep") - 0.5) / sum(!is.na(x)) ) #inverse normal normalization
+    
+    df <- pdata2[,c("participant_id","normrate")]
+    df$AA <- ptarget
+    pall <- rbind(pall,df)
+}
+pall
+
+# options(repr.plot.width=12, repr.plot.height=6)
+pall %>% ggplot(aes(x=normrate,fill=AA))+
+    geom_histogram(bins = 30)+
+    facet_wrap(~AA)+
+    theme_bw()+
+    theme(legend.position = "none")+
+    labs(title="Distribution of amino acid frequencies (pre-transform, same scale)")
+pall
+
+cdr3_freq_df <- pall %>% pivot_wider(names_from = AA, values_from = normrate) %>% 
+  glimpse()
+
+# generating the model data
+M <- cdr3_freq_df %>% 
+  left_join(gdata, by = "participant_id") %>% 
+  left_join(covar_df, by = "participant_id") %>% 
+  glimpse()
+
+
+# m1_datalist <- generate_model_inputs(
+#   phenotype_type = "cdr3_p2_strat_filtered_cv1k",
+#   hsite = "DRB1_13",
+#   cdr3_pos = "P109",
+#   cdr3length = 13
+# )
+# names(m1_datalist)
+# M <- m1_datalist$M
+# gdata <- m1_datalist$gdata
+# pdata <- m1_datalist$pdata
+# covar_df <- m1_datalist$covar_df
+
+# M2 <- generate_model_inputs(
+#   phenotype_type = "cdr3_p1_unstrat_filtered_cv1k",
+#   hsite = "DRB1_13",
+#   cdr3_pos = "P109",
+#   cdr3length = NULL
+# )
+
+
+#------------------------------------------------------------------------------
+# MANOVA 
+#------------------------------------------------------------------------------
+# Function to estimate a p-value for model fit using Pillai's trace
+
+#full model (exclude S_allele, the most frequent allele, as the reference allele)
+mod1 <- lm( 
+    cbind(A,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y) ~
+        F_allele + G_allele + H_allele + R_allele + Y_allele +
+        MHC_all_PC1+MHC_all_PC2+MHC_all_PC3, 
+    data = M)
+
+#null model
+mod0 <- lm( 
+    cbind(A,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y) ~
+        MHC_all_PC1+MHC_all_PC2+MHC_all_PC3, 
+    data = M)
+
+summary(mod1)
+summary(mod0)
+
+test <- anova(mod1, mod0)
+test
+
+#------------------------------------------------------------------------------
+# Variance explained using MVLM
+library(MVLM)
+#full model
+mod1 <- mvlm( 
+    cbind(A,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y) ~
+        F_allele + G_allele + H_allele + R_allele + Y_allele +
+        MHC_all_PC1+MHC_all_PC2+MHC_all_PC3, 
+    data = M)
+
+summary(mod1)
+var_exp_full <- mod1$pseudo.rsq["Omnibus Effect",1]
+var_exp_full
+
+#null model
+mod0 <- mvlm( 
+    cbind(A,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y) ~
+        MHC_all_PC1+MHC_all_PC2+MHC_all_PC3, 
+    data = M)
+
+var_exp_null <- mod0$pseudo.rsq["Omnibus Effect",1]
+var_exp_null
+
+corrected_var_exp <- var_exp_full - var_exp_null
+corrected_var_exp
+
+
+#------------------------------------------------------------------------------
+# LM
+#------------------------------------------------------------------------------
+
+lm_results_dir <- glue("{wkdir}/data/interim/cdr3_qtl/lm_results")
+dir.create(lm_results_dir, showWarnings = FALSE, recursive = TRUE)
+
+run_lm_site_pos_pair <- function(pdata, gdata, covar_df, hla_aa_allele, cdr3_aa) {
+  require(glue)
+  require(dplyr)
+  
+  # filtering the cdr3_aa data
+  pdata2 <- subset(pdata, AA==cdr3_aa) %>% 
+    dplyr::select(participant_id, normrate) %>% 
+    glimpse()
+  
+  # preparing genotype data
+  gdata2 <- gdata %>% dplyr::select(participant_id, {{hla_aa_allele}})
+  
+  # Joining data
+  M_data <- pdata2 %>% 
+    dplyr::left_join(gdata2, by = "participant_id") %>% 
+    dplyr::left_join(covar_df, by = "participant_id")
+
+  model_formula <- as.formula(
+      glue("normrate ~ {hla_aa_allele} + MHC_all_PC1+MHC_all_PC2+MHC_all_PC3")
+      )
+  mod <- lm(model_formula, data = M_data)
+  return(mod)
+}
+
+# # Testing the function
+# t <- run_lm_site_pos_pair(pall, gdata, covar_df, "R_allele", "K")
+# broom::tidy(t) %>% subset(term == "R_allele")
+
+# unique(pall$AA)
+# colnames(gdata[,-1])
+
+# creating a map of all possible combinations of HLA-AA allele and CDR3-AA
+lm_map_df <- expand.grid(
+  "hla_aa_allele" = colnames(gdata[,-1]),
+  "cdr3_aa" = unique(pall$AA))
+
+# running the LM for each combination
+mod_list <- 1:nrow(lm_map_df) %>% 
+  purrr::set_names(glue("HLA-{lm_map_df$hla_aa_allele[.]} CDR3-{lm_map_df$cdr3_aa[.]}")) %>% 
+  purrr::map(
+    ~ run_lm_site_pos_pair(
+        pdata = pall, 
+        gdata = gdata, 
+        covar_df = covar_df, 
+        hla_aa_allele = lm_map_df$hla_aa_allele[.], 
+        cdr3_aa = lm_map_df$cdr3_aa[.]
+    )
+  )
+
+lm_results_df <- mod_list %>% 
+  purrr::map(broom::tidy) %>% 
+  # purrr::map(~ dplyr::filter(.x, grepl("_allele", term))) %>% 
+  bind_rows(.id = "model_name") %>% 
+  mutate(cdr3_aa = strex::str_after_last(model_name, "CDR3-")) %>% 
+  View
+  glimpse()
+
+write_csv(lm_results_df, glue("{lm_results_dir}/lm_results_df_{Sys.Date()}.csv"))
+saveRDS(lm_results_df, glue("{lm_results_dir}/lm_results_model_list_{Sys.Date()}.rds"))
+
+
+# pdata2 <- subset(pall, AA=="K")
+# pdata2 <- pdata2[,c("participant_id", "normrate")]
+# head(pdata2)
+# #prepare genotyep data
+# gdata2 <- gdata[,c("participant_id","R_allele")]
+# head(gdata2)
+
+# M_lm <- pdata2 %>% left_join(gdata2, by = "participant_id") %>% 
+#   left_join(covar_df, by = "participant_id") %>% 
+#   glimpse()
+
+# mod1 <- lm( 
+#     normrate ~ R_allele + MHC_all_PC1+MHC_all_PC2+MHC_all_PC3, 
+#     data = M_lm)
+# summary(mod1)
+
+# summary(mod1)$coefficient["R_allele",,drop=F]
+```
+
+Visualizing an HLA-AA allele and CDR3-AA pair.
+
+```{r}
+# Visualizing an example LM result
+allele <- "R_allele"
+d1 <- pdata
+d2 <- gdata[,c("participant_id",allele)]
+df <- merge(d1,d2,by="participant_id")
+colnames(df)[4] <- "dose"
+df$dose <- as.character(df$dose)
+df %>% glimpse()
+
+df %>% ggplot(aes(x=dose,y=ratio,fill=dose)) +
+    facet_wrap(~AA,ncol=7,scale="free")+ #
+    labs(y="Non-transformed Freq.")+
+    geom_boxplot(outlier.size = 0.1) +
+    theme(legend.position = "none") +
+    theme_bw() +
+    labs(title=allele,x="allele count")
+
+```
+
+
+
+
+
+Aggregating the results of the MANOVA and MVLM analysis.
+
+```{r}
+manova_paths <- list.files(
+  glue("{wkdir}/data/interim/cdr3_qtl/results"),
+  recursive = TRUE,
+  pattern = "mlm_mvlm_",
+  full.names = TRUE
+)
+length(manova_paths)
+
+
+pull_manova_results <- function(path) {
+  require(glue)
+  require(dplyr)
+  require(strex)
+  
+  descriptor <- basename(path) %>% gsub("mlm_mvlm_", "", .)
+  pheno <- str_before_first(descriptor, "__")
+  hsite <- descriptor %>% str_after_first("HLAsites-") %>% str_before_first("__")
+  cdr3_pos <- descriptor %>% str_after_first("CDR3pos-") %>% str_before_first("__")
+  cdr3_len <- descriptor %>% str_after_first("CDR3len-") %>% str_before_first(".rds")
+
+  res <- readRDS(path)
+  pillai_res <- res$manova_res %>% broom::tidy()
+  
+  manova_df <- pillai_res[2,] %>% 
+    mutate(full_model = pillai_res$term[1]) %>% 
+    mutate(phenotype_type = pheno, hsite = hsite, 
+      cdr3_pos = cdr3_pos, cdr3_len = cdr3_len,
+      mnibus_explained_variance = res$mvlm_corrected_var_exp
+      )
+  return(manova_df)
+}
+
+future::plan("multisession", workers = 8)
+manova_df <- manova_paths %>% 
+  purrr::set_names(basename(.)) %>% 
+  furrr::future_map(pull_manova_results) %>% 
+  bind_rows(.id = "path") %>% 
+  glimpse()
+
+manova_df %<>% 
+  separate(hsite, into = c("hla_allele", "hla_site"), sep = "_", remove = FALSE) %>% 
+  mutate(hla_site = as.numeric(hla_site)) %>% 
+    mutate(hla_allele = factor(hla_allele, 
+      levels = c("A", "B", "C", "DRB1", "DQA1", "DQB1", "DPA1", "DPB1"))) %>% 
+  glimpse()
+
+saveRDS(manova_df, glue("{wkdir}/data/interim/cdr3_qtl/results/compiled/manova_df_{Sys.Date()}.rds"))
+
+```
+
+Visualizing results!
+
+```{r}
+manova_df <- readRDS(
+    glue("{wkdir}/data/interim/cdr3_qtl/results/compiled/manova_df_2025-08-09.rds")) %>% 
+    mutate(phenotype_desc = case_when(
+      phenotype_type == "cdr3_p1_strat_filtered_cv1k" ~ "All CDR3 Amino Acids \n Length Stratified",
+      phenotype_type == "cdr3_p1_unstrat_filtered_cv1k" ~ "All CDR3 Amino Acids \n Unstratified",
+      phenotype_type == "cdr3_p2_strat_filtered_cv1k" ~ "Germline Removed \n Length Stratified",
+      phenotype_type == "cdr3_p2_unstrat_filtered_cv1k" ~ "Germline Removed \n Unstratified"
+    )) %>% 
+    mutate(hla_allele_color = as.character(hla_allele)) %>% 
+    mutate(cdr3_len = as.numeric(cdr3_len)) %>% 
+    mutate(cdr3_pos = gsub("P", "", cdr3_pos) %>% as.numeric()) %>% 
+  glimpse()
+
+p_logp_manova <- manova_df %>% 
+  ggplot(aes(x=hla_site,y=-log10(p.value),color=hla_allele_color)) +
+    geom_point(size = 0.75) +
+    labs(x = "HLA amino acid site", y = expression(-log[10](P))) +
+    facet_grid(phenotype_desc~hla_allele, scales = "free_x") +
+    theme_classic() +
+    scale_color_npg() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+      legend.position = "none")
+
+ggsave(
+  glue("{wkdir}/figures/CDR3-qtl/p_logp_manova_{Sys.Date()}.png"),
+  p_logp_manova,
+  width = 12,
+  height = 9
+)
+
+p_logp_manova_p2strat <- manova_df %>% 
+  filter(phenotype_type == "cdr3_p2_strat_filtered_cv1k") %>% 
+  group_by(hsite, cdr3_pos) %>% 
+  slice_min(p.value, n = 1, with_ties = FALSE) %>% 
+  ggplot(aes(x=hla_site,y=-log10(p.value),color=hla_allele_color)) +
+    geom_point(size = 0.75) +
+    labs(x = "HLA amino acid site", y = expression(-log[10](P))) +
+    facet_grid(phenotype_desc~hla_allele, scales = "free_x") +
+    theme_classic() +
+    scale_color_npg() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+      legend.position = "none")
+
+ggsave(
+  glue("{wkdir}/figures/CDR3-qtl/p_logp_manova_p2strat_{Sys.Date()}.png"),
+  p_logp_manova_p2strat,
+  width = 10,
+  height = 4
+)
+# manova_df %>% 
+#   arrange(p.value) %>% 
+#   head(10) %>% View
+
+```
+
+
+```{r}
+plot_df <- manova_df %>% 
+  filter(phenotype_type == "cdr3_p2_strat_filtered_cv1k") %>% 
+  mutate(adj_p = p.adjust(p.value, method = "BH"))
+
+label_me <- plot_df %>% 
+  filter(adj_p < 0.05) %>% 
+  slice_min(adj_p, n = 30) %>% 
+  mutate(label_tag = glue("{hsite}_x_P{cdr3_pos}")) %>% 
+  glimpse()
+
+p_top_hits <- plot_df %>% 
+  ggplot(aes(x = mnibus_explained_variance, y = -log10(adj_p), color = hla_allele_color)) +
+    geom_point(alpha = 0.9) +
+    theme_classic() +
+    labs(x = "Omnibus Test Variance Explained", y = expression(-log[10](Padj)), color = "HLA",
+      title = "Top hits of MANOVA \n CDR3 length stratified & Germline Removed Phenotype") +
+    scale_color_npg() +
+    geom_text_repel(data = label_me, 
+      aes(label = label_tag), 
+      size = 3,
+      force = 40,
+      segment.curvature = 0.3,
+      segment.angle = 20,
+      # segment.size = 0.2,
+      segment.alpha = 0.3
+      ) +
+    theme(plot.title = element_text(hjust = 0.5))
+
+ggsave(
+  glue("{wkdir}/figures/CDR3-qtl/p_logp_manova_top_hits_{Sys.Date()}.png"),
+  p_top_hits,
+  width = 8,
+  height = 5
+)
+
+
+```
+
+
+![P-value distribution of MANOVA](../figures/CDR3-qtl/p_logp_manova_2025-08-09.png)
+
+```{r}
+raychaudhuri_results <- read_tsv(
+  gzfile(glue("{wkdir}/data/input/cdr3qtl/cdr3qtl_MVML_amino_acid_geno_all_results.rm_gl.txt.gz"))
+) %>% 
+  dplyr::rename(hla_allele = HLA, hla_site = Site_hla, cdr3_len = Length_cdr3,
+    cdr3_pos = Position_cdr3,
+      p.value_ray = Pvalue, mnibus_explained_variance_ray = Variance_explained) %>% 
+  glimpse()
+
+amppd_results <- manova_df %>% 
+  filter(phenotype_type == "cdr3_p2_strat_filtered_cv1k") %>% 
+  dplyr::select(hla_allele, hla_site, cdr3_len, cdr3_pos, p.value, mnibus_explained_variance) %>% 
+  glimpse()
+
+merged_results <- raychaudhuri_results %>% 
+  full_join(amppd_results) %>% 
+  glimpse()
+
+merged_results$mnibus_explained_variance_ray %>% is.na() %>% sum() # 2124 extra that I have
+merged_results$mnibus_explained_variance %>% is.na() %>% sum() # 3828 missing from our set
+
+# 20,532 shared datapoints
+merged_results %>% 
+  drop_na(mnibus_explained_variance_ray, mnibus_explained_variance) %>% 
+  glimpse()
+
+p_var_explained_cor <- merged_results %>% 
+  ggplot(aes(x=mnibus_explained_variance_ray, y=mnibus_explained_variance)) +
+    geom_point(alpha = 0.2, size = 0.8) +
+    theme_classic() +
+    ggpubr::stat_cor(
+      method = "pearson",
+      label.x.npc = 0.1,
+      label.y.npc = 0.95,
+      aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+      size = 3.5, # larger font
+      digits = 2, # two decimal places
+      p.accuracy = 0.001, # p-value accuracy
+      show.legend = FALSE,
+      parse = TRUE # pretty math notation
+    ) +
+    geom_smooth(method = "lm", se = FALSE) +
+    facet_wrap(~hla_allele, scales = "free") +
+    labs(title = "Correlation between variance explained (MVLM) by Ishigaki et al. (2022) and this study \n CDR3 length stratified & Germline Removed") +
+    # coord_fixed(ratio = 1) +
+    labs(x = "Ishigaki et al. (2022) Variance Explained", 
+      y = "This Study Variance Explained") +
+      theme(plot.title = element_text(hjust = 0.5))
+
+ggsave(
+  glue("{wkdir}/figures/CDR3-qtl/raychaudhuri_vs_amppd__explained_variance_{Sys.Date()}.png"),
+  p_var_explained_cor,
+  width = 10, height = 10
+)
+
+p_var_explained_cor_pval <- merged_results %>% 
+  ggplot(aes(x=-log10(p.value_ray), y=-log10(p.value))) +
+    geom_point(alpha = 0.2, size = 0.8) +
+    theme_classic() +
+    ggpubr::stat_cor(
+      method = "pearson",
+      label.x.npc = 0.1,
+      label.y.npc = 0.95,
+      aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+      size = 3.5, # larger font
+      digits = 2, # two decimal places
+      p.accuracy = 0.001, # p-value accuracy
+      show.legend = FALSE,
+      parse = TRUE # pretty math notation
+    ) +
+    geom_smooth(method = "lm", se = FALSE) +
+    facet_wrap(~hla_allele, scales = "free") +
+    labs(title = "Correlation between P-values of MANOVA by Ishigaki et al. (2022) and this study \n CDR3 length stratified & Germline Removed") +
+    labs(x = expression(-log[10](P) ~ "Ishigaki et al. (2022)"), 
+      y = expression(-log[10](P) ~ "This Study")) +
+      theme(plot.title = element_text(hjust = 0.5))
+
+ggsave(
+  glue("{wkdir}/figures/CDR3-qtl/raychaudhuri_vs_amppd__pval_{Sys.Date()}.png"),
+  p_var_explained_cor_pval,
+  width = 10, height = 10
+)
+
+# Zooming in on just the DRB1 allele
+p_var_explained_cor_drb1 <- merged_results %>% 
+  filter(hla_allele == "DRB1") %>% 
+  ggplot(aes(x=mnibus_explained_variance_ray, y=mnibus_explained_variance)) +
+    geom_point(alpha = 0.2, size = 0.8) +
+    theme_classic() +
+    ggpubr::stat_cor(
+      method = "pearson",
+      label.x.npc = 0.1,
+      label.y.npc = 0.95,
+      aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+      size = 3.5, # larger font
+      digits = 2, # two decimal places
+      p.accuracy = 0.001, # p-value accuracy
+      show.legend = FALSE,
+      parse = TRUE # pretty math notation
+    ) +
+    geom_smooth(method = "lm", se = FALSE) +
+    facet_wrap(~hla_allele, scales = "free") +
+    labs(
+      # title = "Correlation between variance explained (MVLM) by Ishigaki et al. (2022) and this study \n CDR3 length stratified & Germline Removed \n DRB1 allele"
+      ) +
+    # coord_fixed(ratio = 1) +
+    labs(x = "Ishigaki et al. (2022) \nVariance Explained", 
+      y = "AMP-PD Study \nVariance Explained") +
+      theme(plot.title = element_text(hjust = 0.5))
+
+ggsave(
+  glue("{wkdir}/figures/CDR3-qtl/raychaudhuri_vs_amppd__explained_variance_drb1_{Sys.Date()}.png"),
+  p_var_explained_cor_drb1,
+  width = 3, height = 2.5
+)
+
+
+```
+
+
+
+![Comparison of variance explained by Ishigaki et al. (2022) and this study](../figures/CDR3-qtl/raychaudhuri_vs_amppd__explained_variance_2025-08-09.png)
+
+![Comparison of P-values of MANOVA by Ishigaki et al. (2022) and this study](../figures/CDR3-qtl/raychaudhuri_vs_amppd__pval_2025-08-09.png)
+
+
+**Takeaways:**
+
+
+```{r}
+
+```

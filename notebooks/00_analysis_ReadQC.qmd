@@ -1,0 +1,129 @@
+---
+title: "Read-QC"
+eval: false
+editor: source
+author: "Joe Boktor"
+date: '2023-10-18'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    column: page
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+# Visulalizing BBduk ReadQC Parameters
+
+```{r}
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+load_dot_env(glue("{wkdir}/.env"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+outputdir <- paste0(wkdir, "/data/interim/readqc")
+
+library(ggsci)
+library(aplot)
+
+```
+
+
+Unziping KrakenUniqDB
+
+```{r, eval = FALSE}
+# create list of all file paths
+clean_fqs <- glue("{pdmbs_dir}/workflow/WGS/clean_fastqs_stats")
+readqc_stdout <- list.files(clean_fqs, full.names = T)
+readqc_stats <- tibble()
+
+for (f in readqc_stdout){
+  stdout <- read.delim(f, header = F, sep = "\t")[13:31,]
+  stats_list <- stdout %>% str_split(., pattern = " ")
+  
+  sample_id <- f %>%
+    str_split("/") %>%
+    unlist() %>% 
+    tail(1) %>%
+    str_replace("_bbduk_stdout.txt", "")
+  
+  sample_stdout <- try(
+    readqc_stats %<>% bind_rows(as_tibble_row(
+      c(
+        "sample_id" = sample_id,
+        "input_reads" = stats_list[[2]][1],
+        "input_bases" = stats_list[[4]][1],
+        "qtrimmed_reads" = stats_list[[6]][1],
+        "qtrimmed_bases" = stats_list[[7]][1],
+        "low_phred_Q10_reads" = stats_list[[9]][1],
+        "low_phred_Q10_bases" = stats_list[[10]][1],
+        "low_entropy_reads" = stats_list[[12]][1],
+        "low_entropy_bases" = stats_list[[13]][1],
+        "removed_reads" = stats_list[[15]][1],
+        "removed_bases" = stats_list[[16]][1],
+        "final_reads" = stats_list[[18]][1],
+        "final_bases" = stats_list[[19]][1]
+      )
+    ))
+  )
+  
+  if (inherits(sample_stdout, "try-error")) {
+    cat("\nERROR: ", sample_id, f, "\n")
+    next
+  }
+}
+saveRDS(readqc_stats, glue("{outputdir}{Sys.Date()}_bbduk-stats-df.rds") )
+```
+
+
+```{r}
+readqc_stats <- readRDS( glue("{outputdir}/2022-12-05_bbduk-stats-df.rds") )
+
+df_readqc_stats <-
+  readqc_stats %>%
+  column_to_rownames(var = "sample_id") %>%
+  mutate_all(as.numeric) %>%
+  mutate(
+    percent_reads_removed = 100 * ((input_reads - final_reads)/input_reads) ,
+    percent_bases_removed = 100 * ((input_bases - final_bases)/input_bases)
+  ) %>% 
+  glimpse()
+
+```
+
+
+```{r}
+
+df_readqc_stats %>% 
+  ggplot(aes(input_bases, percent_bases_removed)) +
+  geom_point(shape = 21) +
+  scale_x_log10() +
+  theme_bw()
+
+```
+
+```{r}
+df_readqc_stats %>% 
+  ggplot(aes(input_reads, percent_reads_removed)) +
+  geom_point(shape = 21) +
+  scale_x_log10() +
+  theme_bw()
+
+
+```
+
+```{r}
+df_readqc_stats %>% 
+  ggplot(aes(final_reads+ 1)) +
+  geom_histogram(bins = 300) +
+  geom_vline(xintercept = 1e6) +
+  scale_x_log10()
+
+```

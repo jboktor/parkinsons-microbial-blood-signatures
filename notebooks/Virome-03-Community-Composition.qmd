@@ -1,0 +1,416 @@
+---
+title: "Parkinson's Disease Blood Virome: Community Composition Analyses"
+editor: visual
+author: "Joe Boktor"
+date: '2024-07-01'
+bibliography: references.bib
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    grid:
+      sidebar-width: 300px
+      body-width: 900px
+      margin-width: 300px
+      gutter-width: 1.5rem
+---
+
+# Background / Introduction
+
+#  Analysis Setup
+
+
+```{r}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(glue)
+# microbiome analysis
+library(phyloseq)
+library(microbiome)
+library(vegan)
+library(Seurat)
+library(Matrix)
+library(broom.mixed)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggside)
+library(ggpubr)
+library(ggrepel)
+
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+palmdb_data <- glue("{ref_dir}/PalmDB")
+palm_interim <- glue("{wkdir}/data/interim/PalmDB_mapping")
+dir.create(palm_interim, showWarnings = FALSE)
+palmddb_res <- glue("{pdmbs_dir}/workflow/RNASEQ/palmdb_bwa_dlist")
+
+# options(future.globals.maxSize= 6291456000)
+# future::plan("multisession", workers = 8)
+```
+
+# Alpha Diversity
+
+```{r}
+ps <- readRDS(
+    glue("{palm_interim}/",
+        "phyloseq_count_matrix_BWA-dlist-GRCh38-dna-rna",
+        "_decontaminated-outlier-removed-&_cleanread-normed_2024-11-04.rds"
+    )
+)
+
+# Alpha diversity Analysis
+total_observed <- microbiome::alpha(ps)
+alpha_stats_df <- total_observed %>%
+    rownames_to_column(var = "sample_id") %>%
+    left_join(meta(ps), by = "sample_id") %>%
+    glimpse()
+
+alpha_stats_df %>% glimpse
+
+
+p_alpha_obs <- alpha_stats_df %>%
+    filter(case_control_other_latest != "Other") %>%
+    ggplot(aes(x = case_control_other_latest, y = observed)) +
+    geom_point(position = position_jitter(width = 0.2), alpha = 0.6) +
+    geom_boxplot(outlier.alpha = 0, alpha = 0.2) +
+    labs(x = NULL, y = "Unique vOTUs") +
+    theme_light()
+
+p_alpha_shan <- alpha_stats_df %>%
+    filter(case_control_other_latest != "Other") %>%
+    ggplot(aes(x = case_control_other_latest, y = diversity_shannon)) +
+    geom_point(position = position_jitter(width = 0.2), alpha = 0.6) +
+    geom_boxplot(outlier.alpha = 0, alpha = 0.2) +
+    labs(x = NULL, y = "Shannon's Diversity") +
+    # scale_y_log10() +
+    theme_light()
+
+p_alpha_plots <- p_alpha_obs + p_alpha_shan
+
+ggsave(
+    glue("{wkdir}/figures/Viral/",
+        "alpha-diversity-metrics_{Sys.Date()}.png"
+    ),
+    p_alpha_plots,
+    width = 5, height = 5
+)
+
+
+mds_tests <- alpha_stats_df %>%
+    dplyr::select(matches("mds_updrs.*_summary_score")) %>%
+    colnames()
+
+mds_plots <- list()
+for (test in mds_tests){
+    # Get data for current test
+    plot_data <- alpha_stats_df %>%
+        filter(case_control_other_latest == "Case")
+    
+    # Calculate y range to position labels
+    y_range <- range(plot_data$observed)
+    y_span <- diff(y_range)
+    label_y_cor <- y_range[2] - 0.05 * y_span
+    label_y_eq <- y_range[2] - 0.10 * y_span
+    
+    # Calculate x range to position labels
+    x_range <- range(plot_data[[test]], na.rm = TRUE)
+    x_span <- diff(x_range) 
+    label_x <- x_range[1] + 0.05 * x_span
+    
+    mds_plots[[test]] <- plot_data %>%
+        ggplot(aes(x = !!sym(test), y = observed)) +
+        geom_smooth(method = "lm", color = "blue", alpha = 0.2) +
+        geom_point(position = position_jitter(width = 0.2), alpha = 0.6) +
+        stat_cor(method = "pearson", 
+                 label.x = label_x,
+                 label.y = label_y_cor) +
+        stat_regline_equation(label.x = label_x,
+                            label.y = label_y_eq) +
+        theme_light()
+    print(mds_plots[[test]])
+}
+
+# Combine plots into 2x2 grid using patchwork
+mds_plots_combined <- wrap_plots(mds_plots, ncol = 2, nrow = 2)
+mds_plots_combined
+
+ggsave(
+    glue("{wkdir}/figures/Viral/",
+        "alpha-diversity-metrics-vs-MDS-scores_{Sys.Date()}.png"
+    ),
+    mds_plots_combined,
+    width = 9, height = 9
+)
+
+```
+
+
+![](../figures/Viral/alpha-diversity-metrics_2024-11-04.png)
+
+![](../figures/Viral/alpha-diversity-metrics-vs-MDS-scores_2024-11-04.png)
+
+
+# Beta Diversity
+
+```{r}
+
+ps_clr <- ps %>% microbiome::transform("clr")
+
+# Calculate Euclidean distances between samples using CLR-transformed abundances
+euc_dist <- phyloseq::distance(ps_clr, method = "euclidean")
+
+# Perform ordination using phyloseq
+ord <- phyloseq::ordinate(ps_clr, method = "PCoA", distance = euc_dist)
+
+# ord %>% glimpse
+# Create base ordination plots using phyloseq's plot_ordination
+p1 <- phyloseq::plot_ordination(ps_clr, ord, color = "case_control_other_latest") +
+    geom_point(alpha = 0.7, size = 1) +
+    scale_color_d3() +
+    stat_ellipse(aes(color = case_control_other_latest), type = "norm", linetype = 2) +
+    labs(title = "Colored by Case/Control Status") +
+    theme_bw() +
+    coord_fixed() +
+    theme(
+        legend.title = element_blank(),
+        legend.position = "right",
+        plot.subtitle = element_text(size = 10),
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 11)
+    )
+
+p2 <- phyloseq::plot_ordination(ps_clr, ord, color = "study") +
+    geom_point(alpha = 0.7, size = 1) +
+    scale_color_d3() +
+    stat_ellipse(aes(color = study), type = "norm", linetype = 2) +
+    labs(title = "Colored by Study") +
+    theme_bw() +
+    coord_fixed() +
+    theme(
+        legend.title = element_blank(),
+        legend.position = "right",
+        plot.subtitle = element_text(size = 10),
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 11)
+    )
+
+p3 <- phyloseq::plot_ordination(ps_clr, ord, justDF = TRUE) %>%
+    left_join(alpha_stats_df, by = "sample_id") %>%
+    ggplot(aes(x = Axis.1, y = Axis.2, color = observed)) +
+    geom_point(alpha = 0.7, size = 1) +
+    scale_color_viridis_c() +
+    labs(title = "Colored by Observed Virus Counts",
+         color = "Virus Count") +
+    theme_bw() +
+    coord_fixed() +
+    theme(
+        legend.position = "right",
+        plot.subtitle = element_text(size = 10),
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 11)
+    )
+
+p4 <- phyloseq::plot_ordination(ps_clr, ord, 
+color = "mds_updrs_part_iii_summary_score") +
+    geom_point(alpha = 0.7, size = 1) +
+    scale_color_viridis_c() +
+    labs(title = "Colored by UPDRS III Score",
+         color = "UPDRS III") +
+    theme_bw() +
+    coord_fixed() +
+    theme(
+        legend.position = "right",
+        plot.subtitle = element_text(size = 10),
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 11)
+    )
+
+# Combine plots using patchwork
+p_combined <- (p1 + p2) / (p3 + p4) +
+    plot_annotation(
+        title = "PCoA of CLR-transformed Viral Abundances",
+        caption = paste0("PC1 (", round(ord$values$Relative_eig[1]*100, 1), "%) vs ",
+                        "PC2 (", round(ord$values$Relative_eig[2]*100, 1), "%)\n",
+                        "Using Euclidean distances. Dashed lines show 95% confidence ellipses"),
+        theme = theme(
+            plot.title = element_text(size = 14),
+            plot.caption = element_text(size = 10)
+        )
+    )
+
+ggsave(
+    glue("{wkdir}/figures/Viral/",
+        "pcoa_clr-transformed_viral_abundances_multipanel_{Sys.Date()}.png"
+    ),
+    p_combined,
+    width = 12, height = 12
+)
+
+
+
+```
+
+
+Visualizing sample distances between participants and groups
+
+```{r}
+# Convert distance matrix to data.table format
+dist_dt <- as.data.table(as.matrix(euc_dist), keep.rownames = "sample1")
+dist_dt <- melt(dist_dt, 
+                id.vars = "sample1",
+                variable.name = "sample2",
+                value.name = "distance")
+# Get sample metadata as data.table
+sample_meta_dt <- meta(ps_clr) %>%
+  as.data.frame() %>%
+  dplyr::select(sample_id, participant_id, case_control_other_latest, visit_month)
+
+# Join metadata for both samples using dplyr syntax
+dist_dt_annotated <- dist_dt %>%
+  # Join first sample metadata
+  left_join(
+    sample_meta_dt %>%
+      rename(
+        sample1 = sample_id,
+        participant_id1 = participant_id,
+        case_control1 = case_control_other_latest,
+        visit_month1 = visit_month
+      ),
+    by = "sample1"
+  ) %>%
+  # Join second sample metadata  
+  left_join(
+    sample_meta_dt %>%
+      rename(
+        sample2 = sample_id,
+        participant_id2 = participant_id,
+        case_control2 = case_control_other_latest,
+        visit_month2 = visit_month
+      ),
+    by = "sample2"
+  ) %>%
+  # Select final columns
+  select(
+    sample1, sample2, distance,
+    participant_id1, participant_id2,
+    case_control1, case_control2,
+    visit_month1, visit_month2
+  ) %>% 
+  filter(case_control1 != "Other" | case_control2 != "Other") %>% 
+  glimpse()
+
+dist_dt_annotated %>% glimpse
+
+
+dist_dt_annotated <- dist_dt_annotated %>% 
+    mutate(
+        participant_comparison = ifelse(participant_id1 == participant_id2, 
+                                "Within participant", 
+                                "Between participants"),
+    ,
+    comparison_type = case_when(
+        case_control1 == "Case" & case_control2 == "Case" ~ "Within Case",
+        case_control1 == "Control" & case_control2 == "Control" ~ "Within Control",
+        case_control1 == "Case" & case_control2 == "Control" ~ "Between Groups (Case to Control)",
+        case_control1 == "Control" & case_control2 == "Case" ~ "Between Groups (Control to Case)",
+        TRUE ~ "Other"
+    )
+) %>% 
+glimpse()
+
+dist_dt_annotated %>% glimpse
+dist_dt_annotated$comparison_type %>% table()
+dist_dt_annotated$participant_comparison %>% table()
+
+
+p_dist_comparison_type <- dist_dt_annotated %>% 
+    filter(sample1 != sample2) %>%
+    filter(comparison_type != "Other") %>%
+    group_by(comparison_type) %>%
+    sample_n(20000) %>%
+    ggplot(aes(y = distance, x = comparison_type)) +
+    geom_point(alpha = 0.3, 
+               position = position_jitter(width = 0.2), 
+               size = 0.5) +
+    geom_boxplot(outlier.alpha = 0, alpha = 0.2) +
+    theme_bw() +
+    labs(y = "Aitchison Distance", x = NULL) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+    glue("{wkdir}/figures/Viral/",
+        "distance-between-samples-by-comparison-type_{Sys.Date()}.png"
+    ),
+    p_dist_comparison_type,
+    width = 7, height = 8
+)
+
+#
+p_dist_participant_comparison <- dist_dt_annotated %>% 
+    filter(sample1 != sample2) %>%
+    group_by(participant_comparison) %>%
+    sample_n(1490) %>%
+    ggplot(aes(y = distance, x = participant_comparison)) +
+    geom_point(alpha = 0.3, 
+               position = position_jitter(width = 0.2), 
+               size = 0.5) +
+    geom_boxplot(outlier.alpha = 0, alpha = 0.2) +
+    theme_bw() +
+    labs(y = "Aitchison Distance", x = NULL) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+    glue("{wkdir}/figures/Viral/",
+        "distance-between-samples-by-participant-comparison_{Sys.Date()}.png"
+    ),
+    p_dist_participant_comparison,
+    width = 3, height = 8
+)
+
+# dist_dt_annotated %>% 
+#     filter(participant_comparison == "Within participant") %>%
+#     filter(sample1 != sample2) %>%
+#     mutate(time_diff = visit_month2 - visit_month1) %>%
+#     filter(time_diff >= 0) %>%
+#     ggplot(aes(x = time_diff, y = distance)) +
+#     geom_point(alpha = 0.3, size = 0.5) +
+#     geom_smooth(method = "lm", color = "blue", alpha = 0.2) +
+#     theme_bw()
+
+```
+
+![](../figures/Viral/distance-between-samples-by-comparison-type_2024-11-04.png)
+
+![](../figures/Viral/distance-between-samples-by-participant-comparison_2024-11-04.png)
+
+```{r}
+sessionInfo()
+```
+

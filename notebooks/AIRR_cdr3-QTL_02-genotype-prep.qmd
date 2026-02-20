@@ -1,0 +1,548 @@
+---
+title: "cdr3-QTL Analysis - HLA Genotype Data Prep"
+editor: source
+author: "Joe Boktor"
+date: '2025-05-04'
+eval: false
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    fig-height: 8
+    fig-width: 14
+---
+
+This notebook will be following analysis defined in (Ishigaki et al., 2022) and implemented [here](https://github.com/immunogenomics/cdr3-QTL).
+
+## Analysis Setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor) 
+library(glue)
+library(furrr)
+library(tictoc)
+library(progress)
+library(entropy)
+library(data.table)
+library(seqinr)
+library(progress)
+library(nlme)
+library(broom.mixed)
+# plotting
+library(ggsci)
+library(scico)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+entropy_dir <- glue("{wkdir}/data/interim/cdr3_entropy")
+entropy_plots_dir <- glue("{wkdir}/figures/AIRR/cdr3_entropy")
+git_dir <- glue("{home_dir}/git/cdr3-QTL")
+hla_plots_dir <- glue("{wkdir}/figures/AIRR/arcasHLA")
+hla_dir <- glue("{wkdir}/data/interim/airr/arcasHLA/analysis_cleaned")
+
+c3_pheno_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_phenotypes")
+gdata_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_hla_genotypes")
+hla_4d_to_aa_dir <- glue("{wkdir}/data/input/cdr3qtl/hla_4d_to_aa")
+
+# dir.create(gdata_dir, showWarnings = FALSE, recursive = TRUE)
+# dir.create(c3_pheno_dir, showWarnings = FALSE, recursive = TRUE)
+future::plan(multisession, workers = 8)
+```
+
+
+```{r}
+full_meta_df <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")) %>% 
+  dplyr::filter(case_control_other_latest != "Other") %>% 
+  glimpse()
+
+# gdf <- readRDS(
+#     glue("{wkdir}/data/interim/airr/arcasHLA/genotypes_cleaned_2025-07-06.rds")) %>% 
+#   glimpse()
+
+```
+
+
+Here we take in the cleaned ArcasHLA genotype data that is formatted for each MHC gene as a binary matrix. The full allele set is used  - including those with low frequency.
+
+```{r}
+all_mhc_genotypes <- readRDS( 
+  glue("{hla_dir}/MHC_all_cleaned_unfiltered_2025-07-21.rds")
+  ) %>% 
+  tibble::rownames_to_column(var = "participant_id") %>% 
+  glimpse()
+
+```
+
+
+Using data provided [here](https://github.com/immunogenomics/cdr3-QTL/tree/main/data/hla_4d_to_aa) we will convert the 4 digit HLA allele codes provided by ArcasHLA to Amino acid specific sites.
+
+```{r}
+aa_mapping <- list.files(hla_4d_to_aa_dir) %>% 
+  discard(grepl("no_", .)) %>% 
+  purrr::set_names() %>% 
+  purrr::map(~ read.table(glue("{hla_4d_to_aa_dir}/{.x}"), 
+    header=T, stringsAsFactors = FALSE)) %>% 
+  bind_rows(.id = "input_file") %>% 
+  dplyr::select(-input_file) %>% 
+  glimpse()
+
+# list of allele positions that need don't have an amino acid mapping in the previous table
+no_aa_mapping <- read.table(glue("{hla_4d_to_aa_dir}/no_amino_acid_allele.info"), 
+  header=FALSE, stringsAsFactors = FALSE) %>% 
+  dplyr::rename(aatype = V1, HLA_AA_site = V2) %>% 
+  glimpse()
+
+long_aa_mapped_df <- all_mhc_genotypes %>% 
+    tidyr::pivot_longer(!participant_id, names_to = "fdigit", values_to = "allele_dosage") %>% 
+    left_join(aa_mapping, relationship = "many-to-many") %>% 
+    glimpse()
+
+full_aa_hla_sites <- long_aa_mapped_df %>% 
+    left_join(no_aa_mapping, relationship = "many-to-many") %>% # adds no_aa_mapping df
+    # filter(grepl("AA_DRB1_13_", aatype)) %>% glimpse()
+    mutate(HLA_AA_site = case_when( # pulls AA from aatype if no mapping is found
+      is.na(HLA_AA_site) ~ strex::str_after_last(aatype, "_"),
+      TRUE ~ HLA_AA_site
+    )) %>% 
+    dplyr::filter(!is.na(aatype)) %>% # not found in mapping table
+    mutate(hla_site = strex::str_after_first(aatype, "_") %>% strex::str_before_nth( "_", 2)) %>% 
+    mutate(hla_gene = strex::str_before_first(hla_site, "_")) %>% 
+    glimpse()
+
+saveRDS(full_aa_hla_sites, glue("{gdata_dir}/all_hla_AA_sites_{Sys.Date()}.rds"))
+
+```
+
+
+
+```{r}
+
+# for (gene in mhc_genes) {
+#     gcopies <- paste0(gene, 1:2)
+#     tst <- gdf %>%
+#         dplyr::select(participant_id, all_of(gcopies)) %>%
+#         dplyr::mutate_at(vars(contains(gcopies)), 
+#             ~ str_before_last(.x, ":") %>% gsub("\\:|\\*", "_", .)) %>%
+#         dplyr::mutate_at(vars(contains(gcopies)), 
+#             ~ paste0("HLA_", .x)) %>%
+#         mutate(value = 1) %>%
+#         pivot_wider(names_from = gcopies[1], values_from = value, values_fill = 0) %>%
+#         mutate(value = 1) %>%
+#         pivot_wider(
+#             names_from = gcopies[2], 
+#             values_from = value, 
+#             values_fill = 0,
+#             names_repair = "unique",
+#             values_fn = ~ sum(.x, na.rm = TRUE)
+#             ) %>% 
+#         select(participant_id, everything()) %>%
+#             mutate(row_sum = rowSums(select(., -participant_id)))
+
+
+#     # rowSums(tst %>% dplyr::select(-participant_id)) %>% table
+# }
+
+
+```
+
+
+```{r}
+# Define a function to trim after second colon
+format_hla_allele <- function(x) {
+    # Count the number of colons
+    colon_count <- stringr::str_count(x, "\\:")
+    #   message(colon_count)f
+
+    if (colon_count > 1) {
+        res <- strex::str_before_last(x, ":") %>% gsub("\\:|\\*", "_", .)
+        return(res)
+    } else {
+        res <- gsub("\\:|\\*", "_", x)
+        return(res)
+    }
+}
+format_hla_allele_vec <- Vectorize(format_hla_allele)
+
+remove_genotypes_hwe <- c()
+remove_genotypes_freq <- c()
+genotype_df_list <- list()
+mhc_genes <- c("A", "B", "C", "DPA1", "DPB1", "DQA1", "DQB1", "DRB1")
+for (gene in mhc_genes) {
+    message(glue("Processing {gene}..."))
+    gcopies <- paste0(gene, 1:2)
+
+    # Extract and clean allele names
+    alleles_df <- gdf %>%
+        dplyr::select(participant_id, all_of(gcopies)) %>%
+        dplyr::mutate_at(
+            vars(contains(gcopies)),
+            ~ replace_na(., "") %>% format_hla_allele_vec()
+        ) %>%
+        dplyr::mutate_at(
+            vars(contains(gcopies)),
+            ~ paste0("HLA_", .x)
+        )
+
+    # Get unique allele names across both columns
+    allele1_values <- unique(alleles_df[[gcopies[1]]])
+    allele2_values <- unique(alleles_df[[gcopies[2]]])
+    all_alleles <- unique(c(allele1_values, allele2_values)) %>% 
+      discard(~ . == "HLA_") # remove empty strings
+
+    # Create empty result dataframe
+    result_df <- data.frame(participant_id = alleles_df$participant_id)
+
+    # Fill in counts for each allele
+    for (allele in all_alleles) {
+        result_df[[allele]] <- 0
+        # Check allele1
+        result_df[[allele]] <- result_df[[allele]] +
+            ifelse(alleles_df[[gcopies[1]]] == allele, 1, 0)
+        # Check allele2
+        result_df[[allele]] <- result_df[[allele]] +
+            ifelse(alleles_df[[gcopies[2]]] == allele, 1, 0)
+    }
+
+    # Add row sum
+    # message("Row sum table:")
+    print(table(rowSums(result_df[, -1])))
+    
+    allele_freqs <- result_df %>%
+        dplyr::select(-c(participant_id)) %>%
+        colSums()
+    # need at least 5 unique donors with the genotype to be included (5*2 for both alleles)
+    maf <- 10 / nrow(result_df)
+    freq <- allele_freqs / (2 * nrow(result_df))
+    remove_genotypes_freq <- c(
+        remove_genotypes_freq,
+        names(freq)[freq < 0.01], names(freq)[freq > 0.99]
+        # names(freq)[freq < maf], names(freq)[freq > 0.99]
+    )
+
+    df <- result_df %>%
+        column_to_rownames(var = "participant_id") %>%
+        as.matrix()
+
+    hwe_p <- apply(df, 2, function(x) {
+        x <- as.numeric(x)
+        # observed data
+        a0 <- length(x[x == 0])
+        a1 <- length(x[x == 1])
+        a2 <- length(x[x == 2])
+
+        freq <- sum(x) / (2 * length(x))
+        # expedted data
+        P_a0 <- (1 - freq)^2
+        P_a1 <- 2 * (1 - freq) * freq
+        P_a2 <- freq^2
+
+        chitest <- chisq.test(c(a0, a1, a2), p = c(P_a0, P_a1, P_a2)) # simulate.p.value = TRUE, B = 2000
+        chitest$p.value
+    })
+
+    remove_genotypes_hwe <- c(remove_genotypes_hwe, 
+      names(hwe_p[hwe_p <= 1e-04])
+    )
+    
+    genotype_df_list[[gene]] <- result_df %>%
+        column_to_rownames(var = "participant_id") %>% 
+        dplyr::select(-any_of(
+          c(remove_genotypes_freq, remove_genotypes_hwe)
+          )) %>% 
+        glimpse()
+    
+}
+
+message(glue(
+    "\n\nFLAG: Low/high frequency genotypes: \n",
+    "{paste(remove_genotypes_freq, collapse = ', ')}"
+))
+
+message(glue(
+    "\n\nFLAG: Hardy-Weinberg Non-independence:\n",
+    " {paste(remove_genotypes_hwe, collapse = ', ')}"
+))
+
+```
+
+
+Performing PCA on genotype data
+
+```{r}
+mhc1_alleles <- c("A", "B", "C")
+mhc2_alleles <- c("DPA1", "DPB1", "DQA1", "DQB1", "DRB1")
+
+# Aggregate genotypes into class I and class II
+mhc1_genotypes <- mhc1_alleles %>% 
+  purrr::map(~ genotype_df_list[[.x]]) %>% 
+  bind_cols() %>% 
+  glimpse()
+mhc2_genotypes <- mhc2_alleles %>% 
+  purrr::map(~ genotype_df_list[[.x]]) %>% 
+  bind_cols() %>% 
+  glimpse()
+all_mhc_genotypes <- bind_cols(mhc1_genotypes, mhc2_genotypes) %>% glimpse()
+
+#PCA
+pca_mhc1 <- prcomp(as.matrix(mhc1_genotypes), scale = TRUE)
+pca_mhc1_df <- pca_mhc1$x %>% as.data.frame()
+pca_mhc2 <- prcomp(as.matrix(mhc2_genotypes), scale = TRUE)
+pca_mhc2_df <- pca_mhc2$x %>% as.data.frame()
+pca_mhc_all <- prcomp(as.matrix(all_mhc_genotypes), scale = TRUE)
+pca_mhc_all_df <- pca_mhc_all$x %>% as.data.frame()
+
+collect_cumvar <- function(pca_obj, df_tag) {
+  data.frame("cumprop" = summary(pca_obj)$importance["Cumulative Proportion", ]) %>% 
+    tibble::rownames_to_column(var = "PC") %>% 
+    dplyr::mutate(PC_num = PC %>% gsub("PC", "", .) %>% as.numeric()) %>% 
+    dplyr::mutate(MHC = df_tag)
+}
+
+mhc1_cumvar <- collect_cumvar(pca_mhc1, "MHCI")
+mhc2_cumvar <- collect_cumvar(pca_mhc2, "MHCII")
+mhc_all_cumvar <- collect_cumvar(pca_mhc_all, "MHC_all")
+
+# how many PCs are needed to explain at least 80% of the variance?
+list(mhc1_cumvar, mhc2_cumvar, mhc_all_cumvar) %>% purrr::map(
+  ~ {{filter(., cumprop >= 0.8) %>% slice_min(PC_num) %>% pull(PC)}}
+)
+
+p_mhc_cumulative_variance <- bind_rows(mhc1_cumvar,mhc2_cumvar, mhc_all_cumvar) %>% 
+  ggplot(aes(x = PC_num, y = cumprop, color = MHC)) +
+  geom_line(aes(group = MHC), size = 1.5) +
+  theme_bw() +
+  scale_color_d3() +
+  labs(x = "Principal Component Dimension", y = "Cumulative Proportion of Variance")
+
+ggsave(
+  glue("{hla_plots_dir}/PCA/mhc_pca_cumulative_variance.png"),
+  plot = p_mhc_cumulative_variance,
+  width = 10,
+  height = 6
+)
+
+# Saving filtered Genotype data
+hla_dir <- glue("{wkdir}/data/interim/airr/arcasHLA/analysis_cleaned")
+pca_dir <- glue("{hla_dir}/pca_data")
+
+saveRDS(all_mhc_genotypes, 
+  glue("{hla_dir}/MHC_all_cleaned_{Sys.Date()}.rds")
+)
+saveRDS(mhc1_genotypes, 
+  glue("{hla_dir}/MHCI_cleaned_{Sys.Date()}.rds")
+)
+saveRDS(mhc2_genotypes, 
+  glue("{hla_dir}/MHCII_cleaned_{Sys.Date()}.rds")
+)
+
+# Save MHC PCA metadata
+saveRDS(pca_mhc1, glue("{pca_dir}/pca_MHCI_{Sys.Date()}.rds"))
+saveRDS(pca_mhc2, glue("{pca_dir}/pca_MHCII_{Sys.Date()}.rds"))
+saveRDS(pca_mhc_all, glue("{pca_dir}/pca_MHC_all_{Sys.Date()}.rds"))
+
+pca_mhc1_final_df <- pca_mhc1_df %>% 
+  dplyr::rename_all(~paste0("MHC_I_", .))
+pca_mhc2_final_df <- pca_mhc2_df %>% 
+  dplyr::rename_all(~paste0("MHC_II_", .))
+pca_mhc_all_final_df <- pca_mhc_all_df %>% 
+  dplyr::rename_all(~paste0("MHC_all_", .))
+pca_mhc_combined_final_df <- bind_cols(
+  pca_mhc1_final[, 1:10],
+  pca_mhc2_final[, 1:10],
+  pca_mhc_all_final[, 1:10],
+) %>% glimpse()
+
+saveRDS(pca_mhc1_final_df, glue("{pca_dir}/df_pca_MHCI_{Sys.Date()}.rds"))
+saveRDS(pca_mhc2_df, glue("{pca_dir}/df_pca_MHCII_{Sys.Date()}.rds"))
+saveRDS(pca_mhc_all_df, glue("{pca_dir}/df_pca_MHC_all_{Sys.Date()}.rds"))
+saveRDS(pca_mhc_combined_final_df, glue("{pca_dir}/df_pca_MHC_all_{Sys.Date()}.rds"))
+
+```
+
+
+
+![Cumulative Explained Variance by MHC Class](../figures/AIRR/arcasHLA/PCA/mhc_pca_cumulative_variance.png)
+
+**Key Takeaway**
+
+- MHC I and II have similar cumulative explained variance with 80% variance explained by 29 and 24 components, respectively.
+
+- The combined binary matrix requires 49 PCs to explain 80% of the variance. 
+
+- Each of the first few PCs explain only a small portion of the variance. (3-5%)
+
+
+```{r}
+pid_meta <- full_meta_df %>%
+    select(participant_id, case_control_other_latest, ethnicity, race, sex, study) %>%
+    distinct() %>%
+    glimpse()
+
+plot_mhc_pca <- function(pca_obj, colorvar, pca_dim1, pca_dim2) {
+    pca_df <- pca_obj$x %>% as.data.frame()
+    var_explained <- pca_obj$sdev^2 / sum(pca_obj$sdev^2)
+    percent_var <- round(100 * var_explained, 1)
+
+    pca_df %>%
+        rownames_to_column(var = "participant_id") %>%
+        left_join(pid_meta, by = "participant_id") %>%
+        drop_na({{ colorvar }}) %>%
+        dplyr::slice_sample(prop = 1) %>%
+        ggplot(aes(x = {{ pca_dim1 }}, y = {{ pca_dim2 }}, color = .data[[colorvar]])) +
+        stat_ellipse(type = "norm", level = 0.95) +
+        geom_point() +
+        scale_color_d3() +
+        coord_fixed() +
+        theme_bw() +
+        labs(
+            x = paste0("PC1 (", percent_var[1], "%)"),
+            y = paste0("PC2 (", percent_var[2], "%)")
+        )
+}
+
+# # sample execution
+# plot_mhc_pca(pca_mhc1, ethnicity, PC1, PC2)
+pca_obj_list <- list(pca_mhc1, pca_mhc2, pca_mhc_all)
+names(pca_obj_list) <- c("mhc1", "mhc2", "mhc_all")
+
+for (i in seq_along(pca_obj_list)) {
+  pca_obj <- pca_obj_list[[i]]
+  pca_obj_name <- names(pca_obj_list)[i]
+
+  for (var in c("ethnicity", "race", "study", "case_control_other_latest")) {
+    p <- plot_mhc_pca(pca_obj, var, PC1, PC2)
+    ggsave(glue("{hla_plots_dir}/PCA/{pca_obj_name}_pca_{var}.png"), plot = p, width = 10, height = 10)
+  }
+}
+
+```
+
+
+![PCA of MHC I & II](../figures/AIRR/arcasHLA/PCA/mhc_all_pca_case_control_other_latest.png)
+![PCA of MHC I](../figures/AIRR/arcasHLA/PCA/mhc1_pca_case_control_other_latest.png)
+![PCA of MHC II](../figures/AIRR/arcasHLA/PCA/mhc2_pca_case_control_other_latest.png)
+
+
+**Key Takeaways**
+
+- MHC I distributions seem more normal while MHC II distributions seem more structured with subclusters
+- There appears to be no distinct subclusters of samples by case/control status nor ethnicity, sex, or race.
+
+
+## EVERYTHING before this is now redunant with HLA-Analysis.qmd
+
+
+
+
+```{r}
+library(midasHLA)
+
+dat_pheno <-
+  read.table(
+  file = system.file("extdata", "MiDAS_tut_pheno.txt", package = "midasHLA"),
+  header = TRUE
+  )
+dat_HLA <-
+  readHlaCalls(
+  file = system.file("extdata", "MiDAS_tut_HLA.txt", package = "midasHLA"),
+  resolution = 4
+  )
+
+dat_pheno %>% View()
+dat_HLA %>% View()
+
+freq_HLA <- getHlaFrequencies(hla_calls = dat_HLA, compare = TRUE) %>%
+  filter(Freq > 0.01)
+
+freq_HLA_long <- tidyr::gather(
+  data = freq_HLA,
+  key = "population",
+  value = "freq",
+  "Freq",
+  "USA NMDP European Caucasian",
+  "USA NMDP Chinese",
+  "USA NMDP African American pop 2",
+  factor_key = TRUE
+) %>% 
+  filter(grepl("^A", allele))
+
+plot_HLAfreq <-
+  ggplot2::ggplot(data = freq_HLA_long, ggplot2::aes(x = allele, y = freq, fill = population)) +
+  ggplot2::geom_bar(
+    stat = "identity",
+    position = ggplot2::position_dodge(0.7),
+    width = 0.7,
+    colour = "black"
+  ) +
+  ggplot2::coord_flip() +
+  ggplot2::scale_y_continuous(labels = formattable::percent)
+
+plot_HLAfreq
+```
+
+
+# Are classical HLA alleles more common in PD?
+```{r}
+HLA <- prepareMiDAS(
+  hla_calls = dat_HLA,
+  colData = dat_pheno,
+  experiment = "hla_alleles"
+)
+
+nrow(freq_HLA)
+
+HLA <- HWETest(
+  object = HLA,
+  experiment = "hla_alleles",
+  HWE_cutoff = 0.05 / 447,
+  as.MiDAS = TRUE
+)
+
+```
+
+
+```{r}
+HLA_model <- glm(disease ~ term, data = HLA, family = binomial())
+HLA_results <- runMiDAS(
+  object = HLA_model, 
+  experiment = "hla_alleles", 
+  inheritance_model = "dominant",
+  lower_frequency_cutoff = 0.02, 
+  upper_frequency_cutoff = 0.98, 
+  correction = "bonferroni", 
+  exponentiate = TRUE
+)
+
+kableResults(HLA_results)
+
+HLA_results_cond <- runMiDAS(
+  object = HLA_model, 
+  experiment = "hla_alleles", 
+  inheritance_model = "dominant", 
+  conditional = TRUE,
+  lower_frequency_cutoff = 0.02, 
+  upper_frequency_cutoff = 0.98, 
+  correction = "bonferroni", 
+  exponentiate = TRUE
+)
+
+kableResults(HLA_results_cond)
+```

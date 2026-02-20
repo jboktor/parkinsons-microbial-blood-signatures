@@ -2,9 +2,10 @@
 # Caltech - Mazmanian Lab
 # Dec 2021
 
-source("src/_load_packages.R")
-source("src/_misc_functions.R")
-sample_info <- readRDS("data/Metadata/static_metdata.rds")
+source("notebooks/R_scripts/_load_packages.R")
+source("notebooks/R_scripts/_misc_functions.R")
+
+phymeta <- readRDS("data/interim/metadata/2023-07-14_phyloseq-metadata.rds")
 
 #_______________________________________________________________________________
 #              Merge Kraken Reports and create phyloseq objects
@@ -20,8 +21,8 @@ refDBlist <- c("WoL")
 
 for (refDB in refDBlist){
 
-  # reportdir <- paste0("input_files/OLD/", refDB, "_mapped 4/")
-  reportdir <- paste0("input_files/", refDB, "_mapped/")
+  # reportdir <- paste0("input/OLD/", refDB, "_mapped 4/")
+  reportdir <- paste0("data/input/WGX-Kraken/", refDB, "_mapped_paired/")
   filepaths <- list.files(path =reportdir)
   kraken_df <- tibble()
   tax_table_df <- tibble()
@@ -64,8 +65,8 @@ for (refDB in refDBlist){
     }
     
   }
-  saveRDS(kraken_df, file = paste0("data/Kraken_reports/", refDB, "_reports_merged.rds"))
-  saveRDS(tax_table_df, file = paste0("data/Kraken_reports/", refDB, "_tax_table_df.rds"))
+  saveRDS(kraken_df, file = paste0("data/interim/kraken-reports/", refDB, "_reports_merged.rds"))
+  saveRDS(tax_table_df, file = paste0("data/interim/kraken-reports/", refDB, "_tax_table_df.rds"))
 
   #_______________________________________________________________________________
   #                         Construct Phyloseq Objects

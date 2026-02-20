@@ -8,7 +8,7 @@
 #SBATCH --mem-per-cpu=100G   # memory per CPU core
 #SBATCH -J "bracken2biom"   # job name
 # Notify at the beginning, end of job and on failure.
-#SBATCH --mail-user=<jboktor>@caltech.edu   # email address
+#SBATCH --mail-user=jboktor@caltech.edu   # email address
 #SBATCH --mail-type=BEGIN
 #SBATCH --mail-type=END
 #SBATCH --mail-type=FAIL

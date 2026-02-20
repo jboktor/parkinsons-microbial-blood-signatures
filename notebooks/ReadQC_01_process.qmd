@@ -1,0 +1,907 @@
+---
+title: "WGS Read Processing"
+eval: false
+editor: source
+author: "Joe Boktor"
+date: '2022-12-23'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    column: page
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+A Cromwell [workflow](https://app.terra.bio/#workspaces/amp-pd-gcp-joeb/AMP-PD/job_history/bc0291d7-7f4e-44b7-a1ca-608cb565bd22) was employed in Google Cloud to select unmapped reads from GATK (4.0.1.2) processed CRAM files and return BAM files containing sequence metadata, reads, and sequencing flagstat metrics. 
+
+#### The goals of this notebook are to: 
+1. Download flagstat metric for GATK CRAM files and unmapped BAM file reads
+2. Extract key sample-level sequence metadata from BAM files such as sequencing facility, date, flow cell, machine, etc.
+3. Download and process unmapped bam files as follows
+    a. Remove PCR and optical duplicate reads, secondary/supplementary alignments.
+    b. Align BAM files with problematic Y-chromosome sequences and remove aligned reads.
+    c. Attempt read alignment across sample pairs and record success.
+    d. Conduct quality control filtering and read trimming for all reads, returning singular FASTQ files for each sample.
+
+
+```{mermaid}
+graph TD
+    B[CRAM/BAM \n all reads]
+    C[BAM unmapped]
+    D[BAM unmapped \ncleaned]
+    E[R1/R2 FASTQ]
+    F[R1/R2 FASTQ QC'd]
+    G[<b>R1/R2 FASTQ \nFINAL</b>]
+    H[<b>R1/R2 FASTQ \nFINAL</b>]
+    I[KrakenUniq Profiles]
+    J[(<b>KrakenUniq MicrobialDB</b> \n human, archaea, bacteria, \nviral, UniVec_Core, \nEukaryotic \npathogen genomes)]
+    K{KrakenUniq}
+
+    B --> |Filter unmapped reads from\n BWA hg38 alignment| C
+    C --> |Filter PCR/optical duplicates \n& secondary alignments| D
+    D --> |Select paired reads| E
+    E --> |minimum read length - 50bp \n phred theshold - 10 \n remove sex-chromosome alignments | F
+    F --> |Bowtie2 T2T-CHM13+Y \nalignment with \n updated Human Genome| G
+
+    H --> K
+    J --> K
+    K --> I
+
+  linkStyle 0 stroke-width:4px,stroke:red
+  linkStyle 3 stroke-width:4px,stroke:red
+  linkStyle 4 stroke-width:4px,stroke:red
+  linkStyle 7 stroke-width:4px,stroke:red
+
+```
+
+
+
+#### Downloading samtools flagstat metrics from Google Cloud Storage
+
+```{r}
+#| warning: false
+#| message: false
+
+library(glue)
+library(purrr)
+library(tibble)
+library(magrittr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(stringr)
+library(ggsci)
+library(aplot)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+load_dot_env(glue("{wkdir}/.env"))
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+
+```
+
+### WGS Data Processing
+Get a list of all google cloud storage file locations generated from workflow.
+```{r}
+tic()
+bam_urls <- shell_do(
+  glue("gsutil ls {Sys.getenv('GCS_WGS')}/**/*_unmapped.bam"),
+  stdout_path = TRUE
+)
+flagstat_urls <- shell_do(
+  glue("gsutil ls {Sys.getenv('GCS_WGS')}/**/*_flagstat.tsv"),
+  stdout_path = TRUE
+)
+toc()
+
+flagstat_cram_urls <- flagstat_urls %>%
+  discard(grepl("unmapped-f4_flagstat.tsv", .))
+flagstat_bam_urls <- flagstat_urls %>%
+  keep(grepl("unmapped-f4_flagstat.tsv", .))
+
+saveRDS(
+  bam_urls,
+  glue("{wkdir}/data/interim/gcs_locations/{Sys.Date()}_URLs_unmapped-bam.rds")
+)
+saveRDS(
+  flagstat_cram_urls,
+  glue("{wkdir}/data/interim/gcs_locations/{Sys.Date()}_URLs_flagstat-cram.rds")
+)
+saveRDS(
+  flagstat_bam_urls,
+  glue("{wkdir}/data/interim/gcs_locations/{Sys.Date()}_URLs_flagstat-unmapped-f4.rds")
+)
+
+```
+
+
+Next, we will do some quality control and ensure the proper samples are contained within our lists.
+
+```{r}
+# load in data
+bam_urls <-
+  readRDS(
+    glue("{wkdir}/data/interim/gcs_locations/2022-12-23_URLs_unmapped-bam.rds")
+  )
+flagstat_cram_urls <-
+  readRDS(
+    glue("{wkdir}/data/interim/gcs_locations/2022-12-23_URLs_flagstat-cram.rds")
+  )
+flagstat_bam_urls <-
+  readRDS(
+    glue("{wkdir}/data/interim/gcs_locations/2022-12-23_URLs_flagstat-unmapped-f4.rds")
+  )
+
+# qc sample ids -  there should be 9833 samples
+flagstat_cram_urls %>% length()
+flagstat_bam_urls %>% length()
+bam_urls %>% length()
+
+#' Each list appears to contain one additional file (9844), so we check 
+#' our data for duplicate samples
+flagstat_cram_urls[duplicated(basename(flagstat_cram_urls))]
+
+#' a duplicate file is caused by a sample which required a secondary run,
+#' where the first run failed. So, we will selectively remove 
+#' all primary data for samples which have a recorded secondary attempt.
+
+```
+
+Function to select url paths with the highest attempt number for each sample.
+```{r}
+gc_dedup_urls <- function(urls) {
+  data.frame(
+    url = urls
+  ) %>%
+    mutate(file_name = strex::str_after_last(url, "/")) %>%
+    mutate(
+      attempt_num = case_when(
+        grepl("attempt", url) ~ str_before_last(url, "/") %>%
+          str_after_last("/") %>%
+          str_remove("attempt-"),
+        TRUE ~ "1"
+      ),
+      attempt_num = as.numeric(attempt_num)
+    ) %>%
+    group_by(file_name) %>%
+    slice_max(order_by = attempt_num, n = 1) %>%
+    pull(url)
+}
+
+```
+
+```{r}
+bam_urls %<>% gc_dedup_urls
+flagstat_cram_urls %<>% gc_dedup_urls
+flagstat_bam_urls %<>% gc_dedup_urls
+# double check
+flagstat_cram_urls %>% length()
+flagstat_bam_urls %>% length()
+bam_urls %>% length()
+
+sampleIDs <- stringr::str_remove(basename(bam_urls), "_unmapped.bam")
+saveRDS(sampleIDs, "data/interim/metadata/sample-id_WGS.rds")
+```
+
+Downloading 01-CRAM flagstats
+
+```{r}
+slurm_out <- glue("{wkdir}/.cluster_runs/gcs_download_01_CRAM-flagstat")
+data_out <- glue("{pdmbs_dir}/workflow/WGS/flagstats/01_CRAM")
+dir.create(slurm_out, recursive = TRUE)
+dir.create(data_out, recursive = TRUE)
+
+for (url in flagstat_cram_urls) {
+  if (file.exists(file.path(data_out, basename(url)))) {
+    next
+  }
+  jobname <- glue("gcs_{tools::file_path_sans_ext(basename(url))}")
+  # pause if there are more than 9,999 slurm jobs submitted
+  check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --ntasks=1",
+      " --nodes=1",
+      " --mem-per-cpu=50MB",
+      " --time=10:00",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " notebooks/shell_scripts/download_gcs_url.sh",
+      " -i {url}",
+      " -o {data_out}/"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.3)
+}
+```
+
+
+Downloading 02-BAM-unmapped flagstats
+
+```{r}
+slurm_out <- glue("{wkdir}/.cluster_runs/gcs_download_02_BAM-flagstat")
+data_out <- glue("{pdmbs_dir}/workflow/WGS/flagstats/02_BAM-unmapped")
+dir.create(slurm_out, recursive = TRUE)
+dir.create(data_out, recursive = TRUE)
+
+for (url in flagstat_bam_urls) {
+  if (file.exists(file.path(data_out, basename(url)))) {
+    next
+  }
+  jobname <- glue("gcs_{tools::file_path_sans_ext(basename(url))}")
+  # pause if there are more than 9,999 slurm jobs submitted
+  check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --ntasks=1",
+      " --nodes=1",
+      " --mem-per-cpu=50MB",
+      " --time=10:00",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " notebooks/shell_scripts/download_gcs_url.sh",
+      " -i {url}",
+      " -o {data_out}/"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.05)
+}
+
+```
+
+
+Downloading unmapped BAM files
+
+```{r}
+slurm_out <-  glue("{wkdir}/.cluster_runs/gcs_download_BAM-unmapped")
+data_out <- glue("/central/scratch/jbok/PDMBS/WGS/BAM-unmapped-raw")
+dir.create(slurm_out, recursive = TRUE)
+dir.create(data_out, recursive = TRUE)
+
+for (url in bam_urls) {
+  if (file.exists(file.path(data_out, basename(url)))) {
+    next
+  }
+  jobname <- glue("gcs_{tools::file_path_sans_ext(basename(url))}")
+  # pause if there are more than 9,999 slurm jobs submitted
+  check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --ntasks=2",
+      " --nodes=1",
+      " --mem-per-cpu=20GB",
+      " --time=20:00:00",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " notebooks/shell_scripts/download_gcs_url.sh",
+      " -i {url}",
+      " -o {data_out}/"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.025)
+}
+
+```
+
+Examining workflow success.
+
+```{r}
+# function to iterate through std-error files and report samples with issues
+run_status <- list()
+slurm_out <-  glue("{wkdir}/.cluster_runs/gcs_download_BAM-unmapped")
+stderr_paths <- list.files(slurm_out) %>% keep(grepl(".err", .))
+error_list <- c(
+  "/etc/bashrc: fork: Resource temporarily unavailable",
+  "error"
+)
+success <- c("Operation completed")
+pb <- progress_bar$new(total = length(stderr_paths))
+
+for (url in stderr_paths) {
+   pb$tick()
+  stderr <- read.table(file.path(slurm_out, url), sep = "\t", header = FALSE)
+  if (any(str_detect(stderr$V1, success))) {
+    run_status[[url]] <- "SUCCESS"
+  } else if (any(stderr$V1 %in% error_list)) {
+    run_status[[url]] <- "ERROR"
+  } else {
+    run_status[[url]] <- "UNKNOWN ERROR"
+  }
+}
+
+cat(
+  "Workflow status:",
+  "\n SUCCESS:",
+  run_status %>% keep(grepl("SUCCESS", .)) %>% length(),
+  "\n ERROR:",
+  run_status %>% keep(grepl("ERROR", .)) %>% length(),
+  "\n UNKNOWN ERROR:", 
+  run_status %>% keep(grepl("UNKNOWN ERROR", .)) %>% length(),
+  "\n"
+)
+```
+
+
+#### Read Quality Control 
+##### Workflow:
+1. Trim PCR & optical duplicates / secondary and supplementary alignments.
+2. Collect sample sequencing metadata from BAM file
+3. Run flagstat metrics
+
+```{r}
+sampleIDs <- readRDS("data/interim/metadata/sample-id_WGS.rds")
+slurm_out <-  glue("{wkdir}/.cluster_runs/2022-12-27_BAM-QC")
+data_out <- glue("{pdmbs_dir}/workflow/WGS/sequence_metadata")
+dir.create(slurm_out, recursive = TRUE)
+dir.create(data_out, recursive = TRUE)
+
+for (sampleID in sampleIDs) {
+  if (file.exists(
+    file.path(data_out, glue("{sampleID}_sequencing_params.tsv"))
+  )) {
+    next
+  }
+  jobname <- glue("bam-qc_{sampleID}")
+  # pause if there are more than 9,999 slurm jobs submitted
+  check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " notebooks/shell_scripts/filter_bam_reads.sh",
+      " -s {sampleID}",
+      " -i /central/scratch/jbok/PDMBS/WGS/BAM-unmapped-raw",
+      " -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.02)
+}
+
+```
+
+
+##### Workflow:
+1. Convert Bam file into Fastq
+2. Trim low quality reads and reads aligning to sex chromosome fragments using bbduk parameters as follows:
+    + minlen     = 50 - discard reads below this length (post-trimming)
+    + k          = 25 - kmer length  
+    + mink       = 8 - allow a minimum kmer length of 8 bp at the end of a sequence
+    + ref = (x&y_chromosome_fragments)- sex-chromosome fragment sequences that can mismap to microbial genes
+    + ktrim      = r -  trim sequences that map to reference from the right (arbitrary selection)
+    + hdist      = 1 -  max hamming distance for reference kmers - num mistmatch allowed 
+    + qtrim      = rl -  trim R and L ends  at trimq (after kmer search) 
+    + trimq      = 10 -  trim regions with Phred quality below 20 (q=2 ~ 1% error)
+
+[confidence scoring algorithm](https://github.com/DerrickWood/kraken2/blob/master/docs/MANUAL.markdown#confidence-scoring)
+
+[sex-chromosome fragments](https://github.com/briannachrisman/blood_microbiome/tree/main/public_data)
+
+
+```{r}
+sampleIDs <- readRDS("data/interim/metadata/sample-id_WGS.rds")
+slurm_out <-  glue("{wkdir}/.cluster_runs/{Sys.Date()}_Fastq-QC_bbduk")
+data_out <- glue("{pdmbs_dir}/workflow/WGS/clean_reads")
+dir.create(slurm_out, recursive = TRUE, showWarnings = FALSE)
+dir.create(data_out, recursive = TRUE, showWarnings = FALSE)
+
+for (sampleID in sampleIDs)  {
+  if (!file.exists(
+    file.path(data_out, glue("{sampleID}_R2.fastq.gz"))
+  )) {
+    jobname <- glue("readqc-WGS_{sampleID}")
+    # pause if there are more than 9,999 slurm jobs submitted
+    check_slurm_overload()
+    shell_do(
+      glue(
+        "sbatch",
+        " --job-name={jobname}",
+        " --output={slurm_out}/{jobname}.out",
+        " --error={slurm_out}/{jobname}.err",
+        " notebooks/shell_scripts/readQC.sh",
+        " -s {sampleID}",
+        " -w /central/scratch/jbok/PDMBS/WGS",
+        " -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS"
+      )
+    )
+    # to prevent memory alloc issues
+    Sys.sleep(0.02)
+  }
+}
+
+```
+
+
+### RNA-SEQ Data Processing
+
+```{r}
+tic()
+bam_urls_b1 <- shell_do(
+  glue("gsutil ls {Sys.getenv('GCS_RNA_B1')}/**/*_unmapped.bam"),
+  stdout_path = TRUE
+)
+flagstat_urls_b1 <- shell_do(
+  glue("gsutil ls {Sys.getenv('GCS_RNA_B1')}/**/*_flagstat.tsv"),
+  stdout_path = TRUE
+)
+bam_urls_b2 <- shell_do(
+  glue("gsutil ls {Sys.getenv('GCS_RNA_B2')}/**/*_unmapped.bam"),
+  stdout_path = TRUE
+)
+flagstat_urls_b2 <- shell_do(
+  glue("gsutil ls {Sys.getenv('GCS_RNA_B2')}/**/*_flagstat.tsv"),
+  stdout_path = TRUE
+)
+toc()
+
+bam_urls <- gc_dedup_urls(c(bam_urls_b1, bam_urls_b2))
+flagstat_bam_urls <- c(flagstat_urls_b1, flagstat_urls_b2) %>%
+  discard(grepl("unmapped-f4_flagstat.tsv", .)) %>% 
+  gc_dedup_urls()
+flagstat_bamunmapped_urls <- c(flagstat_urls_b1, flagstat_urls_b2) %>%
+  keep(grepl("unmapped-f4_flagstat.tsv", .)) %>%
+  gc_dedup_urls()
+
+length(bam_urls)
+length(flagstat_bam_urls)
+length(flagstat_bamunmapped_urls)
+
+saveRDS(
+  bam_urls,
+  glue("{wkdir}/data/interim/gcs_locations/{Sys.Date()}_RNASEQ_URLs_unmapped-bam.rds")
+)
+saveRDS(
+  flagstat_bam_urls,
+  glue("{wkdir}/data/interim/gcs_locations/{Sys.Date()}_RNASEQ_URLs_flagstat-bam.rds")
+)
+saveRDS(
+  flagstat_bamunmapped_urls,
+  glue("{wkdir}/data/interim/gcs_locations/{Sys.Date()}_RNASEQ_URLs_flagstat-unmapped-f4.rds")
+)
+sampleIDs_rna <- stringr::str_remove(basename(bam_urls), "_unmapped.bam")
+saveRDS(sampleIDs_rna, 
+  glue("{wkdir}/data/interim/metadata/sample-id_RNASEQ.rds")
+)
+```
+
+Downloading 01-RNASEQ-BAM-flagstat
+
+```{r}
+rnaseq_wkdir <- glue("{pdmbs_dir}/workflow/RNASEQ")
+bam_urls <- readRDS(
+  glue(
+    "{wkdir}/data/interim/gcs_locations/",
+    "2023-07-12_RNASEQ_URLs_unmapped-bam.rds"
+  )
+)
+flagstat_bam_urls <- readRDS(
+  glue(
+    "{wkdir}/data/interim/gcs_locations/",
+    "2023-07-12_RNASEQ_URLs_flagstat-bam.rds"
+  )
+)
+flagstat_bamunmapped_urls <- readRDS(
+  glue(
+    "{wkdir}/data/interim/gcs_locations/",
+    "2023-07-12_RNASEQ_URLs_flagstat-unmapped-f4.rds"
+  )
+)
+```
+
+```{r}
+slurm_out <- glue("{wkdir}/.cluster_runs/{get_time()}_gcs_download_01-RNASEQ-BAM-flagstat")
+data_out <- glue("{rnaseq_wkdir}/flagstats/01_BAM")
+dir.create(slurm_out, recursive = TRUE)
+dir.create(data_out, recursive = TRUE)
+download_list <- flagstat_bam_urls %>% 
+  discard(~file.exists(file.path(data_out, basename(.))))
+
+for (url in download_list) {
+  jobname <- glue("gcs_{tools::file_path_sans_ext(basename(url))}")
+  # check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --ntasks=1",
+      " --mem=50M",
+      " --time=30:00",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " {src_dir}/shell_scripts/download_gcs_url.sh",
+      " -i {url}",
+      " -o {data_out}/"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.05)
+}
+```
+
+
+Downloading 02-BAM-unmapped flagstats
+
+```{r}
+slurm_out <- glue("{wkdir}/.cluster_runs/{get_time()}_gcs_download_02-RNASEQ-unmapped-BAM-flagstat")
+data_out <- glue("{rnaseq_wkdir}/flagstats/02_BAM-unmapped")
+dir.create(slurm_out, recursive = TRUE)
+dir.create(data_out, recursive = TRUE)
+download_list <- flagstat_bamunmapped_urls %>% 
+  discard(~file.exists(file.path(data_out, basename(.))))
+
+for (url in download_list) {
+  jobname <- glue("gcs_{tools::file_path_sans_ext(basename(url))}")
+  # check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --ntasks=1",
+      " --mem-per-cpu=500M",
+      " --time=20:00",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " {src_dir}/shell_scripts/download_gcs_url.sh",
+      " -i {url}",
+      " -o {data_out}/"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.05)
+}
+
+```
+
+
+Downloading unmapped BAM files
+
+```{r}
+slurm_out <-  glue("{wkdir}/.cluster_runs/{get_time()}_gcs_download_RNASEQ_BAM-unmapped")
+data_out <- glue("/central/scratch/jbok/PDMBS/RNASEQ/BAM-unmapped-raw")
+dir.create(slurm_out, recursive = TRUE, showWarnings = FALSE)
+dir.create(data_out, recursive = TRUE, showWarnings = FALSE)
+rnaseq_bam_urls <- bam_urls %>%
+  discard(~ file.exists(
+    file.path(
+      glue("{pdmbs_dir}/workflow/RNASEQ/bam_unmapped"),
+      gsub("_unmapped", "", basename(.))
+    )
+  )) %>%
+  discard(~ file.exists(
+    file.path(
+      "/central/scratch/jbok/PDMBS/RNASEQ/BAM-unmapped-raw/",
+      basename(.)
+    )
+    )
+  ) 
+  
+for (url in rnaseq_bam_urls) {
+  # filesize_gb <- 
+  #   as.numeric(shell_do(glue("gsutil du {url} | cut -d' ' -f1"), stdout_path = TRUE))/1e9
+  jobname <- glue("gcs_{tools::file_path_sans_ext(basename(url))}")
+  # check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --cpus-per-task=2",
+      " --mem=10G",
+      # " --mem={ceiling(filesize_gb)}G",
+      " --time=10:00:00",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " {src_dir}/shell_scripts/download_gcs_url.sh",
+      " -i {url}",
+      " -o {data_out}/"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.01)
+}
+
+```
+
+
+
+#### Read Quality Control 
+##### Workflow:
+1. Trim PCR & optical duplicates / secondary and supplementary alignments.
+2. Collect sample sequencing metadata from BAM file
+3. Run flagstat metrics
+
+```{r}
+sampleIDs_rna <- readRDS(glue("{wkdir}/data/interim/metadata/sample-id_RNASEQ.rds"))
+slurm_out <-  glue("{wkdir}/.cluster_runs/{get_time()}_BAM-QC_RNASEQ")
+data_out <- "/central/scratch/jbok/PDMBS/RNASEQ/sequence_metadata"
+dir.create(slurm_out, recursive = TRUE, showWarnings = FALSE)
+dir.create(data_out, recursive = TRUE, showWarnings = FALSE)
+dir.create(
+  "/central/scratch/jbok/PDMBS/RNASEQ/bam_unmapped", 
+  recursive = TRUE, showWarnings = FALSE)
+dir.create(
+  glue("{pdmbs_dir}/workflow/RNASEQ/flagstats/03_BAM-unmapped-3328-filtered"), 
+  recursive = TRUE, showWarnings = FALSE)
+# run_list <- sampleIDs_rna %>%
+#   discard(
+#     ~ file.exists(
+#       file.path(data_out, glue("{.}_sequencing_params.tsv"))
+#     )
+#   )
+run_list <- sampleIDs_rna %>%
+  discard(
+    ~ file.exists(
+      file.path("/central/scratch/jbok/PDMBS/RNASEQ/bam_unmapped", glue("{.}.bam"))
+    )
+  )
+for (sampleID in run_list) {
+  jobname <- glue("bam-qc_{sampleID}")
+  # check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " {src_dir}/shell_scripts/filter_bam_reads.sh",
+      " -s {sampleID}",
+      " -i /central/scratch/jbok/PDMBS/RNASEQ/BAM-unmapped-raw",
+      " -o /central/scratch/jbok/PDMBS/RNASEQ"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.02)
+}
+```
+
+
+##### Workflow:
+1. Convert Bam file into Fastq
+2. Trim low quality reads and reads aligning to sex chromosome fragments using bbduk parameters as follows:
+    + minlen     = 50 - discard reads below this length (post-trimming)
+    + k          = 25 - kmer length  
+    + mink       = 8 - allow a minimum kmer length of 8 bp at the end of a sequence
+    + ref = (x&y_chromosome_fragments)- sex-chromosome fragment sequences that can mismap to microbial genes
+    + ktrim      = r -  trim sequences that map to reference from the right (arbitrary selection)
+    + hdist      = 1 -  max hamming distance for reference kmers - num mistmatch allowed 
+    + qtrim      = rl -  trim R and L ends  at trimq (after kmer search) 
+    + trimq      = 20 -  trim regions with Phred quality below 20 (q=2 ~ 1% error)
+
+[confidence scoring algorithm](https://github.com/DerrickWood/kraken2/blob/master/docs/MANUAL.markdown#confidence-scoring)
+
+[sex-chromosome fragments](https://github.com/briannachrisman/blood_microbiome/tree/main/public_data)
+
+```{r}
+sampleIDs_rna <- readRDS(glue("{wkdir}/data/interim/metadata/sample-id_RNASEQ.rds"))
+slurm_out_bbduk <-  glue("{wkdir}/.cluster_runs/{get_time()}_Fastq-QC_bbduk_RNASEQ")
+data_out_bbduk <- glue("{pdmbs_dir}/workflow/RNASEQ/clean_reads")
+stats_out_bbduk <- glue("{pdmbs_dir}/workflow/RNASEQ/stats_clean_reads")
+dir.create(slurm_out_bbduk, recursive = TRUE, showWarnings = FALSE)
+dir.create(data_out_bbduk, recursive = TRUE, showWarnings = FALSE)
+dir.create(stats_out_bbduk, recursive = TRUE, showWarnings = FALSE)
+dir.create("/central/scratch/jbok/PDMBS/RNASEQ/raw_reads", 
+  recursive = TRUE, showWarnings = FALSE)
+run_list <- sampleIDs_rna %>%
+  discard(
+    ~ file.exists(
+      file.path(data_out_bbduk, glue("{.}_R1.fastq.gz"))
+    )
+  )
+
+for (sampleID in run_list)  {
+  jobname <- glue("readqc_{sampleID}")
+  # check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --output={slurm_out_bbduk}/{jobname}.out",
+      " --error={slurm_out_bbduk}/{jobname}.err",
+      " {src_dir}/shell_scripts/readQC.sh",
+      " -s {sampleID}",
+      " -w /central/scratch/jbok/PDMBS/RNASEQ",
+      " -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.02)
+}
+
+```
+
+### WGS/RNA Bowtie2 Alignment against T2T-CH13+newY
+
+Downloading CHM13v2
+
+```{r, eval = FALSE}
+shell_do("cd /central/groups/MazmanianLab/joeB/Downloads/RefDBs")
+shell_do('curl -OJX GET "https://api.ncbi.nlm.nih.gov/datasets/v2alpha/genome/accession/GCF_009914755.1/download?include_annotation_type=GENOME_FASTA,GENOME_GFF,RNA_FASTA,CDS_FASTA,PROT_FASTA,SEQUENCE_REPORT&filename=GCF_009914755.1.zip" -H "Accept: application/zip"')
+
+# ref_genomes/T2T-CHM13v2.0/GCF_009914755.1/GCF_009914755.1_T2T-CHM13v2.0_genomic.fna
+
+```
+
+Downloading updated [T2T+Y](https://github.com/marbl/CHM13)
+
+```{r, eval = FALSE}
+t2t_genome_dir <- glue("{home_dir}/Downloads/RefDBs/ref_genomes/T2T-CHM13v2.0_plusY")
+shell_do(
+  glue(
+    "wget -P {t2t_genome_dir}",
+    " https://s3-us-west-2.amazonaws.com/human-pangenomics/T2T/CHM13/assemblies/analysis_set/chm13v2.0.fa.gz"
+  )
+)
+shell_do(
+  glue(
+    "gunzip",
+    " {t2t_genome_dir}/chm13v2.0.fa.gz"
+  )
+)
+
+```
+
+Building a bowtie2 index for CHM13v2 (with updated Y chromosome)
+
+```{r, eval = FALSE}
+bowtiew_ind_dir <- glue("{ref_dir}/bowtie2_indices/T2T-CHM13v2.0_plusY_genomic")
+shell_do("mkdir -p {bowtiew_ind_dir}")
+slurm_shell_do(
+  glue(
+    "bowtie2-build",
+    " {ref_dir}/ref_genomes/T2T-CHM13v2.0_plusY/chm13v2.0.fa",
+    " {bowtiew_ind_dir}/T2T-CHM13v2pY"
+  ),
+   memory = "100G",
+   walltime = 10800
+)
+
+```
+
+
+Executing Bowtie2 Alignment.
+
+```{r, eval = FALSE}
+
+bowtiew_ind <-
+  glue(
+    "{home_dir}/Downloads/RefDBs/bowtie2_indices/",
+    "T2T-CHM13v2.0_plusY_genomic/T2T-CHM13v2pY"
+  )
+
+seq_method <- "WGS"
+bowtie_temp <- glue("{scratch_dir}/{seq_method}/bowtie2_temp")
+bowtie_cleanreads_v2 <- glue(
+  "{scratch_dir}/{seq_method}/",
+  "bowtie2_clean_reads"
+)
+bowtie_stats <- glue(
+  "{pdmbs_dir}/workflow/{seq_method}/",
+  "stats_clean_reads_bowtie2_CHM13"
+)
+dir.create(bowtie_temp, recursive = TRUE, showWarnings = FALSE)
+dir.create(bowtie_cleanreads_v2, recursive = TRUE, showWarnings = FALSE)
+dir.create(bowtie_stats, recursive = TRUE, showWarnings = FALSE)
+
+fq_paths <- list.files(glue("{pdmbs_dir}/workflow/{seq_method}/clean_reads"),
+  full.names = TRUE
+)
+
+batchtools_params_bowtie2 <- data.frame(
+  "paths" = fq_paths
+  ) %>%
+  mutate(sample_id = basename(paths) %>% str_remove("_R[1-2].fastq.gz")) %>%
+  mutate(paired_end = case_when(
+    grepl("_R1.fastq.gz", paths) ~ "inpath_f",
+    grepl("_R2.fastq.gz", paths) ~ "inpath_r",
+    TRUE ~ "ERROR"
+  )) %>%
+  pivot_wider(names_from = "paired_end", values_from = "paths") %>%
+    mutate(
+      outpath_sam = glue("{bowtie_temp}/{sample_id}.sam"),
+      outpath_fqs = glue("{bowtie_cleanreads_v2}/{sample_id}_R%.fastq.gz"),
+      outpath_metrics = glue("{bowtie_stats}/{sample_id}_aln_metrics.txt"),
+      outpath_stderr = glue("{bowtie_stats}/{sample_id}_stderr.txt"),
+      bowtiew_ind = bowtiew_ind,
+      threads = 8,
+      wkdir = wkdir
+    ) %>%
+    # USE TO RERUN FAILURES ONLY (See below)
+    filter(sample_id %in% samples_to_rerun) %>%
+    select(-sample_id)
+
+batchtools_params_bowtie2 %>% glimpse()
+
+
+# TO RERUN FAILURES
+# 1) look for temp SAM files that failed to be removed
+# 2) look for stderr files that have error messages
+
+# configure registry ----
+cluster_run <- glue("{get_time()}_Bowtie2_CHM13_{seq_method}")
+message("\n\nRUNNING:  ", cluster_run, "\n")
+breg <- makeRegistry(
+  file.dir = glue(
+    "{wkdir}/.cluster_runs/",
+    cluster_run
+  ),
+  seed = 42
+)
+breg$cluster.functions <- batchtools::makeClusterFunctionsSlurm(
+  template = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
+  scheduler.latency = 0.1,
+  fs.latency = 1
+)
+# Submit Jobs ----
+jobs <- batchMap(
+  fun = shell_do_bowtie2,
+  args = batchtools_params_bowtie2,
+  reg = breg
+)
+jobs[, chunk := chunk(job.id, chunk.size = 3)]
+print(jobs[, .N, by = chunk])
+
+submitJobs(jobs,
+  resources = list(
+    walltime = 172800,
+    memory = 10000,
+    ncpus = 8,
+    max.concurrent.jobs = 9999
+  )
+)
+
+```
+
+
+Checking log files for any errors
+
+```{r}
+
+stderr_files <- list.files(
+  glue("{pdmbs_dir}/workflow/{seq_method}/stats_clean_reads_bowtie2_CHM13"),
+  pattern = "_stderr.txt",
+  full.names = TRUE
+)
+
+future::plan("multisession", workers = 8)
+stderr_failures <- stderr_files %>%
+  purrr::set_names() %>%
+  furrr::future_map(~ suppressWarnings(has_error_message(.)))
+future::plan("sequential")
+
+stderr_failures %>% unlist() %>% table()
+stderr_failures_paths <- stderr_failures %>%
+  unlist() %>%
+  keep(. == TRUE) %>%
+  names()
+
+stderr_failures_names <- stderr_failures_paths %>%
+  basename() %>%
+  strex::str_before_last("_stderr.txt")
+temp_remove_failures <- list.files(bowtie_temp) %>%
+  fs::path_ext_remove()
+
+samples_to_rerun <- c(stderr_failures_names, temp_remove_failures)
+
+```
+
+```{r}
+sessionInfo()
+```

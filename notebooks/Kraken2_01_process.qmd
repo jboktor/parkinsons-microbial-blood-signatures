@@ -1,0 +1,367 @@
+---
+title: "Kraken2 Alignment"
+eval: false
+editor: visual
+author: "Joe Boktor"
+date: '2022-12-29'
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 3
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+---
+
+This notebook will execute Kraken2 taxonomic assignment on quality control processed reads.
+
+```{r}
+pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+scratch_dir <- "/central/scratch/jbok/PDMBS"
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
+library(data.table)
+library(strex)
+library(listenv)
+library(phyloseq)
+
+```
+
+#### Executing KrakenUniq Workflow (NEW)
+
+Kraken parameters:
+confidence = 0.3 - threshold between [0,1] for confidence in taxonomic assignment
+
+```{r}
+sampleIDs <- readRDS("data/interim/metadata/sample-id_WGS.rds")
+slurm_out <-  glue("{wkdir}/.cluster_runs/{Sys.Date()}_KrakenUniq_paired")
+data_out <- glue("{pdmbs_dir}/workflow/WGS/results/KrakenUniq")
+class_reads_out <- glue("{scratch_dir}/WGS/KrakenUniq_classified_reads")
+dir.create(slurm_out, recursive = TRUE, showWarnings = FALSE)
+dir.create(data_out, recursive = TRUE, showWarnings = FALSE)
+dir.create(class_reads_out, recursive = TRUE, showWarnings = FALSE)
+
+for (sampleID in sampleIDs[3]) {
+  if (!file.exists(
+    glue("{data_out}/{sampleID}_KrakenUniq_report.tsv")
+  )) {
+    jobname <- glue("krakenUniq_{sampleID}")
+    # pause if there are more than 9,999 slurm jobs submitted
+    # check_slurm_overload()
+    shell_do(
+      glue(
+        "sbatch",
+        " --job-name={jobname}",
+        " --output={slurm_out}/{jobname}.out",
+        " --error={slurm_out}/{jobname}.err",
+        " {src_dir}/shell_scripts/krakenUniq-paired.sh",
+        " -s {sampleID}",
+        # desired output directory for reports
+        " -r {data_out}",
+        # directory containing input FQ.gz files
+        " -f /central/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads",
+        # directory for classified reads to be output
+        " -c {class_reads_out}"
+      )
+    )
+    # to prevent memory alloc issues
+    Sys.sleep(0.02)
+  }
+}
+
+```
+
+
+#### Executing Kraken2 Workflow
+
+Kraken parameters:
+confidence = 0.3 - threshold between [0,1] for confidence in taxonomic assignment
+
+```{r}
+sampleIDs <- readRDS("data/interim/metadata/sample-id_WGS.rds")
+slurm_out <-  glue("{wkdir}/.cluster_runs/{Sys.Date()}_Kraken2_paired")
+data_out <- glue("{pdmbs_dir}/workflow/WGS/results/kraken2")
+dir.create(slurm_out, recursive = TRUE)
+dir.create(data_out, recursive = TRUE)
+
+for (sampleID in sampleIDs) {
+  if (!file.exists(
+    file.path(data_out, glue("UHGG_reports/{sampleID}_UHGG_report.tsv"))
+  )) {a
+    jobname <- glue("kraken2_{sampleID}")
+    # pause if there are more than 9,999 slurm jobs submitted
+    check_slurm_overload()
+    shell_do(
+      glue(
+        "sbatch",
+        " --job-name={jobname}",
+        " --output={slurm_out}/{jobname}.out",
+        " --error={slurm_out}/{jobname}.err",
+        " {src_dir}/shell_scripts/kraken2-paired.sh",
+        " -s {sampleID}",
+        " -r /central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/results/kraken2",
+        " -f /central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/clean_reads"
+      )
+    )
+    # to prevent memory alloc issues
+    Sys.sleep(0.02)
+  }
+}
+
+```
+
+### Kraken2 Workflow - RNASEQ Samples
+
+```{r}
+sampleIDs_rna <- readRDS(glue("{wkdir}/data/interim/metadata/sample-id_RNASEQ.rds"))
+slurm_out <-  glue("{wkdir}/.cluster_runs/{Sys.Date()}_Kraken2_paired_RNASEQ")
+data_out <- glue("{pdmbs_dir}/workflow/RNASEQ/results/kraken2")
+dir.create(slurm_out, recursive = TRUE)
+dir.create(data_out, recursive = TRUE)
+run_list <- sampleIDs_rna %>%
+  discard(
+    ~ file.exists(
+      file.path(data_out, glue("UHGG_reports/{.}_UHGG_report.tsv"))
+    )
+  )
+
+for (sampleID in run_list) {
+  jobname <- glue("kraken2_{sampleID}")
+  # check_slurm_overload()
+  shell_do(
+    glue(
+      "sbatch",
+      " --job-name={jobname}",
+      " --output={slurm_out}/{jobname}.out",
+      " --error={slurm_out}/{jobname}.err",
+      " {src_dir}/shell_scripts/kraken2-paired.sh",
+      " -s {sampleID}",
+      " -r '/central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/results/kraken2'",
+      " -f '/central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/clean_reads'"
+    )
+  )
+  # to prevent memory alloc issues
+  Sys.sleep(0.02)
+}
+
+```
+
+
+#### Loading Kraken2 reports
+Functions for reading in kraken2 tsv files
+```{r}
+load_kraken_file <- function(reportdir, report) {
+  sampleID <- str_before_nth(string = report, pattern = "_", n = -2)
+  df_report <- read_tsv(paste0(reportdir, report),
+    col_names = FALSE,
+    show_col_types = FALSE
+  )
+  if (nrow(df_report) > 0) {
+    df_report %<>%
+      as.data.table() %>%
+      dplyr::rename(
+        relative_abundance = X1,
+        clade_counts = X2,
+        taxon_counts = X3,
+        taxon_rank_code = X4,
+        NCBI_taxon_ID = X5,
+        feature = X6
+      ) %>%
+      dplyr::mutate(sample_id = sampleID)
+  }
+}
+
+aggregate_kraken_files <- function(input_files) {
+  require(purrr)
+  require(data.table)
+  require(stringr)
+  require(dplyr)
+  require(readr)
+  purrr::map(
+    input_files,
+    ~ load_kraken_file(report = ., reportdir = reportdir)
+  ) %>% bind_rows()
+}
+```
+
+```{r}
+seq_methods <- c("WGS", "RNASEQ")
+refDBlist <- c("RefSeqPlusPF", "UHGG")
+outputdir <- glue("{wkdir}/data/interim/kraken_results")
+dir.create(outputdir, showWarnings = FALSE)
+
+# INITATE FUTURE-SLURM BACKEND FOR  PARALLEL PROCESSING
+future::plan(
+  future.batchtools::batchtools_slurm,
+  template = 
+    glue("{wkdir}/batchtools_templates/batchtools-workflow-submission.slurm.tmpl"),
+  resources = list(
+    name = "aggreg-krak",
+    memory = "10G",
+    ncpus = 2
+  )
+)
+
+#' Loop through chunks of file names, RefDBs, and data-types
+#' and send jobs to slurm
+tic.clearlog()
+for (seq_method in seq_methods) {
+  for (refDB in refDBlist) {
+    message(glue("Aggregating {seq_method} {refDB} Kraken2 files ..."))
+    reportdir <- glue(
+      "{pdmbs_dir}/workflow/{seq_method}",
+      "/results/kraken2/{refDB}_reports/"
+    )
+    filepaths <- list.files(path = reportdir)
+    print(length(filepaths))
+    n_jobs <- ceiling(length(filepaths) / 200) # ~200 files/job
+    kraken2_data <- listenv()
+
+    tic(msg = glue("{seq_method} {refDB} Kraken2 files aggregating ..."))
+    for (job in 1:n_jobs) {
+      input_chunk <- chunk_func(filepaths, n_jobs)[[job]]
+      kraken2_data[[job]] %<-% aggregate_kraken_files(input_chunk)
+    }
+    kraken2_table <- kraken2_data %>%
+      as.list() %>%
+      data.table::rbindlist()
+    saveRDS(
+      kraken2_table,
+      glue(
+        "{outputdir}/",
+        "{Sys.Date()}_{seq_method}_{refDB}_kraken2_datatable.rds"
+      )
+    )
+    toc()
+  }
+}
+
+```
+
+Create Phyloseq Profiles using RefSeqPlusPF and UHGG Kraken2 profiles
+
+```{r}
+outputdir <- glue("{wkdir}/data/interim/kraken_results")
+rank_code_map <- list(
+  "U" = "U",
+  "R" = "R",
+  "R1" = "D",
+  "R2" = "P",
+  "R3" = "C",
+  "R4" = "O",
+  "R5" = "F",
+  "R6" = "G",
+  "R7" = "S"
+)
+uhgg_to_refseq_rankcode <- function(rank) {
+  rank_code_map[[rank]]
+}
+uhgg_to_refseq_rankcode <- Vectorize(uhgg_to_refseq_rankcode)
+taxa_subsets <- c(
+  "All" = "",
+  "Species" = "S",
+  "Genus" = "G",
+  "Phylum" = "P"
+)
+meta_static <-
+  readRDS(
+    glue(
+      "{wkdir}/data/interim/metadata/2023-06-06_static_metdata.rds"
+      )) %>%
+  mutate(sample_id = participant_id)
+meta_long <-
+  readRDS(
+    glue("{wkdir}/data/interim/metadata/2023-06-06_longitudinal_metadata.rds"
+    ))
+rna_samples <- read.csv(
+  glue(
+    "{wkdir}/data/input/metadata/",
+    "2021_v2-5release_0510/rna_sample_inventory.csv"
+  ),
+  header = TRUE
+)
+core_meta <- readRDS(
+  glue("{wkdir}/data/interim/metadata/2023-06-06_core-metadata.rds")
+)
+rna_samples <- read.csv(
+  glue(
+    "{wkdir}/data/input/metadata/",
+    "2021_v2-5release_0510/rna_sample_inventory.csv"
+  ),
+  header = TRUE
+)
+meta_long %<>%
+  dplyr::select(-(colnames(core_meta)[-1]))
+meta_rnaseq <- rna_samples %>%
+  left_join(core_meta, by = join_by(participant_id)) %>%
+  left_join(meta_long, by = c("participant_id", "visit_month"))
+
+sample_metadata <- list(
+  "WGS" = meta_static,
+  "RNASEQ" = meta_rnaseq
+)
+saveRDS(
+  sample_metadata,
+  glue("{wkdir}/data/interim/metadata/{Sys.Date()}_phyloseq-metadata.rds")
+)
+
+for (seq_method in c("RNASEQ", "WGS")){
+  for (refDB in c("UHGG", "RefSeqPlusPF")){
+    for (taxa_rank_filter in names(taxa_subsets)) {
+      message(glue("{seq_method} {refDB} {taxa_rank_filter}"))
+      kraken_long <- readRDS(
+        glue(
+          "{outputdir}/",
+          "2023-07-13_{seq_method}_{refDB}_kraken2_datatable.rds"
+        )
+      )
+      kraken_wide  <- kraken_long %>%
+      dplyr::select(
+        feature, NCBI_taxon_ID, taxon_rank_code, sample_id, taxon_counts
+        ) %>%
+      pivot_wider(
+        names_from = "sample_id",
+        values_from = taxon_counts,
+        values_fill = 0
+      )
+      if (refDB == "UHGG") {
+        kraken_wide %<>%
+          mutate(taxon_rank_code = uhgg_to_refseq_rankcode(taxon_rank_code))
+      }
+
+      # Construct Phyloseq Objects ---
+      count_table <-
+        kraken_wide %>%
+        filter(grepl(taxa_subsets[[taxa_rank_filter]], taxon_rank_code)) %>%
+        mutate(
+          feature = gsub(" ", "__", feature),
+          feature = glue("{taxon_rank_code}_{feature}")) %>%
+        column_to_rownames(var = "feature") %>%
+          select(-c(NCBI_taxon_ID, taxon_rank_code))
+
+      physeq_count_table <- otu_table(count_table, taxa_are_rows = TRUE)
+      physeq_meta <- sample_metadata[[seq_method]] %>%
+        filter(sample_id %in% colnames(count_table)) %>%
+        sample_data()
+      rownames(physeq_meta) <- physeq_meta$sample_id
+
+      cat("\nMetadata dimensions:", dim(physeq_meta), "\n")
+      cat("\nCount table dimensions:", dim(count_table), "\n")
+      ps <- phyloseq(physeq_count_table, physeq_meta)
+      ps %>% print()
+      saveRDS(ps, file = glue(
+        "{wkdir}/data/processed/phyloseq_objects/raw/",
+        "{Sys.Date()}_{seq_method}_{refDB}_{taxa_rank_filter}_phyloseq.rds"
+      ))
+    }
+  }
+}
+
+```
+

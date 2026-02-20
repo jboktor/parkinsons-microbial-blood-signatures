@@ -1,0 +1,299 @@
+---
+title: "Network Modeling of Parkinson's Disease Microbial Blood Signatures"
+editor: visual
+author: "Joe Boktor"
+date: '2024-04-25'
+bibliography: references.bib
+format: 
+  html:
+    font-family: helvetica neue
+    page-layout: full
+    toc: true
+    toc-location: left
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    grid:
+      sidebar-width: 300px
+      body-width: 900px
+      margin-width: 300px
+      gutter-width: 1.5rem
+---
+
+```{r}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(styler)  
+library(glue)
+library(listenv)
+library(furrr)
+library(tictoc)
+library(progress)
+library(data.table)
+library(fastICA)
+library(parallelDist)
+library(mclust)
+library(seqinr)
+library(progress)
+library(transport)
+library(GEOquery)
+# dimensionality reduction
+library(umap)
+# plotting
+library(ggsci)
+library(plotly)
+library(aplot)
+library(patchwork)
+#DEG analysis
+library(DESeq2)
+library(BiocParallel)
+library(biomaRt)
+
+home_dir <- "/central/groups/MazmanianLab/joeB"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+
+```
+
+
+### Differential Gene Expression Analysis
+
+```{r, eval=FALSE}
+
+register(MulticoreParam(14))
+# Read in Salmon quantifed gene counts
+salmon_genes <- fread(
+    glue("{pdmbs_dir}/workflow/RNASEQ/aggregated.genes.tsv")
+  )
+salmon_genes %>% glimpse()
+
+# convert counts from long to wide format
+cts <- salmon_genes %>%
+  dplyr::select(sample_id, Name, NumReads) %>%
+  mutate(NumReads = as.integer(NumReads)) %>%
+  pivot_wider(
+    names_from = sample_id,
+    values_from = NumReads,
+    values_fill = 0
+  ) %>%
+  column_to_rownames("Name") %>%
+  glimpse()
+
+meta <- readRDS(
+  glue(
+    "{wkdir}/data/interim/metadata/",
+    "2023-07-14_phyloseq-metadata.rds"
+  ))[["RNASEQ"]] %>%
+  glimpse()
+
+
+meta_core <- meta %>%
+  dplyr::select(
+    1:16,
+    contains("genetic"),
+    contains("_diagnosis"),
+    contains("_score")
+  ) %>%
+  filter(case_control_other_latest != "Other") %>%
+  glimpse()
+rownames(meta_core) <- meta_core$sample_id
+
+```
+
+Analysis for Case/Control Status - controlling for sex
+
+```{r, eval=FALSE}
+# get exact matches of samples between metadata and count matrix
+shared_sids <- intersect(colnames(cts), rownames(meta_core))
+count_mtx <- cts[, shared_sids]
+metadata <- meta_core[shared_sids, ]
+
+# generate deseq2 object
+dds <- DESeqDataSetFromMatrix(countData = count_mtx,
+                              colData = metadata,
+                              design = ~ case_control_other_latest + sex)
+dds
+
+saveRDS(
+  dds,
+  glue(
+    "{wkdir}/data/interim/deseq2/",
+    "{Sys.Date()}_DESeq2_obj.rds"
+  )
+)
+
+dds <- DESeq(dds)
+res <- results(dds)
+res
+
+saveRDS(
+  res,
+  glue(
+    "{wkdir}/data/interim/deseq2/",
+    "{Sys.Date()}_DESeq2_results.rds"
+  )
+)
+
+```
+
+Looped Analysis of Disease severity - controlling for sex
+
+```{r, eval=FALSE}
+#________________________________________________________
+#' filter only PD patients with 
+#' disease severity scores + accounting for cohort + 
+
+meta_core %>% glimpse
+meta_core$study %>% table
+
+disease_metrics <- c(
+  # "mds_updrs_part_i_sub_score",
+  "mds_updrs_part_iii_summary_score",
+  "mds_updrs_part_i_summary_score",
+  "mds_updrs_part_ii_summary_score",
+  "mds_updrs_part_iv_summary_score"
+)
+
+for (metric in c(disease_metrics)) {
+  message("Processing: ", metric)
+  meta_core_filtered <- meta_core %>%
+    filter(case_control_other_latest == "Case") %>%
+    tidyr::drop_na(metric) %>%
+    dplyr::select(
+      participant_id, sample_id, sex, visit_month,
+      all_of(metric)
+    ) %>%
+    group_by(participant_id) %>%
+      slice_max(visit_month, n = 1) %>%
+      ungroup() %>%
+      column_to_rownames("sample_id") %>%
+      glimpse()
+  shared_sids <- intersect(colnames(cts), rownames(meta_core_filtered))
+  count_mtx <- cts[, shared_sids]
+  metadata <- meta_core[shared_sids, ]
+
+  # generate deseq2 object
+  design_formula <- as.formula(paste("~ sex +", metric))
+  dds <- DESeqDataSetFromMatrix(
+    countData = count_mtx,
+    colData = metadata,
+    design = design_formula
+  )
+  dds %>% print()
+
+  dds <- DESeq(dds,
+    test = "Wald",
+    fitType = "parametric",
+    parallel = TRUE
+  )
+
+  res <- results(dds)
+  res %>% glimpse
+
+  saveRDS(
+    dds,
+    glue(
+      "{wkdir}/data/interim/deseq2/",
+      "DESeq2_obj_{metric}_{Sys.Date()}.rds"
+    )
+  )
+  saveRDS(
+    res,
+    glue(
+      "{wkdir}/data/interim/deseq2/",
+      "DESeq2_results_{metric}_{Sys.Date()}.rds"
+    )
+  )
+}
+
+```
+
+Loading in human PPI network and LINCS data
+
+```{r, eval=FALSE}
+# loading in PPI and Lincs data
+steiner_dir <- glue("{wkdir}/data/input/steinertree_data")
+lincs_genes_file_name <- glue(
+  "{steiner_dir}/",
+  "GSE92742_Broad_LINCS_gene_info.txt"
+)
+ppi_data_file_name <- glue(
+  "{steiner_dir}/",
+  "iRefIndex_v14_MIScore_interactome_C9.costs.allcaps.txt"
+)
+
+lincs_df <- read.table(
+  lincs_genes_file_name,
+  header = TRUE,
+  sep = "\t",
+  quote = "",
+  fill = TRUE
+)
+
+# Extract the list of genes where pr_is_lm is 1
+l1000_proteins <- unique(lincs_df[lincs_df$pr_is_lm == 1, 'pr_gene_symbol'])
+edge_df <- read.table(ppi_data_file_name, header = TRUE, sep = "\t")
+ppi_proteins <- unique(c(edge_df$protein1, edge_df$protein2))
+
+```
+
+
+Select for significant genes, annotate ensemble IDs with gene symbols, and filter for proteins in the PPI network.
+
+```{r, eval=FALSE}
+dds <- readRDS(
+  glue(
+    "{wkdir}/data/interim/deseq2/",
+    "DESeq2_obj_mds_updrs_part_iii_summary_score_2024-04-24.rds"
+  )
+)
+resultsNames(dds)
+res <- DESeq2::results(dds, name="mds_updrs_part_iii_summary_score")
+res %>% glimpse
+
+res_df <- res %>%
+  as.data.frame() %>%
+  rownames_to_column("name") %>% 
+  filter(padj < 0.05) %>%
+  glimpse()
+
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+ensembl_ids <- res_df$name %>% unique
+
+# Query the Ensembl database to get the gene symbols
+gene_info <- getBM(
+  attributes = c("ensembl_gene_id_version", "external_gene_name"),
+  filters = "ensembl_gene_id_version",
+  values = ensembl_ids,
+  mart = ensembl
+)
+
+# Merge the gene symbols back into your original dataframe
+res_df_annot <- res_df %>%
+  left_join(gene_info, by = c("name" = "ensembl_gene_id_version"))
+
+prize_table <- res_df_annot %>%
+  filter(external_gene_name != "" & !is.na(external_gene_name)) %>%
+  dplyr::select(external_gene_name, log2FoldChange) %>%
+  dplyr::rename(name = external_gene_name, prize = log2FoldChange) %>% 
+  filter(name %in% ppi_proteins)
+
+write.csv(prize_table,
+  glue(
+    "{wkdir}/data/interim/deseq2/",
+    "Prizes_mds_updrs_part_iii_summary_score_{Sys.Date()}.csv"
+  ),
+  row.names = FALSE
+)
+
+```
+

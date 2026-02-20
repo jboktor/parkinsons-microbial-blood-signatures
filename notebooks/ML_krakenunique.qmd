@@ -1,0 +1,346 @@
+---
+title: "ML Analysis of KrakenUniq Read Profiles Against Disease Status"
+editor: visual
+author: "Joe Boktor"
+date: '2024-02-25'
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    column: page
+    fig-align: right
+    fig-height: 8
+    fig-width: 14 
+---
+
+...
+
+
+```{r}
+#| warning: false
+#| message: false
+
+pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+wgs_wkdir <- paste0(pdmbs_dir, "/workflow/WGS")
+wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_plot-functions.R"))
+source(paste0(wkdir, "/notebooks/R_scripts/_analysis_funcs.R"))
+library(phyloseq)
+library(microbiome)
+library(tidyverse)
+library(parsnip)
+library(rsample)
+library(yardstick)
+library(recipes)
+library(workflows)
+library(dials)
+library(tune)
+
+permanova_results_dir <- glue("{wkdir}/data/interim/permanova/distributed")
+permanova_results_norm_dir <- glue("{wkdir}/data/interim/permanova/normalized_distributed")
+
+```
+
+Loading in metadata and KrakenUniq read profiles
+
+```{r, eval=FALSE}
+
+ps_trim_norm <- readRDS(
+  glue(
+    "{wkdir}/data/processed/",
+    "phyloseq_objects/decontaminated/",
+    "2024-02-27_WGS_KrakenUnique_phyloseq_humanreadnorm.rds"
+  )
+)
+
+# Study to study transfer matrix
+ps_model %>% meta() %>% pull(study) %>% unique
+cohorts <- c("BioFIND", "HBS", "PDBP", "PPMI", "Sure", "Steady")
+
+# load normalized phyloseq object and filter for cohorts of interest
+ps_model <- ps_trim_norm %>%
+  # subset_samples(study %in% c("BioFIND", "HBS", "PDBP", "PPMI")) %>%
+  subset_samples(case_control_other_latest != "Other") %>%
+  core(detection = 0, prevalence = 1/100)
+
+ps_list <- cohorts %>%
+  purrr::set_names() %>%
+  purrr::map(function(x) {
+    filtered_sample_data <- subset(sample_data(ps_model), study == x)
+    prune_samples(sample_names(filtered_sample_data), ps_model)
+  })
+
+metadata_of_interest <-
+    c("participant_id", "case_control_other_latest", "sex", "study")
+
+```
+
+Utility functions for ML
+
+```{r, eval=FALSE}
+
+# Utility functions
+#' Function to collect metadata and abundances from ps object
+prep_ml_input <- function(ps, metadata_list) {
+    # collect metdata
+    metadata_df <- microbiome::meta(ps) %>%
+        dplyr::select(all_of(metadata_list))
+    ml_input <- microbiome::abundances(ps) %>%
+        t() %>%
+        as.data.frame() %>%
+        tibble::rownames_to_column(var = "participant_id") %>%
+        dplyr::left_join(metadata_df)
+    return(ml_input)
+}
+
+
+lasso_model <- function(train, test) {
+    doParallel::registerDoParallel()
+
+    ind <- list(
+        analysis = seq(nrow(train)),
+        assessment = nrow(train) + seq(nrow(test))
+    )
+    splits <- rsample::make_splits(ind, dplyr::bind_rows(train, test))
+    ml_train <- rsample::training(splits)
+    ml_test <- rsample::testing(splits)
+
+    # # Generate 10-fold CV model with 5 repetitions, stratified by PD status
+    set.seed(42)
+    train_folds <- vfold_cv(ml_train,
+        v = 10,
+        strata = case_control_other_latest
+    )
+
+    # Define tunable Lasso model
+    tune_spec <- logistic_reg(penalty = tune(), mixture = 1) %>%
+        set_engine("glmnet")
+
+    ml_recipe <- recipes::recipe(
+        case_control_other_latest ~ .,
+        data = ml_train
+    ) %>%
+        recipes::update_role(participant_id, new_role = "participant_id") %>%
+        recipes::update_role(sex, new_role = "sex") %>%
+        recipes::update_role(study, new_role = "study") %>%
+        recipes::step_nzv(all_predictors()) %>%
+        recipes::step_normalize(all_predictors())
+
+    wf <- workflow() %>%
+        add_recipe(ml_recipe) %>%
+        add_model(tune_spec)
+
+    # TUNE MODEL ---
+    lambda_grid <- dials::grid_regular(penalty(), levels = 10)
+    lasso_grid <- tune::tune_grid(wf,
+        resamples = train_folds,
+        grid = lambda_grid
+    )
+
+    # select optimal penalty by filtering largest rocauc
+    best_aucroc <- tune::select_best(lasso_grid, "roc_auc")
+
+    # Extract metrics from optimal models (average of N bootstraps)
+    train_metrics <- tune::collect_metrics(lasso_grid) %>%
+        dplyr::filter(penalty == best_aucroc$penalty)
+
+    # Finalize and fit workflow with tuned parameters
+    train_lasso <- finalize_workflow(wf, best_aucroc) %>%
+        fit(ml_train)
+
+    # Predictions on test data
+    test_lasso <- tune::last_fit(train_lasso, split = splits)
+    test_metrics <- tune::collect_metrics(test_lasso)
+
+    conf_matrix <- tune::collect_predictions(test_lasso) %>%
+        conf_mat(case_control_other_latest, .pred_class) %>%
+        autoplot()
+    print(conf_matrix)
+
+    output <- list(
+        "bootstrap_tune_model" = lasso_grid,
+        "train_lasso" = train_lasso,
+        "test_lasso" = test_lasso,
+        "train_metrics" = train_metrics,
+        "test_metrics" = test_metrics
+    )
+    return(output)
+}
+
+#' Function to summarize model performance between two phyloseq objects
+ml_summary <- function(obj_A, obj_B, label_A, label_B, metadata_of_interest) {
+    ml_input_A <- prep_ml_input(obj_A, metadata_of_interest)
+    ml_input_B <- prep_ml_input(obj_B, metadata_of_interest)
+
+    A_vs_B <- lasso_model(train = ml_input_A, test = ml_input_B)
+    summary_A <-
+        bind_rows(
+            A_vs_B$train_metrics %>%
+                mutate(train = label_A, test = label_A, model = "10-fold CV"),
+            A_vs_B$test_metrics %>%
+                mutate(train = label_A, test = label_B, model = "Prediction")
+        ) %>%
+        mutate(analysis = "Study-to-Study Transfer")
+    return(summary_A)
+}
+
+```
+
+Study to study transfer
+
+
+```{r, eval=FALSE}
+
+metadata_of_interest <-
+    c("participant_id", "case_control_other_latest", "sex", "study")
+ml_cohorts <- c("BioFIND", "HBS", "PDBP", "PPMI",)
+test_pairs <- expand.grid(ml_cohorts, ml_cohorts)
+
+
+# Iterating through pairs of phyloseq objects
+s2s_data <- purrr::map2(
+    test_pairs$Var1, test_pairs$Var2,
+    ~ ml_summary(
+        obj_A = ps_list[[.x]],
+        obj_B = ps_list[[.y]],
+        label_A = .x,
+        label_B = .y,
+        metadata_of_interest
+    )) %>%
+    bind_rows()
+
+
+saveRDS(
+    s2s_data,
+    glue("{wkdir}/data/interim/ml/s2s_transfer_LASSO_{Sys.Date()}.rds")
+)
+
+
+```
+
+Leave-one-cohort-out cross-validation
+
+
+```{r, eval=FALSE}
+
+ps_model_loo <- ml_cohorts %>%
+    purrr::set_names(glue("LOO_{.}")) %>%
+    purrr::map(function(x) {
+        filtered_sample_data <- subset(sample_data(ps_model), study != x)
+        prune_samples(sample_names(filtered_sample_data), ps_model)
+    })
+
+# Double checking LOO list
+ps_model_loo %>%
+    purrr::map(
+        ~ meta(.) %>% pull(study) %>% table
+    )
+
+loo_test_pairs <- data.frame(
+    Var1 = names(ps_model_loo),
+    Var2 = gsub("LOO_", "", names(ps_model_loo))
+    )
+
+loo_data <- purrr::map2(
+    loo_test_pairs$Var1, loo_test_pairs$Var2,
+    ~ ml_summary(
+        obj_A = ps_model_loo[[.x]],
+        obj_B = ps_list[[.y]],
+        label_A = .x,
+        label_B = .y,
+        metadata_of_interest
+    )) %>%
+    bind_rows()
+
+saveRDS(
+    ps_model_loo,
+    glue("{wkdir}/data/interim/ml/s2s_transfer_LOO_{Sys.Date()}.rds")
+)
+
+```
+
+Visualizing results
+
+```{r, eval=FALSE}
+
+ml_heatmap_summary <- function(ml_summary) {
+  ml_summary %>%
+      mutate(model_perf = coalesce(mean, .estimate)) %>%
+      filter(.metric == "roc_auc") %>%
+      distinct() %>%
+      filter(!(train == test & model == "Prediction")) %>%
+    pivot_wider(names_from = .metric, values_from = "model_perf") %>% View
+    ggplot(aes(x = train, y = test, fill = roc_auc)) +
+    theme_bw() +
+    geom_tile() +
+    labs(x = "Training set", y = "Test set", fill = "AUROC") +
+    geom_text(aes(label = round(roc_auc, digits = 2)),
+      size = 3,
+      vjust = 0.77, color = "white"
+    ) +
+    scale_fill_viridis_c(
+        option = "magma", limits = c(0.5, 1), direction = 1,
+        begin = 0, end = 1,
+        oob = scales::squish
+    ) +
+    guides(fill = guide_colourbar(barwidth = 1, barheight = 7)) +
+    theme(
+      panel.border = element_blank(),
+      panel.background = element_blank(),
+      panel.grid = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+}
+
+
+p_s2s_heatmap <- ml_heatmap_summary(s2s_data)
+ggsave(
+    glue("{wkdir}/figures/ml/s2s_transfer_heatmap_{Sys.Date()}.png"),
+    p_s2s_heatmap,
+    width = 6, height = 5
+)
+
+```
+
+
+```{r, eval=FALSE}
+
+p_loo <- loo_data %>%
+    mutate(model_perf = coalesce(mean, .estimate)) %>%
+    mutate(train_name = gsub("LOO_", "", train)) %>%
+    filter(.metric == "roc_auc") %>%
+    distinct() %>%
+    ggplot(aes(x = train_name, y = model_perf, fill = model)) +
+    geom_bar(stat = "identity", position = "dodge", color = "black") +
+    theme_classic() +
+    labs(x = "Study removed from training (LOO)", 
+    y = "AUROC", fill = "Test set") +
+    scale_fill_manual(values = c("#525152", "white")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+    glue("{wkdir}/figures/ml/LOO_barchart_{Sys.Date()}.png"),
+    p_loo,
+    width = 4, height = 4
+)
+
+
+```
+
+
+![Study to Study Transfer Heatmap](../figures/ml/s2s_transfer_heatmap_2024-02-27.png){#fig1}
+
+In the S2S strategy, a lasso regression model is trained on one study and tested on another. The heatmap above shows the AUROC of the model when trained on one study and tested on another. The diagonal represents the performance of the model during a 10 fold cross-validation search for optimal hyperparameters. The model performs best when trained and tested on the same study, and performs very poorly when trained on one study and tested on another.
+
+
+![Leave one out Barchart](../figures/ml/LOO_barchart_2024-02-27.png){#fig2}
+
+In the LOO strategy, a lasso regression model is trained on all studies except one and tested on the left out study. The barchart above shows the AUROC of the model when trained on all studies except one (average 10f fold CV value during hyperparameter search) and tested on the left out study. The model performs fairly poorly in nearly every case.
+
+
+```{r}
+sessionInfo()
+```
