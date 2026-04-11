@@ -53,10 +53,10 @@ library(aplot)
 library(patchwork)
 library(ggpubr)
 
-home_dir <- "/central/groups/MazmanianLab/joeB"
+home_dir <- "/central/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
 ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 src_dir <- paste0(wkdir, "/notebooks")
 source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
 source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
@@ -252,7 +252,7 @@ purrr::walk2(
   airr_fmt_tcrb_list, 
   names(airr_fmt_tcrb_list),
   function(df, sample_name) {
-    imml_input_rep <- "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/airr/ImmuneML/data_input/sample_repertoires"
+    imml_input_rep <- "/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/sample_repertoires"
     output_path <- glue::glue("{imml_input_rep}/{sample_name}.tsv")
     # write_csv(df, output_path)
     write_tsv(df, output_path)
@@ -279,7 +279,7 @@ purrr::walk2(
   airr_fmt_tcrb_list_pids, 
   names(airr_fmt_tcrb_list_pids),
   function(df, sample_name) {
-    imml_input_rep <- "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/airr/ImmuneML/data_input/participant_repertoires"
+    imml_input_rep <- "/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires"
     output_path <- glue::glue("{imml_input_rep}/{sample_name}.tsv")
     write_tsv(df, output_path)
   }
@@ -341,21 +341,10 @@ readr::write_csv(full_pid_meta %>% filter(study != "HBS"),
 Exploratory Data Analysis using ImmuneML
 
 ```{r}
-exploratory_analysis <- slurm_shell_do(
-    glue(
-        "mamba activate immuneml && ",
-        "immune-ml exploratory_analysis_pids.yaml",
-        " {imml_input_dir}/exploratory_analysis_results_all_pids/"
-    ),
-    memory = "25GB",
-    ncpus = 4,
-    walltime = 360 # 6 hrs
-)
-
 cmd <- glue(
     "mamba activate immuneml &&",
     " immune-ml",
-    " {imml_input_dir}/exploratory_analysis_pids.yaml",
+    " {imml_root}/configs/ZZZ_exploratory_analysis_pids.yaml",
     " {imml_results_dir}/exploratory_analysis_results_all_pids/"
     )
 
@@ -363,12 +352,12 @@ easy_batch(
     cluster_name = "ImmuneML-Exploratory",
     log_dir = glue("{wkdir}/.cluster_runs"),
     template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl"),
-    walltime = "6:00:00", 
+    walltime = "6:00:00",
     memory = "50GB",
     fun = shell_do,
     params = list(
         command_string = cmd,
-        stdout_path = "", 
+        stdout_path = "",
         stderr_path = ""
         )
 )

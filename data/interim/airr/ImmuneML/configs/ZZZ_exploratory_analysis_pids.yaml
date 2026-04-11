@@ -1,0 +1,94 @@
+definitions:
+  datasets:
+    dataset:
+      format: AIRR
+      params: # make sure the paths to the downloaded dataset files are correct
+        path: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires
+        metadata_file: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/metadata/metadata_all_pids.csv
+
+  encodings:
+    3mer_freq: KmerFrequency
+
+  reports:
+
+    aa_dist:
+      AminoAcidFrequencyDistribution:
+        relative_frequency: true
+        split_by_label: true
+        label: case_control_other_latest
+        alignment: IMGT
+        region_type: IMGT_CDR3
+
+    label_overlap:
+      LabelOverlap:
+        column_label: case_control_other_latest
+        row_label: study
+
+    seq_len_dist_for_disease:
+      SequenceLengthDistribution:
+        sequence_type: AMINO_ACID
+        region_type: IMGT_CDR3
+        label: case_control_other_latest
+        split_by_label: true
+        plot_frequencies: true
+
+    seq_len_dist_for_batch:
+      SequenceLengthDistribution:
+        sequence_type: AMINO_ACID
+        region_type: IMGT_CDR3
+        label: study
+        split_by_label: true
+        plot_frequencies: true
+
+    gene_dist_disease:
+      VJGeneDistribution:
+        split_by_label: true
+        label: case_control_other_latest
+
+    gene_dist_batch:
+      VJGeneDistribution:
+        split_by_label: true
+        label: study
+
+    clonotype_summary_disease:
+      RepertoireClonotypeSummary:
+        split_by_label: true
+        label: case_control_other_latest
+
+    clonotype_summary_batch:
+      RepertoireClonotypeSummary:
+        split_by_label: true
+        label: study
+
+    feature_comparison:
+      FeatureComparison:
+        comparison_label: case_control_other_latest
+        column_grouping_label: study
+        opacity: 0.6
+        show_error_bar: False
+
+    dim_red_disease:
+      DimensionalityReduction:
+        label: case_control_other_latest
+        dim_red_method:
+          KernelPCA:
+            n_components: 2
+
+    dim_red_batch:
+      DimensionalityReduction:
+        label: study
+        dim_red_method:
+          KernelPCA:
+            n_components: 2
+
+instructions:
+  exploratory_analysis:
+    type: ExploratoryAnalysis
+    analyses:
+      raw_data_analysis:
+        dataset: dataset
+        reports: [aa_dist, label_overlap, seq_len_dist_for_disease, seq_len_dist_for_batch, gene_dist_disease, gene_dist_batch, clonotype_summary_disease, clonotype_summary_batch]
+      encoded_data_analysis:
+        dataset: dataset
+        encoding: 3mer_freq
+        reports: [feature_comparison, dim_red_disease, dim_red_batch]
