@@ -1,0 +1,41 @@
+definitions:
+  datasets:
+    dataset:
+      format: AIRR
+      params:
+        path: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires
+        metadata_file: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/metadata/metadata_minimal_test.csv
+
+  encodings:
+    3mer_freq: KmerFrequency
+
+  ml_methods:
+    log_reg:
+      LogisticRegression:
+        penalty: l2
+
+  reports:
+    coefficients:
+      Coefficients:
+        coeff_to_plot: [n_largest]
+        n_largest: [10]
+
+instructions:
+  minimal_test:
+    type: TrainMLModel
+    settings:
+      - encoding: 3mer_freq
+        ml_method: log_reg
+    assessment:
+      split_strategy: random
+      split_count: 1
+      training_percentage: 0.7
+      reports:
+        models: [coefficients]
+    selection:
+      split_strategy: k_fold
+      split_count: 3
+    labels: [case_control_other_latest]
+    dataset: dataset
+    metrics: [auc]
+    optimization_metric: balanced_accuracy
