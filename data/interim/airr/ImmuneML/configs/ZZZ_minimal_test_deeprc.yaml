@@ -1,0 +1,47 @@
+definitions:
+  datasets:
+    dataset:
+      format: AIRR
+      params:
+        path: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires
+        metadata_file: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/metadata/metadata_minimal_test.csv
+
+  encodings:
+    deeprc_enc: DeepRC
+
+  ml_methods:
+    deeprc:
+      DeepRC:
+        validation_part: 0.2
+        n_updates: 100
+        n_kernels: 16
+        kernel_size: 9
+        learning_rate: 0.001
+        evaluate_at: 25
+        training_batch_size: 4
+        sample_n_sequences: 1000
+        pytorch_device_name: cuda:0
+
+  reports:
+    coefficients:
+      Coefficients:
+        coeff_to_plot: [n_largest]
+        n_largest: [10]
+
+instructions:
+  deeprc_test:
+    type: TrainMLModel
+    settings:
+      - encoding: deeprc_enc
+        ml_method: deeprc
+    assessment:
+      split_strategy: random
+      split_count: 1
+      training_percentage: 0.7
+    selection:
+      split_strategy: k_fold
+      split_count: 3
+    labels: [case_control_other_latest]
+    dataset: dataset
+    metrics: [auc]
+    optimization_metric: balanced_accuracy

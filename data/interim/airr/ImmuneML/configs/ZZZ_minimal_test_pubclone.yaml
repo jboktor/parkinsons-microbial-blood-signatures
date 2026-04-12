@@ -1,0 +1,52 @@
+definitions:
+  datasets:
+    dataset:
+      format: AIRR
+      params:
+        path: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires
+        metadata_file: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/metadata/metadata_minimal_test.csv
+        is_repertoire: true
+        import_productive: true
+        import_with_stop_codon: false
+        import_out_of_frame: false
+        import_illegal_characters: false
+        import_empty_nt_sequences: true
+        import_empty_aa_sequences: false
+        region_type: IMGT_CDR3
+
+  encodings:
+    seq_abundance:
+      SequenceAbundance:
+        p_value_threshold: 0.5
+
+  ml_methods:
+    prob_binary_classifier:
+      ProbabilisticBinaryClassifier:
+        max_iterations: 100
+        update_rate: 0.01
+
+  reports:
+    coefficients:
+      Coefficients:
+        coeff_to_plot: [n_largest]
+        n_largest: [10]
+
+instructions:
+  pubclone_test:
+    type: TrainMLModel
+    settings:
+      - encoding: seq_abundance
+        ml_method: prob_binary_classifier
+    assessment:
+      split_strategy: random
+      split_count: 1
+      training_percentage: 0.7
+      reports:
+        models: [coefficients]
+    selection:
+      split_strategy: k_fold
+      split_count: 3
+    labels: [case_control_other_latest]
+    dataset: dataset
+    metrics: [auc]
+    optimization_metric: balanced_accuracy
