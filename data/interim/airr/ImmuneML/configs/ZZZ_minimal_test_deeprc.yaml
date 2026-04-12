@@ -20,7 +20,7 @@ definitions:
         evaluate_at: 25
         training_batch_size: 4
         sample_n_sequences: 1000
-        pytorch_device_name: cuda:0
+        pytorch_device_name: cpu  # TODO: switch to cuda:0 once pytorch-cuda is working in immuneml_deeprc env
 
   reports:
     coefficients:
