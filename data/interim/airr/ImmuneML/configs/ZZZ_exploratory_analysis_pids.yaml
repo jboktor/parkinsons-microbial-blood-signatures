@@ -52,13 +52,11 @@ definitions:
 
     clonotype_summary_disease:
       RepertoireClonotypeSummary:
-        split_by_label: true
-        label: case_control_other_latest
+        color_label: case_control_other_latest
 
     clonotype_summary_batch:
       RepertoireClonotypeSummary:
-        split_by_label: true
-        label: study
+        color_label: study
 
     feature_comparison:
       FeatureComparison:
@@ -69,14 +67,16 @@ definitions:
 
     dim_red_disease:
       DimensionalityReduction:
-        label: case_control_other_latest
+        labels:
+          - case_control_other_latest
         dim_red_method:
           KernelPCA:
             n_components: 2
 
     dim_red_batch:
       DimensionalityReduction:
-        label: study
+        labels:
+          - study
         dim_red_method:
           KernelPCA:
             n_components: 2
