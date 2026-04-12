@@ -27,8 +27,10 @@ RESULTS_DIR=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/
 mkdir -p ${RESULTS_DIR}
 cd ${RESULTS_DIR}
 
-## Run ImmuneML DeepRC
-mamba activate immuneml
+## Run ImmuneML DeepRC (separate env with conda GPU PyTorch + deeprc)
+mamba activate immuneml_deeprc
+echo "PyTorch CUDA check:"
+python -c "import torch; print('CUDA:', torch.cuda.is_available(), '| device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
 
 echo "=== GPU info ==="
 nvidia-smi
