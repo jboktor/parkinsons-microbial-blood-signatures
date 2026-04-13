@@ -1,0 +1,63 @@
+definitions:
+  datasets:
+    train_dataset:
+      format: AIRR
+      params:
+        path: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires
+        metadata_file: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/metadata/metadata_pid_hbs_loso.csv
+        is_repertoire: true
+        import_productive: true
+        import_with_stop_codon: false
+        import_out_of_frame: false
+        import_illegal_characters: false
+        import_empty_nt_sequences: true
+        import_empty_aa_sequences: false
+        region_type: IMGT_CDR3
+
+  encodings:
+    deeprc_enc: DeepRC
+
+  ml_methods:
+    deeprc_model:
+      DeepRC:
+        validation_part: 0.2
+        kernel_size: 5
+        n_kernels: 16
+        n_additional_convs: 1
+        n_attention_network_layers: 2
+        n_attention_network_units: 32
+        n_output_network_units: 32
+        learning_rate: 0.00005
+        n_updates: 10000
+        evaluate_at: 2000
+        sample_n_sequences: 2000
+        l2_weight_decay: 0.001
+        pytorch_device_name: cuda:0
+
+  reports:
+    roc_summary: ROCCurveSummary
+
+instructions:
+  LOSO_not_hbs_to_hbs_deeprc:
+    type: TrainMLModel
+    dataset: train_dataset
+    labels:
+      - case_control_other_latest:
+          positive_class: Case
+    settings:
+      - encoding: deeprc_enc
+        ml_method: deeprc_model
+    assessment:
+      split_strategy: random
+      split_count: 1
+      training_percentage: 0.7
+    selection:
+      split_strategy: k_fold
+      split_count: 3
+    strategy: GridSearch
+    optimization_metric: balanced_accuracy
+    metrics: [auc, balanced_accuracy]
+    reports:
+      - roc_summary
+    refit_optimal_model: true
+    number_of_processes: 4
