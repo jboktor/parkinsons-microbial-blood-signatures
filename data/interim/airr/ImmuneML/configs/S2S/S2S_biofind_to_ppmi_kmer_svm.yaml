@@ -1,0 +1,63 @@
+definitions:
+  datasets:
+    train_dataset:
+      format: AIRR
+      params:
+        path: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires
+        metadata_file: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/metadata/metadata_pid_biofind.csv
+        is_repertoire: true
+        import_productive: true
+        import_with_stop_codon: false
+        import_out_of_frame: false
+        import_illegal_characters: false
+        import_empty_nt_sequences: true
+        import_empty_aa_sequences: false
+        region_type: IMGT_CDR3
+
+  encodings:
+    kmer3_all:
+      KmerFrequency:
+        k: 3
+        sequence_encoding: continuous_kmer
+        normalization_type: relative_frequency
+        reads: all
+        scale_to_unit_variance: true
+        scale_to_zero_mean: true
+        sequence_type: amino_acid
+        region_type: IMGT_CDR3
+
+  ml_methods:
+    svm_linear:
+      SVM:
+        kernel: linear
+        C: [0.01, 0.1, 1.0]
+      model_selection_cv: true
+      model_selection_n_folds: 3
+
+  reports:
+    roc_summary: ROCCurveSummary
+
+instructions:
+  S2S_biofind_to_ppmi_kmer_svm:
+    type: TrainMLModel
+    dataset: train_dataset
+    labels:
+      - case_control_other_latest:
+          positive_class: Case
+    settings:
+      - encoding: kmer3_all
+        ml_method: svm_linear
+    assessment:
+      split_strategy: random
+      split_count: 1
+      training_percentage: 0.7
+    selection:
+      split_strategy: k_fold
+      split_count: 3
+    strategy: GridSearch
+    optimization_metric: balanced_accuracy
+    metrics: [auc, balanced_accuracy, precision, recall]
+    reports:
+      - roc_summary
+    refit_optimal_model: true
+    number_of_processes: 4

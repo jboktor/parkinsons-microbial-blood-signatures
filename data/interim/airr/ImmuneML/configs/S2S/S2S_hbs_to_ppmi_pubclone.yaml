@@ -1,0 +1,54 @@
+definitions:
+  datasets:
+    train_dataset:
+      format: AIRR
+      params:
+        path: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires
+        metadata_file: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/metadata/metadata_pid_hbs.csv
+        is_repertoire: true
+        import_productive: true
+        import_with_stop_codon: false
+        import_out_of_frame: false
+        import_illegal_characters: false
+        import_empty_nt_sequences: true
+        import_empty_aa_sequences: false
+        region_type: IMGT_CDR3
+
+  encodings:
+    seq_abundance:
+      SequenceAbundance:
+        p_value_threshold: 0.1
+
+  ml_methods:
+    prob_binary:
+      ProbabilisticBinaryClassifier:
+        max_iterations: 200
+        update_rate: 0.01
+
+  reports:
+    roc_summary: ROCCurveSummary
+
+instructions:
+  S2S_hbs_to_ppmi_pubclone:
+    type: TrainMLModel
+    dataset: train_dataset
+    labels:
+      - case_control_other_latest:
+          positive_class: Case
+    settings:
+      - encoding: seq_abundance
+        ml_method: prob_binary
+    assessment:
+      split_strategy: random
+      split_count: 1
+      training_percentage: 0.7
+    selection:
+      split_strategy: k_fold
+      split_count: 3
+    strategy: GridSearch
+    optimization_metric: balanced_accuracy
+    metrics: [auc, balanced_accuracy]
+    reports:
+      - roc_summary
+    refit_optimal_model: true
+    number_of_processes: 4
