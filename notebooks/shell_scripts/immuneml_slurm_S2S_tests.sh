@@ -10,9 +10,9 @@ LOG_DIR=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs
 # CPU models (immuneml env)
 for model in kmer_logreg kmer_svm kmer_rf kmer_abundance pubclone; do
     echo "Submitting S2S_test_${model}..."
-    sbatch ${SCRIPT_DIR}/slurm_S2S_cpu.sh ${model}
+    sbatch ${SCRIPT_DIR}/immuneml_slurm_S2S_cpu.sh ${model}
 done
 
 # GPU model (immuneml_deeprc env)
 echo "Submitting S2S_test_deeprc..."
-sbatch ${SCRIPT_DIR}/slurm_S2S_deeprc.sh
+sbatch ${SCRIPT_DIR}/immuneml_slurm_S2S_deeprc.sh

@@ -16,7 +16,7 @@ submit_job() {
         --job-name="${design}_${config_name}" \
         --output="${LOG_DIR}/${design}_${config_name}_%j.out" \
         --error="${LOG_DIR}/${design}_${config_name}_%j.err" \
-        ${SCRIPT_DIR}/slurm_full_study_deeprc.sh ${design} ${config_name}
+        ${SCRIPT_DIR}/immuneml_slurm_full_study_deeprc.sh ${design} ${config_name}
     SUBMITTED=$((SUBMITTED + 1))
 }
 
