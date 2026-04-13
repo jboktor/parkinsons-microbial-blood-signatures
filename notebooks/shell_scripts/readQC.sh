@@ -26,7 +26,7 @@ source /home/${USER}/.bashrc
 source activate pdmbsR
 # define enviornmental vars
 threads=$SLURM_CPUS_PER_TASK 
-sex_fasta="/central/groups/MazmanianLab/joeB/Downloads/sex-chromosome-fragments/all_sex_sequences.fasta"
+sex_fasta="/resnick/groups/MazmanianLab/jboktor/Downloads/sex-chromosome-fragments/all_sex_sequences.fasta"
 bbduk_metrics="${OUTPUT_DIR}/stats_clean_reads"
 readsdir_clean="${OUTPUT_DIR}/clean_reads"
 readsdir_raw="${WORK_DIR}/raw_reads"

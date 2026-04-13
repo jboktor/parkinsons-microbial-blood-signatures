@@ -20,9 +20,9 @@ format:
 #| warning: false
 #| message: false
 
-pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+pdmbs_dir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS"
 wgs_wkdir <- paste0(pdmbs_dir, "/workflow/WGS")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
 source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
 library(phyloseq)
@@ -492,7 +492,7 @@ contaminant_genera_blacklist <- list(
 # Annotating taxa with NCBI lineage information
 ncbi_lineages <- read.delim(
   glue(
-    "/central/groups/MazmanianLab/joeB/Downloads/",
+    "/resnick/groups/MazmanianLab/jboktor/Downloads/",
     "2023-08-02_ncbi-taxdump/fullnamelineage.dmp"
   ),
   quote = "",
@@ -572,7 +572,7 @@ final_blacklist <- c(
 # Annotating taxa with NCBI lineage information
 ncbi_lineages <- read.delim(
   glue(
-    "/central/groups/MazmanianLab/joeB/Downloads/",
+    "/resnick/groups/MazmanianLab/jboktor/Downloads/",
     "2023-08-02_ncbi-taxdump/fullnamelineage.dmp"
   ),
   quote = "",

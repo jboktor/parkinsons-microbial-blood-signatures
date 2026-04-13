@@ -50,17 +50,17 @@ library(ggrepel)
 library(scico)
 # library(glmmTMB)
 
-home_dir <- "/central/groups/MazmanianLab/joeB"
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
 ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 src_dir <- paste0(wkdir, "/notebooks")
 source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
 source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
 source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
 source(paste0(src_dir, "/R_scripts/_airr_analyze-permanova.R"))
 
-scratch_dir <- "/central/scratch/jbok/PDMBS"
+scratch_dir <- "/resnick/scratch/jbok/PDMBS"
 gliph2_plots_dir <- glue("{wkdir}/figures/AIRR/gliph2/")
 metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
 arcasHLA_interim <- glue("{wkdir}/data/interim/airr/arcasHLA")
@@ -664,6 +664,7 @@ clonotype_volume_df_pid <- trust4_reports_tcrb %>%
       ) %>%
   glimpse()
 
+
 metadata %>% glimpse()
 model_meta_df <- metadata %>% 
   # dplyr::select(participant_id, age_at_baseline, sex, study, est_tcell_reads_abis, case_control_other_latest) %>%
@@ -693,7 +694,7 @@ run_cluster_logreg_analysis <- function(cluster_df) {
   require(magrittr)
   cid <- unique(cluster_df$cluster_id)
   clustcr_dir <- 
-    "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/clusTCR"
+    "/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/clusTCR"
   model_meta_df <- readRDS(
     glue::glue("{clustcr_dir}/results/metadata_for_logreg_2025-08-17.rds")
   )
@@ -1441,6 +1442,9 @@ Running Glmmer models to screen for metadata explained variance in cluster membe
 First formatting the data for modeling
 ```{r}
 clustcr_results_df %>% glimpse()
+# model_meta_df <- readRDS(
+#     glue("{clustcr_dir}/results/metadata_for_logreg_2025-08-17.rds")) %>% 
+#     glimpse()
 model_meta_df <- readRDS(
     glue("{clustcr_dir}/results/metadata_for_logreg_2025-08-17.rds")) %>% 
     glimpse()
@@ -1473,6 +1477,10 @@ full_df <- sid_count_summary_per_cluster_wide %>%
 saveRDS(
   full_df,
   glue("{clustcr_dir}/results/logistic_regression_input_binary_dataframe_{Sys.Date()}.rds")
+)
+saveRDS(
+  full_df_rich,
+  glue("{clustcr_dir}/results/logistic_regression_input_binary_dataframe_RICH_{Sys.Date()}.rds")
 )
 
 ```
@@ -1511,6 +1519,8 @@ logreg_reslist <- list(
     "null_model_glance" = broom::glance(null_model)
 )
 
+full_df %>% colnames() %>% tail(n=30)
+
 # Wrapping code into a function ----
 run_binary_cluster_logreg_analysis <- function(cid_list) {
     require(magrittr)
@@ -1519,7 +1529,7 @@ run_binary_cluster_logreg_analysis <- function(cid_list) {
     require(tictoc)
     
     # reading the full dataframe
-    clustcr_dir <- "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/clusTCR"
+    clustcr_dir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/clusTCR"
     full_df <- readRDS(glue("{clustcr_dir}/results/logistic_regression_input_binary_dataframe_2025-09-08.rds"))
 
     for (cid in cid_list) {
@@ -1548,7 +1558,7 @@ run_binary_cluster_logreg_analysis <- function(cid_list) {
       )
 
       saveRDS(logreg_reslist, 
-        glue("/central/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{cid}__2025-09-08.rds"))
+        glue("/resnick/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{cid}__2025-09-08.rds"))
       toc()
     }
 }
@@ -1565,7 +1575,7 @@ Executing Logistic Regression Models for Cluster Membership (UNWEIGHTED - BINARY
 
 ```{r}
 cid_run_list <- unique(sid_count_summary_per_cluster$cluster_id) #%>%
-  # discard(~ file.exists(glue("/central/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{.}__2025-09-08.rds")))
+  # discard(~ file.exists(glue("/resnick/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{.}__2025-09-08.rds")))
 
 length(unique(sid_count_summary_per_cluster$cluster_id))
 length(cid_run_list)
@@ -1598,11 +1608,22 @@ submitJobs(jobs,
 
 ```
 
+
+INSERTING A NEW BLOCK
+
+```{r}
+
+metadata_categories_df$metadata_class %>% table
+
+
+```
+
+
 Checking on the results
 
 ```{r}
 res_paths <- list.files(
-    glue("/central/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary"),
+    glue("/resnick/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary"),
     full.names = TRUE
 )
 length(res_paths)
@@ -1727,10 +1748,10 @@ full_model_stats_df %>%
 
 
 # cid <- "CASS.G..NSPLHF_TRBV12-3"
-# full_mod <- readRDS(glue("/central/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{cid}__2025-09-08.rds"))$logit_full %>% 
+# full_mod <- readRDS(glue("/resnick/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{cid}__2025-09-08.rds"))$logit_full %>% 
 #   janitor::clean_names() %>% 
 #   glimpse()
-# # readRDS(glue("/central/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{cid}__2025-09-08.rds"))$full_model_glance
+# # readRDS(glue("/resnick/scratch/jbok/tmp_clusTCR_logreg/logistic_regression_binary/{cid}__2025-09-08.rds"))$full_model_glance
 
 # raw_binary_data <- full_df %>% 
 #   select(detected = {{cid}}, case_control_other_latest, est_tcell_reads_abis_pid, age_at_baseline, sex, participant_id) %>% 

@@ -4,7 +4,7 @@
 #SBATCH --mem=32GB
 #SBATCH --time=48:00:00
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:nvidia_h200:1
+#SBATCH --gres=gpu:p100:1
 
 ## Initialize
 source /home/${USER}/.bashrc
@@ -13,8 +13,8 @@ module load cuda/12.2.1-gcc-11.3.1-sdqrj2e
 # Args: $1 = design (S2S or LOSO), $2 = yaml filename (without .yaml)
 DESIGN=$1
 CONFIG_NAME=$2
-CONFIGS=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs/${DESIGN}
-RESULTS=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results/${DESIGN}
+CONFIGS=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs/${DESIGN}
+RESULTS=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results/${DESIGN}
 
 echo "=== Running ${DESIGN}/${CONFIG_NAME} (GPU DeepRC) ==="
 echo "Start time: $(date)"

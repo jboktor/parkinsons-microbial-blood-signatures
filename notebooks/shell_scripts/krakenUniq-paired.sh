@@ -27,8 +27,8 @@ source /home/${USER}/.bashrc
 source activate pdmbsR
 # define enviornmental vars
 threads=$SLURM_CPUS_PER_TASK 
-# REPORT_DIR="/central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/results/kraken2"
-# FASTQ_DIR="/central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/clean_reads"
+# REPORT_DIR="/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/results/kraken2"
+# FASTQ_DIR="/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/clean_reads"
 FORWARD_RD="${FASTQ_DIR}/${SAMPLE_NAME}_R1.fastq.gz"
 REVERSE_RD="${FASTQ_DIR}/${SAMPLE_NAME}_R2.fastq.gz"
 
@@ -41,7 +41,7 @@ kraken2 --version
 
 kraken_run() {
     
-    krakenuniq --db "/central/groups/MazmanianLab/joeB/Downloads/RefDBs/KrakenUniq/MicrobialDB" \
+    krakenuniq --db "/resnick/groups/MazmanianLab/jboktor/Downloads/RefDBs/KrakenUniq/MicrobialDB" \
     --threads ${threads} \
     --preload \
     --paired \

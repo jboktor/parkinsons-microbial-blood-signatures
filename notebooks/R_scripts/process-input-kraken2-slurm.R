@@ -12,8 +12,8 @@ sample_info <- readRDS("data/interim/metadata/2022-11-25_static_metdata.rds")
 # taxon mapping for a species across varying samples ? Maybe related to taxon sub-classes (G1, P1, ..)?
 # Also errors in progress bar refreshing properly
 
-pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+pdmbs_dir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS"
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
 source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
 

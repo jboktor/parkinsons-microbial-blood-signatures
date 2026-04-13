@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=S2S_deeprc_h100
-#SBATCH --output=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/S2S_test_deeprc_h100_%j.out
-#SBATCH --error=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/S2S_test_deeprc_h100_%j.err
+#SBATCH --output=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/S2S_test_deeprc_h100_%j.out
+#SBATCH --error=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/S2S_test_deeprc_h100_%j.err
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16GB
@@ -13,8 +13,8 @@
 source /home/${USER}/.bashrc
 module load cuda/12.2.1-gcc-11.3.1-sdqrj2e
 
-CONFIGS=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs
-RESULTS=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results
+CONFIGS=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs
+RESULTS=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results
 
 echo "=== Running S2S_test_deeprc on H100 ==="
 echo "Start time: $(date)"

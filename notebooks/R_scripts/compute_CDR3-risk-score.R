@@ -50,7 +50,7 @@ score_tcrs_with_betacoefs <- function(x, phenotype_type, betacoef_list){
 score_tcrs_with_betacoefs_list <- function(x, phenotype_type, betacoef_list, filename) {
     require(dplyr)
     require(purrr)
-    source("/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/notebooks/R_scripts/compute_CDR3-risk-score.R")
+    source("/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/notebooks/R_scripts/compute_CDR3-risk-score.R")
     
     res <- x %>% 
         purrr::set_names() %>% 

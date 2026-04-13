@@ -10,7 +10,7 @@
 # Notify at the beginning, end of job and on failure.
 #SBATCH --mail-user=jboktor@caltech.edu   # email address
 #SBATCH --mail-type=FAIL
-#SBATCH --output=/central/scratch/jbok/slurmdump/compile_reads_%j.out
+#SBATCH --output=/resnick/scratch/jbok/slurmdump/compile_reads_%j.out
 
 
 while getopts r:s:o: option

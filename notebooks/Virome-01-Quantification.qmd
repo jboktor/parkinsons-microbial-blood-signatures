@@ -53,14 +53,14 @@ library(aplot)
 library(patchwork)
 library(ggside)
 
-home_dir <- "/central/groups/MazmanianLab/joeB"
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
 ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 src_dir <- paste0(wkdir, "/notebooks")
 source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
 source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
-scratch_dir <- "/central/scratch/jbok/PDMBS"
+scratch_dir <- "/resnick/scratch/jbok/PDMBS"
 palmdb_data <- glue("{ref_dir}/PalmDB")
 palm_interim <- glue("{wkdir}/data/interim/PalmDB_mapping")
 dir.create(palm_interim, showWarnings = FALSE)
@@ -82,7 +82,7 @@ Here we take the cleaned reads and map them to the PalmDB + D-1. This will allow
 
 # kb ref \
 #     --aa \
-#     --d-list /central/groups/MazmanianLab/joeB/Downloads/RefDBs/ref_genomes/T2T-CHM13v2.0_plusY/chm13v2.0.fa \
+#     --d-list /resnick/groups/MazmanianLab/jboktor/Downloads/RefDBs/ref_genomes/T2T-CHM13v2.0_plusY/chm13v2.0.fa \
 #     -i index.idx --workflow custom \
 #     palmdb_rdrp_seqs.fa
 
@@ -90,7 +90,7 @@ Here we take the cleaned reads and map them to the PalmDB + D-1. This will allow
 kb ref \
     --aa \
     -t 24 \
-    --d-list /central/groups/MazmanianLab/joeB/Downloads/RefDBs/ref_genomes/GRCh38/Homo_sapiens.GRCh38.cdna_dna.fa.gz \
+    --d-list /resnick/groups/MazmanianLab/jboktor/Downloads/RefDBs/ref_genomes/GRCh38/Homo_sapiens.GRCh38.cdna_dna.fa.gz \
     -i index_GRCh38_PalmDB.idx --workflow custom \
     palmdb_rdrp_seqs.fa
 
@@ -102,7 +102,7 @@ Sample of running Kallisto Count (option #1)
 
 kb count \
     -t 24 \
-    -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/test_palmdb_bwa_dlist \
+    -o /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/test_palmdb_bwa_dlist \
     --aa \
     -m 4G \
     -i index_GRCh38_PalmDB.idx \
@@ -110,8 +110,8 @@ kb count \
     --parity paired \
     -x BULK \
     --matrix-to-files \
-    /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R1.fastq.gz \
-    /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R2.fastq.gz
+    /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R1.fastq.gz \
+    /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R2.fastq.gz
 
 
 # "--batch-barcodes batch.txt"
@@ -126,23 +126,23 @@ Alternative Kallisto Run (option #2)
 kallisto bus \
         --aa \
         -i index_GRCh38_PalmDB.idx \
-        -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1 \
+        -o /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1 \
         -t 24 \
         -x BULK \
-        /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R1.fastq.gz \
-    /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R2.fastq.gz
+        /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R1.fastq.gz \
+    /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R2.fastq.gz
 
 
-bustools sort -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/output_sorted.bus /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/output.bus
+bustools sort -o /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/output_sorted.bus /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/output.bus
 
 bustools count \
     --genecounts \
     --cm \
-    -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/bustools_count \
+    -o /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/bustools_count \
     -g palmdb_clustered_t2g.txt \
-    -e /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/matrix.ec \
-    -t /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/transcripts.txt \
-    /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/output_sorted.bus
+    -e /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/matrix.ec \
+    -t /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/transcripts.txt \
+    /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/TEST_PP-40737-BLM0T1/output_sorted.bus
 
 ```
 
@@ -154,7 +154,7 @@ bustools count \
 run_kallisto_palmdb <- function(fwd, rev, threads, output_dir, wkdir) {
     require(glue)
     source(glue("{wkdir}/notebooks/R_scripts/_misc_functions.R"))
-    palmdb <- "/central/groups/MazmanianLab/joeB/Downloads/RefDBs/PalmDB"
+    palmdb <- "/resnick/groups/MazmanianLab/jboktor/Downloads/RefDBs/PalmDB"
     cmd <- glue(
         "mamba run -n kallisto_env ",
         "kb count",

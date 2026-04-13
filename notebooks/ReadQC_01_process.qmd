@@ -76,15 +76,15 @@ library(stringr)
 library(ggsci)
 library(aplot)
 
-home_dir <- "/central/groups/MazmanianLab/joeB"
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
 ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 src_dir <- paste0(wkdir, "/notebooks")
 source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
 source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
 load_dot_env(glue("{wkdir}/.env"))
-scratch_dir <- "/central/scratch/jbok/PDMBS"
+scratch_dir <- "/resnick/scratch/jbok/PDMBS"
 
 ```
 
@@ -268,7 +268,7 @@ Downloading unmapped BAM files
 
 ```{r}
 slurm_out <-  glue("{wkdir}/.cluster_runs/gcs_download_BAM-unmapped")
-data_out <- glue("/central/scratch/jbok/PDMBS/WGS/BAM-unmapped-raw")
+data_out <- glue("/resnick/scratch/jbok/PDMBS/WGS/BAM-unmapped-raw")
 dir.create(slurm_out, recursive = TRUE)
 dir.create(data_out, recursive = TRUE)
 
@@ -369,8 +369,8 @@ for (sampleID in sampleIDs) {
       " --error={slurm_out}/{jobname}.err",
       " notebooks/shell_scripts/filter_bam_reads.sh",
       " -s {sampleID}",
-      " -i /central/scratch/jbok/PDMBS/WGS/BAM-unmapped-raw",
-      " -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS"
+      " -i /resnick/scratch/jbok/PDMBS/WGS/BAM-unmapped-raw",
+      " -o /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS"
     )
   )
   # to prevent memory alloc issues
@@ -419,8 +419,8 @@ for (sampleID in sampleIDs)  {
         " --error={slurm_out}/{jobname}.err",
         " notebooks/shell_scripts/readQC.sh",
         " -s {sampleID}",
-        " -w /central/scratch/jbok/PDMBS/WGS",
-        " -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS"
+        " -w /resnick/scratch/jbok/PDMBS/WGS",
+        " -o /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS"
       )
     )
     # to prevent memory alloc issues
@@ -576,7 +576,7 @@ Downloading unmapped BAM files
 
 ```{r}
 slurm_out <-  glue("{wkdir}/.cluster_runs/{get_time()}_gcs_download_RNASEQ_BAM-unmapped")
-data_out <- glue("/central/scratch/jbok/PDMBS/RNASEQ/BAM-unmapped-raw")
+data_out <- glue("/resnick/scratch/jbok/PDMBS/RNASEQ/BAM-unmapped-raw")
 dir.create(slurm_out, recursive = TRUE, showWarnings = FALSE)
 dir.create(data_out, recursive = TRUE, showWarnings = FALSE)
 rnaseq_bam_urls <- bam_urls %>%
@@ -588,7 +588,7 @@ rnaseq_bam_urls <- bam_urls %>%
   )) %>%
   discard(~ file.exists(
     file.path(
-      "/central/scratch/jbok/PDMBS/RNASEQ/BAM-unmapped-raw/",
+      "/resnick/scratch/jbok/PDMBS/RNASEQ/BAM-unmapped-raw/",
       basename(.)
     )
     )
@@ -631,11 +631,11 @@ for (url in rnaseq_bam_urls) {
 ```{r}
 sampleIDs_rna <- readRDS(glue("{wkdir}/data/interim/metadata/sample-id_RNASEQ.rds"))
 slurm_out <-  glue("{wkdir}/.cluster_runs/{get_time()}_BAM-QC_RNASEQ")
-data_out <- "/central/scratch/jbok/PDMBS/RNASEQ/sequence_metadata"
+data_out <- "/resnick/scratch/jbok/PDMBS/RNASEQ/sequence_metadata"
 dir.create(slurm_out, recursive = TRUE, showWarnings = FALSE)
 dir.create(data_out, recursive = TRUE, showWarnings = FALSE)
 dir.create(
-  "/central/scratch/jbok/PDMBS/RNASEQ/bam_unmapped", 
+  "/resnick/scratch/jbok/PDMBS/RNASEQ/bam_unmapped", 
   recursive = TRUE, showWarnings = FALSE)
 dir.create(
   glue("{pdmbs_dir}/workflow/RNASEQ/flagstats/03_BAM-unmapped-3328-filtered"), 
@@ -649,7 +649,7 @@ dir.create(
 run_list <- sampleIDs_rna %>%
   discard(
     ~ file.exists(
-      file.path("/central/scratch/jbok/PDMBS/RNASEQ/bam_unmapped", glue("{.}.bam"))
+      file.path("/resnick/scratch/jbok/PDMBS/RNASEQ/bam_unmapped", glue("{.}.bam"))
     )
   )
 for (sampleID in run_list) {
@@ -663,8 +663,8 @@ for (sampleID in run_list) {
       " --error={slurm_out}/{jobname}.err",
       " {src_dir}/shell_scripts/filter_bam_reads.sh",
       " -s {sampleID}",
-      " -i /central/scratch/jbok/PDMBS/RNASEQ/BAM-unmapped-raw",
-      " -o /central/scratch/jbok/PDMBS/RNASEQ"
+      " -i /resnick/scratch/jbok/PDMBS/RNASEQ/BAM-unmapped-raw",
+      " -o /resnick/scratch/jbok/PDMBS/RNASEQ"
     )
   )
   # to prevent memory alloc issues
@@ -697,7 +697,7 @@ stats_out_bbduk <- glue("{pdmbs_dir}/workflow/RNASEQ/stats_clean_reads")
 dir.create(slurm_out_bbduk, recursive = TRUE, showWarnings = FALSE)
 dir.create(data_out_bbduk, recursive = TRUE, showWarnings = FALSE)
 dir.create(stats_out_bbduk, recursive = TRUE, showWarnings = FALSE)
-dir.create("/central/scratch/jbok/PDMBS/RNASEQ/raw_reads", 
+dir.create("/resnick/scratch/jbok/PDMBS/RNASEQ/raw_reads", 
   recursive = TRUE, showWarnings = FALSE)
 run_list <- sampleIDs_rna %>%
   discard(
@@ -717,8 +717,8 @@ for (sampleID in run_list)  {
       " --error={slurm_out_bbduk}/{jobname}.err",
       " {src_dir}/shell_scripts/readQC.sh",
       " -s {sampleID}",
-      " -w /central/scratch/jbok/PDMBS/RNASEQ",
-      " -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ"
+      " -w /resnick/scratch/jbok/PDMBS/RNASEQ",
+      " -o /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ"
     )
   )
   # to prevent memory alloc issues
@@ -732,7 +732,7 @@ for (sampleID in run_list)  {
 Downloading CHM13v2
 
 ```{r, eval = FALSE}
-shell_do("cd /central/groups/MazmanianLab/joeB/Downloads/RefDBs")
+shell_do("cd /resnick/groups/MazmanianLab/jboktor/Downloads/RefDBs")
 shell_do('curl -OJX GET "https://api.ncbi.nlm.nih.gov/datasets/v2alpha/genome/accession/GCF_009914755.1/download?include_annotation_type=GENOME_FASTA,GENOME_GFF,RNA_FASTA,CDS_FASTA,PROT_FASTA,SEQUENCE_REPORT&filename=GCF_009914755.1.zip" -H "Accept: application/zip"')
 
 # ref_genomes/T2T-CHM13v2.0/GCF_009914755.1/GCF_009914755.1_T2T-CHM13v2.0_genomic.fna

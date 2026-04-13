@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=fix-deeprc-cuda
-#SBATCH --output=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/fix_deeprc_cuda_%j.out
-#SBATCH --error=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/fix_deeprc_cuda_%j.err
+#SBATCH --output=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/fix_deeprc_cuda_%j.out
+#SBATCH --error=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/fix_deeprc_cuda_%j.err
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16GB
@@ -47,8 +47,8 @@ print('scipy:', scipy.__version__)
 
 echo "=== Step 5: Run minimal DeepRC test with cuda:0 ==="
 # Temporarily patch the YAML to use cuda:0
-YAML=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs/ZZZ_minimal_test_deeprc.yaml
-RESULTS_DIR=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results/minimal_test_deeprc_gpu
+YAML=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs/ZZZ_minimal_test_deeprc.yaml
+RESULTS_DIR=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results/minimal_test_deeprc_gpu
 rm -rf ${RESULTS_DIR}
 mkdir -p ${RESULTS_DIR}
 cd ${RESULTS_DIR}

@@ -5,9 +5,9 @@ import os
 from pathlib import Path
 from itertools import permutations
 
-CONFIGS_DIR = Path("/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs")
-META_DIR = Path("/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/metadata")
-REPO_DIR = Path("/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires")
+CONFIGS_DIR = Path("/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs")
+META_DIR = Path("/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/metadata")
+REPO_DIR = Path("/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires")
 
 STUDIES = ["pdbp", "ppmi", "biofind", "hbs"]
 
@@ -169,7 +169,7 @@ MODELS = {
         "encodings": """
     compairr_1mm:
       CompAIRRSequenceAbundance:
-        compairr_path: /central/groups/MazmanianLab/jboktor/software/compairr/src/compairr
+        compairr_path: /resnick/groups/MazmanianLab/jboktor/software/compairr/src/compairr
         p_value_threshold: 0.001
         ignore_genes: false""",
         "ml_methods": """

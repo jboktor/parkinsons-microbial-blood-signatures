@@ -1988,18 +1988,18 @@ alpha_df %>%
 
 
 
-# cd /central/groups/MazmanianLab/joeB/Downloads/RefDBs/PalmDB
+# cd /resnick/groups/MazmanianLab/jboktor/Downloads/RefDBs/PalmDB
 
 # kb count \
 #     -t 8 \
-#     -o /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/test_palmdb_bwa_dlist_SINGLE \
+#     -o /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/test_palmdb_bwa_dlist_SINGLE \
 #     --aa \
 #     -m 4G \
 #     -i index_GRCh38_PalmDB.idx \
 #     -g palmdb_clustered_t2g.txt \
 #     --parity single \
 #     -x BULK \
-#     /central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R1.fastq.gz
+#     /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/clean_reads/PP-40737-BLM0T1_R1.fastq.gz
 
 
 
@@ -2074,9 +2074,9 @@ alpha_df %>%
 
 # tst <- read_mtx(
 tst <- Seurat::ReadMtx(
-    mtx = "/central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/test_palmdb_bwa_dlist/counts_unfiltered/cells_x_genes.mtx",
-    features = "/central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/test_palmdb_bwa_dlist/counts_unfiltered/cells_x_genes.genes.names.txt",
-    cells = "/central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/test_palmdb_bwa_dlist/counts_unfiltered/cells_x_genes.barcodes.txt",
+    mtx = "/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/test_palmdb_bwa_dlist/counts_unfiltered/cells_x_genes.mtx",
+    features = "/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/test_palmdb_bwa_dlist/counts_unfiltered/cells_x_genes.genes.names.txt",
+    cells = "/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/test_palmdb_bwa_dlist/counts_unfiltered/cells_x_genes.barcodes.txt",
     feature.column = 1,
     mtx.transpose = TRUE
 )
@@ -3051,9 +3051,9 @@ library(glue)
 library(janitor)
 library(strex)
 
-home_dir <- "/central/groups/MazmanianLab/joeB"
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 qc_dir <- glue("{wkdir}/data/input/metadata/QC")
 v4_1027_dir <- glue("{wkdir}/data/input/metadata/2023_v4release_1027")
 

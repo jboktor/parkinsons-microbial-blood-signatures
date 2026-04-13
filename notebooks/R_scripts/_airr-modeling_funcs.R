@@ -2,8 +2,8 @@
 trill_embed <- function(run_name, model, fasta, output_dir) {
     require(glue)
     wkdir <- glue(
-        "/central/groups/MazmanianLab/joeB/PDMBS/",
-        "parkinsons-microbial-blood-signatures"
+        "/resnick/groups/MazmanianLab/jboktor/PDMBS/",
+        "pdairr"
     )
     source(glue("{wkdir}/notebooks/R_scripts/_misc_functions.R"))
     tmp_loc <- tempdir()
@@ -26,8 +26,8 @@ trill_embed <- function(run_name, model, fasta, output_dir) {
 trill_embed_parallel <- function(run_name, model, fasta, output_dir, ngpu) {
     require(glue)
     wkdir <- glue(
-        "/central/groups/MazmanianLab/joeB/PDMBS/",
-        "parkinsons-microbial-blood-signatures"
+        "/resnick/groups/MazmanianLab/jboktor/PDMBS/",
+        "pdairr"
     )
     source(glue("{wkdir}/notebooks/R_scripts/_misc_functions.R"))
     tmp_loc <- glue("{wkdir}{tempdir()}")
@@ -292,8 +292,8 @@ gmm_aligner <- function(dlist, ref_group, test_group,
 #     require(magrittr)
 #     require(glue)
 #     wkdir <- glue(
-#         "/central/groups/MazmanianLab/joeB/PDMBS/",
-#         "parkinsons-microbial-blood-signatures"
+#         "/resnick/groups/MazmanianLab/jboktor/PDMBS/",
+#         "pdairr"
 #     )
 #     source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
 

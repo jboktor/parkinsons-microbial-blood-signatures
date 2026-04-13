@@ -9,8 +9,8 @@ library(glue)
 library(logr)
 library(logger)
 
-pdmbs_dir <<- "/central/groups/MazmanianLab/joeB/PDMBS"
-wkdir <<- glue("{pdmbs_dir}/parkinsons-microbial-blood-signatures")
+pdmbs_dir <<- "/resnick/groups/MazmanianLab/jboktor/PDMBS"
+wkdir <<- glue("{pdmbs_dir}/pdairr")
 source(glue("{wkdir}/notebooks/R_scripts/_misc_functions.R"))
 setwd(wkdir)
 
@@ -19,18 +19,18 @@ kraken2_alignment <- function(sampleID, nworkers = 2) {
   log_threshold(TRACE)
   refdbs_kraken <- list(
     "RefSeqPlusPF" =
-      "/central/groups/MazmanianLab/joeB/Downloads/refseq_pluspf_v4/",
+      "/resnick/groups/MazmanianLab/jboktor/Downloads/refseq_pluspf_v4/",
     "UHGG" =
-      "/central/groups/MazmanianLab/joeB/Downloads/uhgg_kraken2-db/",
+      "/resnick/groups/MazmanianLab/jboktor/Downloads/uhgg_kraken2-db/",
     "WoL" =
-      "/central/groups/MazmanianLab/joeB/WebOfLife/databases/kraken2/"
+      "/resnick/groups/MazmanianLab/jboktor/WebOfLife/databases/kraken2/"
   )
   reads_dir <-
-  "/central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/clean_fastqs/"
+  "/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/clean_fastqs/"
   temp_reads_dir <-
-    "/central/scratch/jbok/krakenScratch/"
+    "/resnick/scratch/jbok/krakenScratch/"
   output_dir <-
-    "/central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/results/kraken2/"
+    "/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/results/kraken2/"
   quality_reads <-
     glue("{temp_reads_dir}{sampleID}.fq.gz")
   

@@ -56,14 +56,14 @@ library(ggpubr)
 library(ggrepel)
 
 
-home_dir <- "/central/groups/MazmanianLab/joeB"
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
 ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 src_dir <- paste0(wkdir, "/notebooks")
 source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
 source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
-scratch_dir <- "/central/scratch/jbok/PDMBS"
+scratch_dir <- "/resnick/scratch/jbok/PDMBS"
 palmdb_data <- glue("{ref_dir}/PalmDB")
 palm_interim <- glue("{wkdir}/data/interim/PalmDB_mapping")
 dir.create(palm_interim, showWarnings = FALSE)

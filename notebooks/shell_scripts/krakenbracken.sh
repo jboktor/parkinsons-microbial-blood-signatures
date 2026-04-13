@@ -10,7 +10,7 @@
 # Notify at the beginning, end of job and on failure.
 #SBATCH --mail-user=jboktor@caltech.edu   # email address
 #SBATCH --mail-type=FAIL
-#SBATCH --output=/central/scratch/jbok/slurmdump/%j.out
+#SBATCH --output=/resnick/scratch/jbok/slurmdump/%j.out
 
 
 while getopts r:s: option
@@ -29,7 +29,7 @@ source activate wol
 
 echo "PROCESSING SAMPLE: "$SAMPLEID
 SAMPLEROOT="${ROOTDIR}$SAMPLEID"
-OUTPUTROOT='/central/groups/MazmanianLab/joeB/PDBM/classification/' 
+OUTPUTROOT='/resnick/groups/MazmanianLab/jboktor/PDBM/classification/' 
 declare -A taxrank
 taxrank=( ["D"]="domain" ["K"]="kingdom" ["P"]="phylum" ["C"]="class" ["O"]="order" ["F"]="family" ["G"]="genus" ["S"]="species")
 cd $OUTPUTROOT
@@ -40,7 +40,7 @@ if [ ! -f $OUTPUTROOT'RefSeqPlusPF_mapped/'${SAMPLEID}'__report_RefSeqPlusPF.tsv
 then
     echo ${SAMPLEID}"__report_RefSeqPlusPF.tsv does not exist .... running script"
     
-refseq_kraken_run="kraken2 --db /central/groups/MazmanianLab/joeB/Downloads/refseq_pluspf_v4/ \
+refseq_kraken_run="kraken2 --db /resnick/groups/MazmanianLab/jboktor/Downloads/refseq_pluspf_v4/ \
 --threads 2 \
 --gzip-compressed \
 --classified-out "$OUTPUTROOT'RefSeqPlusPF_mapped/'${SAMPLEID}'__classified_RefSeqPlusPF.tsv'" \
@@ -54,7 +54,7 @@ $refseq_kraken_run
 # for rank in "${!taxrank[@]}"
 # do 
 # echo "$rank - ${taxrank[$rank]}"
-# bracken -d /central/groups/MazmanianLab/joeB/Downloads/refseq_pluspf_v4/ \
+# bracken -d /resnick/groups/MazmanianLab/jboktor/Downloads/refseq_pluspf_v4/ \
 # -i $OUTPUTROOT'RefSeqPlusPF_mapped/'${SAMPLEID}'__report_RefSeqPlusPF.tsv' \
 # -o $OUTPUTROOT'RefSeqPlusPF_mapped/bracken/'${SAMPLEID}'__'${taxrank[$rank]}'.tsv' \
 # -w $OUTPUTROOT'RefSeqPlusPF_mapped/bracken/'${SAMPLEID}'__'${taxrank[$rank]}'_report.tsv' \
@@ -64,7 +64,7 @@ $refseq_kraken_run
 
 # :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
-uhgg_kraken_run="kraken2 --db /central/groups/MazmanianLab/joeB/Downloads/uhgg_kraken2-db/ \
+uhgg_kraken_run="kraken2 --db /resnick/groups/MazmanianLab/jboktor/Downloads/uhgg_kraken2-db/ \
 --threads 2 \
 --gzip-compressed \
 --classified-out "$OUTPUTROOT'UHGG_mapped/'${SAMPLEID}'__classified_UHGG.tsv'" \
@@ -78,7 +78,7 @@ $uhgg_kraken_run
 # for rank in "${!taxrank[@]}"
 # do 
 # echo "$rank - ${taxrank[$rank]}"
-# bracken -d /central/groups/MazmanianLab/joeB/Downloads/uhgg_kraken2-db/ \
+# bracken -d /resnick/groups/MazmanianLab/jboktor/Downloads/uhgg_kraken2-db/ \
 # -i $OUTPUTROOT'UHGG_mapped/'${SAMPLEID}'__report_UHGG.tsv' \
 # -o $OUTPUTROOT'UHGG_mapped/bracken/'${SAMPLEID}'__'${taxrank[$rank]}'.tsv' \
 # -w $OUTPUTROOT'UHGG_mapped/bracken/'${SAMPLEID}'__'${taxrank[$rank]}'_report.tsv' \
@@ -88,7 +88,7 @@ $uhgg_kraken_run
 
 #::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
-WoL_kraken_run="kraken2 --db /central/groups/MazmanianLab/joeB/WebOfLife/databases/kraken2/ \
+WoL_kraken_run="kraken2 --db /resnick/groups/MazmanianLab/jboktor/WebOfLife/databases/kraken2/ \
 --threads 2 \
 --gzip-compressed \
 --classified-out "$OUTPUTROOT'WoL_mapped/'${SAMPLEID}'__classified_WoL.tsv'" \
@@ -102,7 +102,7 @@ $WoL_kraken_run
 # for rank in "${!taxrank[@]}"
 # do 
 # echo "$rank - ${taxrank[$rank]}"
-# bracken -d /central/groups/MazmanianLab/joeB/WebOfLife/databases/bracken/ \
+# bracken -d /resnick/groups/MazmanianLab/jboktor/WebOfLife/databases/bracken/ \
 # -i $OUTPUTROOT'WoL_mapped/'${SAMPLEID}'__report_WoL.tsv' \
 # -o $OUTPUTROOT'WoL_mapped/bracken/'${SAMPLEID}'__'${taxrank[$rank]}'.tsv' \
 # -w $OUTPUTROOT'WoL_mapped/bracken/'${SAMPLEID}'__'${taxrank[$rank]}'_report.tsv' \

@@ -1,7 +1,7 @@
 # load packages
 
 # Version control / Downloading
-library(renv)
+# library(renv)
 library(devtools)
 
 # Plotting/aesthetic functions
@@ -38,31 +38,24 @@ library(reshape2)
 library(grid)
 library(magrittr)
 
-# Microbiome packages
-library(vegan)
-library(compositions)
-library(phyloseq)
-library(microbiome)
-library(snm)
-library(msa)
 # Differential Abundance Testing
-library(corncob)
 library(edgeR)
 library(limma)
 library(DEFormats)
 library(DESeq2)
 library(apeglm)
-library(Maaslin2)
-library(ANCOMBC)
+
 # Statistical analysis
+library(msa)
+library(vegan)
 library(future)
-library(EnvStats)
-library(sjlabelled)
-library(sjmisc)
-library(sjPlot)
+# library(EnvStats)
+# library(sjlabelled)
+# library(sjmisc)
+# library(sjPlot)
 library(nlme)
 library(lme4)
-library(jtools)
+# library(jtools)
 library(lazyeval)
 library(bigutilsr)
 
@@ -79,6 +72,4 @@ library(fs)
 # For table summary vis
 library(gtsummary) 
 library(webshot)
-
-
 

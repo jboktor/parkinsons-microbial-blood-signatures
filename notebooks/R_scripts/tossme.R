@@ -7,7 +7,7 @@ data.table::setDTthreads(n_workers)
 
 # ---- Inputs ----
 alignment_file <- "/resnick/groups/MazmanianLab/clarayu/full_run/fastqs/tsv_outputs/ERP000108/ERR011117.tsv"
-mmseq2_file <- "/central/scratch/clarayu/mmseq2_clustering/clusters/cluster50_cluster.tsv"
+mmseq2_file <- "/resnick/scratch/clarayu/mmseq2_clustering/clusters/cluster50_cluster.tsv"
 mmseq2_level <- "50%"
 read_ID <- "ERR011117"
 

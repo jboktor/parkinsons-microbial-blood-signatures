@@ -5,8 +5,8 @@ import subprocess as sp
 import time
 
 
-wkdir = '/central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/'
-scriptsdir = '/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/notebooks/shell_scripts/'
+wkdir = '/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/'
+scriptsdir = '/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/notebooks/shell_scripts/'
 fastq_raw = os.path.join(wkdir, "fastqs/")
 fastq_clean = os.path.join(wkdir, "clean_fastqs/")
 fastq_clean_stats = os.path.join(wkdir, "clean_fastqs_stats/")

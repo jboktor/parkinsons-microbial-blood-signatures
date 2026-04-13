@@ -10,8 +10,8 @@
 # Notify at the beginning, end of job and on failure.
 #SBATCH --mail-user=jboktor@caltech.edu   # email address
 #SBATCH --mail-type=FAIL
-#SBATCH --output=/central/scratch/jbok/slurmdump/ReadQC_%j.out
-#SBATCH --error=/central/scratch/jbok/slurmdump/ReadQC_%j.err
+#SBATCH --output=/resnick/scratch/jbok/slurmdump/ReadQC_%j.out
+#SBATCH --error=/resnick/scratch/jbok/slurmdump/ReadQC_%j.err
 
 # This scripts concuts bbduk read quality trimming on a per-file basis
 # forward, reverse, and singleton reads are processed independently
@@ -43,7 +43,7 @@ SAMPLE_IN="${INPUTDIR}$SAMPLEID"
 SAMPLE_OUT="${OUTPUTDIR}$SAMPLEID"
 SAMPLE_NAME=`echo ${SAMPLEID} | sed 's/.fq.gz//'`
 echo "PROCESSING SAMPLE: "$SAMPLEID
-cd /central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/clean_fastqs_stats/
+cd /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/clean_fastqs_stats/
 
 # This command conducts the following:
 # ______________________________________

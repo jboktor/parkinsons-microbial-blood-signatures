@@ -1,0 +1,679 @@
+---
+title: "cdr3-QTL Single-Cell Localization"
+editor: source
+author: "Joe Boktor"
+date: '2026-04-12'
+eval: false
+format:
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    fig-height: 8
+    fig-width: 14
+---
+
+This notebook localizes CDR3 risk scores (Ishigaki et al., 2022; [GitHub](https://github.com/immunogenomics/cdr3-QTL)) to specific T cell subtypes using external single-cell RNA-seq + TCR-seq datasets from Parkinson's disease studies:
+
+- **Wang et al. 2021** — Blood + CSF T cells (10x 5' GEX + V(D)J); 121K T cells, 21 clusters; [Cell Discovery](https://doi.org/10.1038/s41421-021-00280-3)
+- **Ma et al. 2025** — Post-mortem brain (SN + cortex) snRNA-seq + TCR-seq; 207K nuclei; [Nature Communications](https://doi.org/10.1038/s41467-025-62478-3)
+
+
+## Analysis Setup
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(janitor)
+library(glue)
+library(furrr)
+library(tictoc)
+library(progress)
+library(entropy)
+library(data.table)
+library(seqinr)
+library(nlme)
+library(broom.mixed)
+library(Seurat)
+# plotting
+library(ggsci)
+library(scico)
+library(plotly)
+library(aplot)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
+src_dir <- paste0(wkdir, "/notebooks")
+source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
+source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
+source(paste0(src_dir, "/R_scripts/compute_CDR3-risk-score.R"))
+scratch_dir <- "/resnick/scratch/jbok/PDMBS"
+metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
+entropy_dir <- glue("{wkdir}/data/interim/cdr3_entropy")
+entropy_plots_dir <- glue("{wkdir}/figures/AIRR/cdr3_entropy")
+git_dir <- glue("{home_dir}/git/cdr3-QTL")
+hla_plots_dir <- glue("{wkdir}/figures/AIRR/arcasHLA")
+hla_dir <- glue("{wkdir}/data/interim/airr/arcasHLA/analysis_cleaned")
+
+c3_pheno_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_phenotypes")
+gdata_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_hla_genotypes")
+hla_4d_to_aa_dir <- glue("{wkdir}/data/input/cdr3qtl/hla_4d_to_aa")
+tcr_cdr3_riskscore_dir <- glue("{wkdir}/data/interim/cdr3_qtl/scoring_cdr3-risk-scores")
+tcr_cdr3_riskscore_complied <-
+    glue("{wkdir}/data/interim/cdr3_qtl/scoring_cdr3-risk-scores_complied")
+
+# External single-cell data directories
+ext_sc_dir <- glue("{wkdir}/data/input/external_singlecell")
+wang_dir <- glue("{ext_sc_dir}/wang_2021")
+ma_dir <- glue("{ext_sc_dir}/ma_2025")
+sc_results_dir <- glue("{wkdir}/data/interim/cdr3_qtl/singlecell_localization")
+sc_figures_dir <- glue("{wkdir}/figures/CDR3-qtl/singlecell_localization")
+
+dir.create(wang_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(ma_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(sc_results_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(sc_figures_dir, showWarnings = FALSE, recursive = TRUE)
+
+future::plan(multisession, workers = 8)
+```
+
+
+# Study 1: Wang et al. 2021 — Blood & CSF T Cells
+
+## Download Wang et al. 2021 Data
+
+Data deposited on [Zenodo record 3993994](https://zenodo.org/record/3993994):
+
+- `counts.rds` (382MB) — raw count matrix
+- `normalized.rds` (417MB) — normalized expression matrix
+- `metadata.txt` (16MB) — cell annotations with T cell cluster labels + TCR info
+- `README.txt`
+
+CSF TCR data originally from Gate et al. (GEO: [GSE134578](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE134578)).
+
+```{r download-wang}
+zenodo_base <- "https://zenodo.org/record/3993994/files"
+wang_files <- c("counts.rds", "normalized.rds", "metadata.txt", "README.txt")
+
+for (f in wang_files) {
+    dest <- glue("{wang_dir}/{f}")
+    if (!file.exists(dest)) {
+        message(glue("Downloading {f} via curl..."))
+        exit_code <- system2("curl",
+            args = c("-L", "-o", shQuote(dest),
+                     "--retry", "3",
+                     "--retry-delay", "5",
+                     "-C", "-",
+                     shQuote(glue("{zenodo_base}/{f}"))),
+            stdout = "", stderr = ""
+        )
+        if (exit_code != 0) {
+            warning(glue("curl failed for {f} (exit code {exit_code})"))
+            if (file.exists(dest)) file.remove(dest)
+        }
+    } else {
+        message(glue("{f} already exists, skipping."))
+    }
+}
+
+# Verify downloads
+wang_downloaded <- file.info(list.files(wang_dir, full.names = TRUE))
+wang_downloaded$file <- basename(rownames(wang_downloaded))
+wang_downloaded %>% dplyr::select(file, size) %>% print()
+
+```
+
+
+## Load & Inspect Wang et al. 2021 Metadata
+
+```{r load-wang-metadata}
+wang_meta <- read.delim(glue("{wang_dir}/metadata.txt"), stringsAsFactors = FALSE) %>%
+    as_tibble() %>%
+    janitor::clean_names()
+
+message(glue("Wang et al. 2021: {nrow(wang_meta)} cells"))
+wang_meta %>% glimpse()
+
+# Inspect available columns — looking for CDR3, cell type, donor, condition
+wang_meta %>% colnames() %>% sort() %>% print()
+```
+
+
+## Extract CDR3-Beta Sequences with Cell Type Annotations
+
+```{r wang-extract-cdr3b}
+# Inspect TCR-related columns
+wang_meta %>%
+    dplyr::select(matches("cdr3|CDR3|trb|TRB|tcr|TCR|chain|clono", ignore.case = TRUE)) %>%
+    colnames() %>%
+    print()
+
+# Inspect cell type / cluster columns
+wang_meta %>%
+    dplyr::select(matches("cluster|cell.?type|subtype|annotation|ident", ignore.case = TRUE)) %>%
+    colnames() %>%
+    print()
+
+# Inspect condition/donor columns
+wang_meta %>%
+    dplyr::select(matches("condition|disease|status|group|donor|patient|sample|subject", ignore.case = TRUE)) %>%
+    colnames() %>%
+    print()
+
+```
+
+
+```{r wang-clean-cdr3b}
+# NOTE: Column names below need to be adjusted based on actual metadata column names
+# after inspecting the output from the chunk above.
+# Expected columns (rename as needed):
+#   - CDR3 beta AA sequence
+#   - Cell type / cluster annotation
+#   - Donor ID
+#   - Condition (PD vs HC)
+#   - Tissue (blood vs CSF)
+
+# Example mapping — UPDATE column names after inspection:
+wang_cdr3b <- wang_meta %>%
+    # rename(
+    #     cdr3b_aa = <CDR3_BETA_COLUMN>,
+    #     t_cell_subtype = <CLUSTER_COLUMN>,
+    #     donor_id = <DONOR_COLUMN>,
+    #     condition = <CONDITION_COLUMN>,
+    #     tissue = <TISSUE_COLUMN>
+    # ) %>%
+    # filter(!is.na(cdr3b_aa) & cdr3b_aa != "") %>%
+    # filter(nchar(cdr3b_aa) >= 12 & nchar(cdr3b_aa) <= 18) %>%
+    mutate(
+        study = "Wang_2021",
+        compartment = "peripheral"  # blood + CSF
+    ) %>%
+    glimpse()
+
+# CDR3 length distribution
+# wang_cdr3b %>%
+#     mutate(cdr3_len = nchar(cdr3b_aa)) %>%
+#     count(cdr3_len) %>%
+#     print()
+
+# T cell subtype breakdown
+# wang_cdr3b %>%
+#     count(t_cell_subtype, sort = TRUE) %>%
+#     print()
+
+# Condition breakdown
+# wang_cdr3b %>%
+#     count(condition) %>%
+#     print()
+```
+
+
+## Download CSF TCR Data (GSE134578)
+
+The CSF T cell TCR data used in Wang et al. 2021 comes from Gate et al. 2020 ([GSE134578](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE134578)).
+
+```{r download-csf-tcr}
+csf_dir <- glue("{wang_dir}/csf_GSE134578")
+dir.create(csf_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Download supplementary files from GEO
+# GEO FTP for supplementary data:
+csf_supp_url <- "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE134nnn/GSE134578/suppl/"
+
+# List files available — check manually or use:
+# system(glue("wget -r -np -nd -P {csf_dir} {csf_supp_url}"))
+
+message("Check GEO supplementary files at: ", csf_supp_url)
+message("Download TCR contig/clonotype files with cell barcodes and CDR3 sequences.")
+message("Files may include filtered_contig_annotations.csv or similar 10x VDJ output.")
+```
+
+
+```{r load-csf-tcr}
+# After downloading, load CSF TCR data
+# csf_files <- list.files(csf_dir, pattern = "\\.csv$|\\.tsv$|\\.txt$", full.names = TRUE)
+# message("CSF TCR files found: ", length(csf_files))
+# csf_files %>% print()
+
+# Load and process CSF TCR data — adjust based on actual file format
+# csf_tcr <- read_csv(csf_files[1]) %>%
+#     janitor::clean_names() %>%
+#     glimpse()
+
+# Extract CDR3-beta with cell annotations
+# csf_cdr3b <- csf_tcr %>%
+#     filter(chain == "TRB") %>%
+#     dplyr::select(barcode, cdr3, ...) %>%
+#     rename(cdr3b_aa = cdr3) %>%
+#     filter(nchar(cdr3b_aa) >= 12 & nchar(cdr3b_aa) <= 18) %>%
+#     mutate(
+#         study = "Wang_2021",
+#         tissue = "CSF",
+#         compartment = "CSF"
+#     )
+```
+
+
+# Study 4: Ma et al. 2025 — Brain T Cells (Substantia Nigra)
+
+## Download Ma et al. 2025 Data
+
+Processed data and supplementary materials deposited on Zenodo:
+
+- [Processed data](https://zenodo.org/records/19454949) — `data.zip` (6.7GB): snRNA-seq processed objects
+- [Supplementary data](https://zenodo.org/records/19457731) — `SupplementaryData.zip` (105MB): supplementary tables
+- [GitHub](https://github.com/dalhoomist/T-cell_and_glial_pathology_in_PD): analysis code
+
+```{r download-ma}
+# -- Processed data (6.7 GB) --
+ma_data_zip <- glue("{ma_dir}/data.zip")
+if (!file.exists(ma_data_zip)) {
+    message("Downloading Ma et al. 2025 processed data (6.7 GB)...")
+    system2("curl",
+        args = c("-L", "-o", shQuote(ma_data_zip),
+                 "--retry", "3", "--retry-delay", "5", "-C", "-",
+                 shQuote("https://zenodo.org/records/19454949/files/data.zip")),
+        stdout = "", stderr = ""
+    )
+} else {
+    message("data.zip already exists, skipping.")
+}
+
+# -- Supplementary data (105 MB) --
+ma_supp_zip <- glue("{ma_dir}/SupplementaryData.zip")
+if (!file.exists(ma_supp_zip)) {
+    message("Downloading Ma et al. 2025 supplementary data (105 MB)...")
+    system2("curl",
+        args = c("-L", "-o", shQuote(ma_supp_zip),
+                 "--retry", "3", "--retry-delay", "5", "-C", "-",
+                 shQuote("https://zenodo.org/records/19457731/files/SupplementaryData.zip")),
+        stdout = "", stderr = ""
+    )
+} else {
+    message("SupplementaryData.zip already exists, skipping.")
+}
+
+# Verify downloads
+file.info(c(ma_data_zip, ma_supp_zip)) %>%
+    mutate(file = basename(rownames(.))) %>%
+    dplyr::select(file, size) %>%
+    print()
+```
+
+
+## Extract & Inspect Ma et al. 2025 Archives
+
+```{r extract-ma}
+# Extract processed data
+ma_data_dir <- glue("{ma_dir}/data")
+if (!dir.exists(ma_data_dir)) {
+    message("Extracting data.zip...")
+    unzip(ma_data_zip, exdir = ma_dir)
+}
+
+# Extract supplementary data
+ma_supp_dir <- glue("{ma_dir}/SupplementaryData")
+if (!dir.exists(ma_supp_dir)) {
+    message("Extracting SupplementaryData.zip...")
+    unzip(ma_supp_zip, exdir = ma_dir)
+}
+
+# List contents
+message("=== Processed data contents ===")
+list.files(ma_data_dir, recursive = TRUE, full.names = FALSE) %>% print()
+
+message("\n=== Supplementary data contents ===")
+list.files(ma_supp_dir, recursive = TRUE, full.names = FALSE) %>% print()
+```
+
+
+## Load Ma et al. 2025 Single-Cell Data
+
+```{r load-ma-data}
+# Identify RDS/h5ad/h5seurat files in the extracted data
+ma_rds_files <- list.files(ma_data_dir, pattern = "\\.rds$|\\.RDS$",
+                           recursive = TRUE, full.names = TRUE)
+ma_h5_files <- list.files(ma_data_dir, pattern = "\\.h5ad$|\\.h5seurat$|\\.h5$",
+                          recursive = TRUE, full.names = TRUE)
+
+message("RDS files found:")
+ma_rds_files %>% print()
+message("H5 files found:")
+ma_h5_files %>% print()
+
+# Load the primary object — adjust path based on extracted contents
+# ma_obj <- readRDS(ma_rds_files[1])
+# OR: ma_obj <- SeuratDisk::LoadH5Seurat(ma_h5_files[1])
+
+# Inspect structure
+# ma_obj
+# head(ma_obj@meta.data) %>% glimpse()
+# colnames(ma_obj@meta.data) %>% sort() %>% print()
+```
+
+
+## Extract CDR3-Beta Sequences from Ma et al. 2025
+
+```{r ma-extract-cdr3b}
+# Check supplementary tables for TCR clonotype data
+ma_supp_files <- list.files(ma_supp_dir, recursive = TRUE, full.names = TRUE)
+ma_supp_files %>% print()
+
+# Look for TCR-related files
+ma_tcr_files <- ma_supp_files[grepl("tcr|TCR|clono|CDR3|vdj", ma_supp_files, ignore.case = TRUE)]
+message("TCR-related supplementary files:")
+ma_tcr_files %>% print()
+
+# Load TCR data — adjust based on actual file format
+# ma_tcr <- read_csv(ma_tcr_files[1]) %>%
+#     janitor::clean_names() %>%
+#     glimpse()
+```
+
+
+```{r ma-clean-cdr3b}
+# NOTE: Column names need to be adjusted based on actual data inspection.
+# The Ma et al. study identified 535 T cells in PD substantia nigra with
+# TCR sequences showing homology to alpha-synuclein-reactive clones.
+
+# Extract CDR3-beta sequences with cell annotations
+# ma_cdr3b <- ma_tcr %>%
+#     filter(chain == "TRB" | grepl("beta", chain, ignore.case = TRUE)) %>%
+#     rename(
+#         cdr3b_aa = <CDR3_COLUMN>,
+#         t_cell_subtype = <CELLTYPE_COLUMN>,
+#         donor_id = <DONOR_COLUMN>,
+#         condition = <CONDITION_COLUMN>
+#     ) %>%
+#     filter(!is.na(cdr3b_aa) & cdr3b_aa != "") %>%
+#     filter(nchar(cdr3b_aa) >= 12 & nchar(cdr3b_aa) <= 18) %>%
+#     mutate(
+#         study = "Ma_2025",
+#         tissue = "brain",
+#         compartment = "CNS"
+#     ) %>%
+#     glimpse()
+
+# T cell subtype breakdown
+# ma_cdr3b %>% count(t_cell_subtype, sort = TRUE) %>% print()
+# ma_cdr3b %>% count(condition) %>% print()
+```
+
+
+# Harmonize CDR3-Beta Data Across Studies
+
+```{r harmonize-cdr3b}
+# Combine CDR3-beta data from both studies
+# Standardize column names to: cell_id, donor_id, condition, tissue,
+#   t_cell_subtype, cdr3b_aa, study, compartment
+
+# all_cdr3b <- bind_rows(wang_cdr3b, ma_cdr3b) %>%
+#     mutate(
+#         # Standardize condition labels
+#         condition = case_when(
+#             grepl("PD|parkinson|case", condition, ignore.case = TRUE) ~ "PD",
+#             grepl("HC|healthy|control|ctrl", condition, ignore.case = TRUE) ~ "HC",
+#             TRUE ~ condition
+#         ),
+#         cdr3_len = nchar(cdr3b_aa)
+#     ) %>%
+#     glimpse()
+
+# Summary
+# message(glue("Total cells with CDR3-beta: {nrow(all_cdr3b)}"))
+# all_cdr3b %>% count(study, condition) %>% print()
+# all_cdr3b %>% count(study, compartment) %>% print()
+# all_cdr3b %>% count(study, t_cell_subtype, sort = TRUE) %>% print()
+
+# CDR3 length distribution by study
+# all_cdr3b %>%
+#     ggplot(aes(x = cdr3_len, fill = study)) +
+#     geom_bar(position = "dodge") +
+#     theme_bw() +
+#     labs(x = "CDR3-beta length (AA)", y = "Count", fill = "Study") +
+#     scale_fill_npg()
+
+# Save harmonized data
+# saveRDS(all_cdr3b, glue("{sc_results_dir}/harmonized_cdr3b_singlecell.rds"))
+```
+
+
+# Score CDR3-Beta Sequences with CDR3 Risk Score
+
+Applying the CDR3-QTL HLA risk score beta-coefficients (Ishigaki et al. 2022) to single-cell CDR3-beta sequences, using the same scoring function from [notebook 04](AIRR_cdr3-QTL_04-cdr3riskscore.qmd).
+
+## Load Pre-Computed Beta-Coefficients
+
+```{r load-betacoefs}
+resdir <- glue("{wkdir}/data/interim/cdr3_qtl/results_cdr3-risk-score")
+
+all_imgt_pos <- c(
+    "P104","P105","P106","P107","P108","P109","P110","P111",
+    "P111.1","P112.2","P112.1",
+    "P112","P113","P114","P115","P116","P117","P118")
+
+cdr3_betacoef <- list.files(resdir, pattern = ".csv", full.names = TRUE, recursive = TRUE) %>%
+    purrr::set_names(basename(.)) %>%
+    purrr::map(read_csv) %>%
+    bind_rows(.id = "file_name") %>%
+    mutate(
+        descriptor = basename(file_name) %>% gsub("lm_model_results__", "", .),
+        pheno = str_before_first(descriptor, "__"),
+        cdr3_pos = descriptor %>% str_after_first("CDR3pos-") %>% str_before_first("__"),
+        cdr3_len = descriptor %>% str_after_first("CDR3len-") %>% str_before_first(".csv")
+    ) %>%
+    janitor::clean_names() %>%
+    filter(!is.na(cdr3_aa))
+
+# Filter to significant associations
+cdr3_betacoef_sig <- cdr3_betacoef %>%
+    group_by(pheno) %>%
+    filter(term == "pd_hla_risk_score") %>%
+    mutate(adj_p = p.adjust(p_value, method = "BH")) %>%
+    filter(adj_p < 0.05) %>%
+    arrange(adj_p)
+
+betacoef_list <- cdr3_betacoef_sig %>% split(.$pheno)
+
+message(glue("Loaded {nrow(cdr3_betacoef_sig)} significant beta-coefficients across {length(betacoef_list)} phenotypes"))
+names(betacoef_list) %>% print()
+```
+
+
+## Score Single-Cell CDR3-Beta Sequences
+
+```{r score-cdr3b}
+# all_cdr3b <- readRDS(glue("{sc_results_dir}/harmonized_cdr3b_singlecell.rds"))
+
+# Get unique CDR3-beta sequences to avoid redundant scoring
+# unique_cdr3b <- unique(all_cdr3b$cdr3b_aa)
+# message(glue("Scoring {length(unique_cdr3b)} unique CDR3-beta sequences"))
+
+# Score across all phenotype types
+# tic("CDR3 risk scoring")
+# score_results <- list()
+# for (p in names(betacoef_list)) {
+#     message(glue("Scoring phenotype: {p}"))
+#     score_results[[p]] <- unique_cdr3b %>%
+#         purrr::set_names() %>%
+#         furrr::future_map_dbl(
+#             ~ score_tcrs_with_betacoefs(
+#                 x = .,
+#                 phenotype_type = p,
+#                 betacoef_list = betacoef_list
+#             )
+#         )
+# }
+# toc()
+
+# Convert to data frame
+# score_df <- score_results %>%
+#     purrr::imap(~ tibble(cdr3b_aa = names(.x), !!.y := .x)) %>%
+#     purrr::reduce(left_join, by = "cdr3b_aa")
+
+# message(glue("Scored {nrow(score_df)} unique CDR3-beta sequences"))
+# score_df %>% glimpse()
+```
+
+
+## Join Scores to Cell-Level Metadata
+
+```{r join-scores}
+# scored_cells <- all_cdr3b %>%
+#     left_join(score_df, by = "cdr3b_aa")
+
+# message(glue("Scored cells: {nrow(scored_cells)}"))
+# scored_cells %>% glimpse()
+
+# Save scored data
+# saveRDS(scored_cells, glue("{sc_results_dir}/scored_cdr3b_singlecell.rds"))
+```
+
+
+# Analyze CDR3 Risk Scores by T Cell Subtype
+
+## CDR3 Risk Score Distributions by Subtype
+
+```{r plot-scores-by-subtype}
+# scored_cells <- readRDS(glue("{sc_results_dir}/scored_cdr3b_singlecell.rds"))
+
+# Select a primary phenotype for visualization
+# primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
+
+# -- Per-study, per-subtype boxplot --
+# p_subtype_scores <- scored_cells %>%
+#     ggplot(aes(x = reorder(t_cell_subtype, .data[[primary_pheno]], FUN = median),
+#                y = .data[[primary_pheno]],
+#                fill = condition)) +
+#     geom_boxplot(outlier.size = 0.3, alpha = 0.8) +
+#     facet_wrap(~study, scales = "free_x") +
+#     coord_flip() +
+#     theme_bw() +
+#     labs(
+#         x = "T Cell Subtype",
+#         y = "CDR3 Risk Score",
+#         fill = "Condition",
+#         title = "CDR3 Risk Score by T Cell Subtype"
+#     ) +
+#     scale_fill_npg()
+
+# ggsave(
+#     filename = glue("{sc_figures_dir}/cdr3_riskscore_by_subtype.png"),
+#     plot = p_subtype_scores,
+#     width = 14, height = 10, dpi = 300
+# )
+# p_subtype_scores
+```
+
+
+## PD vs HC Comparison Within Each Subtype
+
+```{r pd-vs-hc-subtype}
+# primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
+
+# Statistical testing: PD vs HC within each subtype
+# subtype_tests <- scored_cells %>%
+#     group_by(study, t_cell_subtype) %>%
+#     filter(n_distinct(condition) == 2) %>%
+#     summarize(
+#         n_pd = sum(condition == "PD"),
+#         n_hc = sum(condition == "HC"),
+#         median_pd = median(.data[[primary_pheno]][condition == "PD"]),
+#         median_hc = median(.data[[primary_pheno]][condition == "HC"]),
+#         wilcox_p = tryCatch(
+#             wilcox.test(
+#                 .data[[primary_pheno]][condition == "PD"],
+#                 .data[[primary_pheno]][condition == "HC"]
+#             )$p.value,
+#             error = function(e) NA_real_
+#         ),
+#         .groups = "drop"
+#     ) %>%
+#     mutate(
+#         delta_median = median_pd - median_hc,
+#         adj_p = p.adjust(wilcox_p, method = "BH")
+#     ) %>%
+#     arrange(adj_p)
+
+# subtype_tests %>% print(n = 50)
+
+# saveRDS(subtype_tests, glue("{sc_results_dir}/subtype_wilcox_tests.rds"))
+```
+
+
+## Blood vs Brain Compartment Comparison
+
+```{r compartment-comparison}
+# Compare CDR3 risk score profiles across tissue compartments
+# primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
+
+# p_compartment <- scored_cells %>%
+#     ggplot(aes(x = compartment, y = .data[[primary_pheno]], fill = condition)) +
+#     geom_violin(alpha = 0.6, scale = "width") +
+#     geom_boxplot(width = 0.2, outlier.size = 0.3, position = position_dodge(0.9)) +
+#     theme_bw() +
+#     labs(
+#         x = "Compartment",
+#         y = "CDR3 Risk Score",
+#         fill = "Condition",
+#         title = "CDR3 Risk Score: Blood vs Brain"
+#     ) +
+#     scale_fill_npg()
+
+# ggsave(
+#     filename = glue("{sc_figures_dir}/cdr3_riskscore_compartment.png"),
+#     plot = p_compartment,
+#     width = 8, height = 6, dpi = 300
+# )
+# p_compartment
+```
+
+
+## Summary Heatmap: Mean CDR3 Risk Score by Subtype x Condition
+
+```{r summary-heatmap}
+# primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
+
+# heatmap_data <- scored_cells %>%
+#     group_by(study, t_cell_subtype, condition) %>%
+#     summarize(
+#         mean_score = mean(.data[[primary_pheno]]),
+#         n_cells = n(),
+#         .groups = "drop"
+#     )
+
+# p_heatmap <- heatmap_data %>%
+#     ggplot(aes(x = condition, y = t_cell_subtype, fill = mean_score)) +
+#     geom_tile() +
+#     geom_text(aes(label = n_cells), size = 2.5) +
+#     facet_wrap(~study, scales = "free_y") +
+#     scale_fill_scico(palette = "vik", midpoint = 0) +
+#     theme_bw() +
+#     labs(
+#         x = "Condition", y = "T Cell Subtype",
+#         fill = "Mean CDR3\nRisk Score",
+#         title = "CDR3 Risk Score Heatmap"
+#     )
+
+# ggsave(
+#     filename = glue("{sc_figures_dir}/cdr3_riskscore_heatmap.png"),
+#     plot = p_heatmap,
+#     width = 12, height = 10, dpi = 300
+# )
+# p_heatmap
+```
+
+
+## Session Info
+
+```{r session-info}
+sessionInfo()
+```

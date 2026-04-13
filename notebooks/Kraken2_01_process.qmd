@@ -20,9 +20,9 @@ format:
 This notebook will execute Kraken2 taxonomic assignment on quality control processed reads.
 
 ```{r}
-pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
-scratch_dir <- "/central/scratch/jbok/PDMBS"
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+pdmbs_dir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS"
+scratch_dir <- "/resnick/scratch/jbok/PDMBS"
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 src_dir <- paste0(wkdir, "/notebooks")
 source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
 source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
@@ -65,7 +65,7 @@ for (sampleID in sampleIDs[3]) {
         # desired output directory for reports
         " -r {data_out}",
         # directory containing input FQ.gz files
-        " -f /central/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads",
+        " -f /resnick/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads",
         # directory for classified reads to be output
         " -c {class_reads_out}"
       )
@@ -105,8 +105,8 @@ for (sampleID in sampleIDs) {
         " --error={slurm_out}/{jobname}.err",
         " {src_dir}/shell_scripts/kraken2-paired.sh",
         " -s {sampleID}",
-        " -r /central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/results/kraken2",
-        " -f /central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/clean_reads"
+        " -r /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/results/kraken2",
+        " -f /resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/clean_reads"
       )
     )
     # to prevent memory alloc issues
@@ -142,8 +142,8 @@ for (sampleID in run_list) {
       " --error={slurm_out}/{jobname}.err",
       " {src_dir}/shell_scripts/kraken2-paired.sh",
       " -s {sampleID}",
-      " -r '/central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/results/kraken2'",
-      " -f '/central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/clean_reads'"
+      " -r '/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/results/kraken2'",
+      " -f '/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/clean_reads'"
     )
   )
   # to prevent memory alloc issues

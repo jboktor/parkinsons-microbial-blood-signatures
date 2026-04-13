@@ -23,7 +23,7 @@ done
 source /home/${USER}/.bashrc
 source activate pdmbsR
 # move into scratch dir
-cd /central/scratch/jbok/tmp
+cd /resnick/scratch/jbok/tmp
 
 wget --no-check-certificate "${FILE_PATH}" && \
 gsutil cp ${FILE_NAME} "gs://shotgun-metagenomic-data/HMP2/${FILE_NAME}" && \

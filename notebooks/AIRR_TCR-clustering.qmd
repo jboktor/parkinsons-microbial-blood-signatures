@@ -20,17 +20,10 @@ Environment setup
 #| warning: false
 #| message: false
 
-library(tidyverse)
-library(janitor)
-library(styler)  
 library(glue)
 library(listenv)
-library(furrr)
-library(tictoc)
-library(progress)
 library(data.table)
 library(seqinr)
-library(progress)
 library(immunarch)
 library(nlme)
 library(broom)
@@ -47,17 +40,19 @@ library(ggpubr)
 library(ggrepel)
 library(scico)
 
-home_dir <- "/central/groups/MazmanianLab/joeB"
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
 ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 src_dir <- paste0(wkdir, "/notebooks")
+dint <- paste0(wkdir, "/data/interim")
+
 source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
 source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
 source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
 source(paste0(src_dir, "/R_scripts/_airr_analyze-permanova.R"))
 
-scratch_dir <- "/central/scratch/jbok/PDMBS"
+scratch_dir <- "/resnick/scratch/jbok/PDMBS"
 gliph2_plots_dir <- glue("{wkdir}/figures/AIRR/gliph2/")
 metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
 arcasHLA_interim <- glue("{wkdir}/data/interim/airr/arcasHLA")
@@ -238,9 +233,9 @@ The command below was executed in a slurm script found in `notebooks/shell_scrip
 
 ```{r}
 # # Running test
-# cd /central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/airr/gliph2/tcrb_results_test
+# cd /resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/gliph2/tcrb_results_test
 
-# /central/groups/MazmanianLab/joeB/software/gliph2/irtools.centos -c /central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/input/gliph2/param_files/gliph2_tcrb_TEST.cfg
+# /resnick/groups/MazmanianLab/jboktor/software/gliph2/irtools.centos -c /resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/input/gliph2/param_files/gliph2_tcrb_TEST.cfg
 
 # exec_path <- glue("{home_dir}/software/gliph2/irtools.centos")
 # gliph2_out_dir <- glue("{wkdir}/data/interim/airr/gliph2/tcrb_results")
@@ -256,7 +251,7 @@ The command below was executed in a slurm script found in `notebooks/shell_scrip
 # Running ClusTCR
 
 ```{r}
-# cd /central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/notebooks/python_scripts
+# cd /resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/notebooks/python_scripts
 # mamba activate clustcr
 # python run_clusTCR.py
 
@@ -382,11 +377,11 @@ cdr3_risk_score_df %>% glimpse()
 
 # olga/sonnia probabilities 
 genprob_case <- read_csv(
-  glue("{wkdir}/data/interim/olga_sonnia/results/tcrb_case_results/tcrb_case_results.csv")) %>% 
+  glue("{dint}/olga_sonnia/results/tcrb_case_results/tcrb_case_results.csv")) %>% 
   mutate(case_control_other_latest = "Case") %>% 
   dplyr::rename(CDR3b_aa = amino_acid, TRBV = v_gene, TRBJ = j_gene)
 genprob_ctrl <- read_csv(
-  glue("{wkdir}/data/interim/olga_sonnia/results/tcrb_ctrl_results/tcrb_ctrl_results.csv")) %>% 
+  glue("{dint}/olga_sonnia/results/tcrb_ctrl_results/tcrb_ctrl_results.csv")) %>% 
   mutate(case_control_other_latest = "Control") %>% 
   dplyr::rename(CDR3b_aa = amino_acid, TRBV = v_gene, TRBJ = j_gene)
 genprob <- bind_rows(genprob_case, genprob_ctrl) %>% 
@@ -452,7 +447,7 @@ Visualziing trends between Selection score and CDR3 risk score
 ```{r}
 clustcr_results_df <- readRDS(
   glue("{clustcr_dir}/results/compiled_clustcr_results_df_2025-08-24.rds")
-  )
+  )  %>% glimpse()
 clustcr_results_df %>% glimpse()
 
 cluster_sscore <- clustcr_results_df %>% 
@@ -470,7 +465,8 @@ cluster_stats <- clustcr_results_df %>%
 
 # visualziing top clusters by selection score and risk
 cluster_stats %>% glimpse()
-cluster_stats %>% 
+cluster_stats %>%
+  filter(avg_risk_score != 0) %>%
   filter(unique_donors_per_clust >= 10) %>% 
   filter(motif_length >= 9) %>% 
   select(cluster, avg_selection_score, avg_risk_score) %>% 
@@ -1382,7 +1378,7 @@ future::plan(future::multisession, workers = 15)
   #   "{gliph2_res_dir}/chi2_association_screening/",
   #   "{chi2_param_grid$meta_col[.]}_ITER-{chi2_param_grid$seed[.]}_2025-05-23.rds"))) %>%   
   furrr::future_walk(function(x) {
-    gliph2_res_dir <- "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/airr/gliph2/processing"   
+    gliph2_res_dir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/gliph2/processing"   
     result_cat <- cluster_meta_association(
       cluster_df = cluster_df_meta_f3,
       meta_df = full_meta_df,
@@ -1705,7 +1701,7 @@ print(var_imp)
 Setting up working directory
 
 ```{r}
-giana_src <- "/central/groups/MazmanianLab/joeB/git/GIANA"
+giana_src <- "/resnick/groups/MazmanianLab/jboktor/git/GIANA"
 giana_wkdir <- glue("{wkdir}/data/interim/giana")
 giana_input_dir <- glue("{wkdir}/data/interim/giana/input")
 giana_output_dir <- glue("{wkdir}/data/interim/giana/results")
@@ -1745,13 +1741,13 @@ shell_do(
   glue("sbatch {wkdir}/notebooks/shell_scripts/slurm_run_GIANA.sh")
 )
 
-# python /central/groups/MazmanianLab/joeB/git/GIANA/GIANA.4.1.py \
-#                 -f /central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/giana/input/full_tcrb_2025-07-10.tsv \
+# python /resnick/groups/MazmanianLab/jboktor/git/GIANA/GIANA.4.1.py \
+#                 -f /resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/giana/input/full_tcrb_2025-07-10.tsv \
 #                 -S 3         \     # Smith-Waterman score cutoff (↑ stricter) default value is 3.6 - lowered to allow for a variety of disease relavent TCR clusters
 #                 -t 10          \   # isometric distance cutoff (smaller → faster) default value is 10
 #                 -N 32          \   # threads for FAISS step
 #                 -v                 # exclude v_gene from clustering criteria
-#                 -o /central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/giana/results/
+#                 -o /resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/giana/results/
 
 
 

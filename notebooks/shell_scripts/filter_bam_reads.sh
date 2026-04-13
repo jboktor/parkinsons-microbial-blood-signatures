@@ -25,8 +25,8 @@ done
 source /home/${USER}/.bashrc
 source activate pdmbsR
 # define enviornmental vars
-# INPUT_DIR="/central/scratch/jbok/PDMBS/WGS/BAM-unmapped-raw"
-# OUTPUT_DIR="/central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS"
+# INPUT_DIR="/resnick/scratch/jbok/PDMBS/WGS/BAM-unmapped-raw"
+# OUTPUT_DIR="/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS"
 bam_filtered="${OUTPUT_DIR}/bam_unmapped/${SAMPLE_NAME}.bam"
 flagstat_dir="${OUTPUT_DIR}/flagstats/03_BAM-unmapped-3328-filtered"
 sequence_meta_dir="${OUTPUT_DIR}/sequence_metadata"

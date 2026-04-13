@@ -9,7 +9,7 @@ library(janitor)
 library(MVLM)
 library(broom)
 
-wkdir <- "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures"
+wkdir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr"
 c3_pheno_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_phenotypes")
 gdata_dir <- glue("{wkdir}/data/interim/cdr3_qtl/cdr3_hla_genotypes")
 

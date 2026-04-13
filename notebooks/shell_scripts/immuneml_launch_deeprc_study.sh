@@ -3,8 +3,8 @@
 # Usage: bash launch_deeprc_study.sh [S2S|LOSO|all]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIGS=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs
-LOG_DIR=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs
+CONFIGS=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs
+LOG_DIR=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs
 
 MODE=${1:-all}
 SUBMITTED=0

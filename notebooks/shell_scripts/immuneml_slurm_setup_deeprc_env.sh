@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=setup-deeprc-env
-#SBATCH --output=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/setup_deeprc_env_%j.out
-#SBATCH --error=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/setup_deeprc_env_%j.err
+#SBATCH --output=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/setup_deeprc_env_%j.out
+#SBATCH --error=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs/setup_deeprc_env_%j.err
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16GB
@@ -50,11 +50,11 @@ print('DeepRC imports OK')
 "
 
 echo "=== Now running minimal DeepRC test ==="
-RESULTS_DIR=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results/minimal_test_deeprc
+RESULTS_DIR=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results/minimal_test_deeprc
 rm -rf ${RESULTS_DIR}/*
 mkdir -p ${RESULTS_DIR}
 cd ${RESULTS_DIR}
 
-immune-ml /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs/ZZZ_minimal_test_deeprc.yaml .
+immune-ml /resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs/ZZZ_minimal_test_deeprc.yaml .
 
 echo "=== Done ==="

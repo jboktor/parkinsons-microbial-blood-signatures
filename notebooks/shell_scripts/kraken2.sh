@@ -25,17 +25,17 @@ done
 # Notify at the beginning, end of job and on failure.
 #SBATCH --mail-user=jboktor@caltech.edu   # email address
 #SBATCH --mail-type=FAIL
-#SBATCH --output=/central/scratch/jbok/kraken2_stdout/${SAMPLEID}_Kraken2_%j.out
+#SBATCH --output=/resnick/scratch/jbok/kraken2_stdout/${SAMPLEID}_Kraken2_%j.out
 
 #______________________________________________________________________________
 
 source /home/${USER}/.bashrc
-INPUTDIR='/central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/clean_fastqs/'
-OUTPUTDIR='/central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/results/kraken2/' 
-# SEQOUTDIR='/central/scratch/jbok/kraken_sequences/' 
+INPUTDIR='/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/clean_fastqs/'
+OUTPUTDIR='/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/results/kraken2/' 
+# SEQOUTDIR='/resnick/scratch/jbok/kraken_sequences/' 
 
 SAMPLEINPUT="${INPUTDIR}${SAMPLEID}"
-TEMPDIR='/central/scratch/jbok/krakenScratch/'
+TEMPDIR='/resnick/scratch/jbok/krakenScratch/'
 READSDIR="${TEMPDIR}${SAMPLEID}.fq.gz"
 
 echo "PROCESSING SAMPLE: "$SAMPLEID
@@ -46,7 +46,7 @@ echo "SAMPLE OUTPUT: "$READSDIR
 cat ${SAMPLEINPUT}"_1.fq.gz" ${SAMPLEINPUT}"_2.fq.gz" ${SAMPLEINPUT}"_single.fq.gz" > $READSDIR
 #______________________________________________________________________________
 
-refseq_kraken_run="kraken2 --db /central/groups/MazmanianLab/joeB/Downloads/refseq_pluspf_v4/ \
+refseq_kraken_run="kraken2 --db /resnick/groups/MazmanianLab/jboktor/Downloads/refseq_pluspf_v4/ \
 --threads 4 \
 --gzip-compressed \
 --classified-out "$OUTPUTDIR'RefSeqPlusPF_mapped/'${SAMPLEID}'__classified_RefSeqPlusPF.fastq'" \
@@ -56,7 +56,7 @@ $refseq_kraken_run
 gzip $OUTPUTDIR"RefSeqPlusPF_mapped/"${SAMPLEID}"__classified_RefSeqPlusPF.fastq"
 
 
-uhgg_kraken_run="kraken2 --db /central/groups/MazmanianLab/joeB/Downloads/uhgg_kraken2-db/ \
+uhgg_kraken_run="kraken2 --db /resnick/groups/MazmanianLab/jboktor/Downloads/uhgg_kraken2-db/ \
 --threads 4 \
 --gzip-compressed \
 --classified-out "$OUTPUTDIR'UHGG_mapped/'${SAMPLEID}'__classified_UHGG.fastq'" \
@@ -66,7 +66,7 @@ $uhgg_kraken_run
 gzip $OUTPUTDIR"UHGG_mapped/"${SAMPLEID}"__classified_UHGG.fastq"
 
 
-WoL_kraken_run="kraken2 --db /central/groups/MazmanianLab/joeB/WebOfLife/databases/kraken2/ \
+WoL_kraken_run="kraken2 --db /resnick/groups/MazmanianLab/jboktor/WebOfLife/databases/kraken2/ \
 --threads 4 \
 --gzip-compressed \
 --classified-out "$OUTPUTDIR'WoL_mapped/'${SAMPLEID}'__classified_WoL.fastq'" \

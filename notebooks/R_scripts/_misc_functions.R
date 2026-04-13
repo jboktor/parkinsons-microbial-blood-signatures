@@ -235,7 +235,7 @@ wget_download_slurm <- function(jobname,
       " --error={slurm_out}/{jobname}.err",
       " --time={walltime}",
       " --mem-per-cpu={mem_per_cpu}",
-      " /central/home/jboktor/slurm_wget.sh",
+      " /resnick/home/jboktor/slurm_wget.sh",
       " -u {download_link}",
       " -o {output_dir}"
     )
@@ -285,7 +285,7 @@ shell_do_krakenunique <- function(id,
   message("Processing: ", id, "\n")
   ku_cmd <- glue(
     "krakenuniq",
-    " --db /central/groups/MazmanianLab/joeB/Downloads/RefDBs/KrakenUniq/MicrobialDB",
+    " --db /resnick/groups/MazmanianLab/jboktor/Downloads/RefDBs/KrakenUniq/MicrobialDB",
     " --threads {threads}",
     " --paired",
     " --preload",

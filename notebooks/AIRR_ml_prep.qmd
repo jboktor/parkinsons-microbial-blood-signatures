@@ -53,7 +53,7 @@ library(aplot)
 library(patchwork)
 library(ggpubr)
 
-home_dir <- "/central/groups/MazmanianLab/jboktor"
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
 ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
 wkdir <- paste0(pdmbs_dir, "/pdairr")
@@ -62,7 +62,7 @@ source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
 source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
 source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
 source(paste0(src_dir, "/R_scripts/_airr_analyze-permanova.R"))
-scratch_dir <- "/central/scratch/jbok/PDMBS"
+scratch_dir <- "/resnick/scratch/jbok/PDMBS"
 metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
 imm_plots_dir <- glue("{wkdir}/figures/AIRR/immunarch")
 
@@ -193,9 +193,9 @@ clonotype_volume_pid_df <- tcrb_df %>%
   glimpse()
 
 clonotype_volume_pid_df$clonal_volume %>% summary()
-clonotype_volume_pid_df %>% 
-    filter(clonal_volume < 600) %>% 
-    glimpse()
+# clonotype_volume_pid_df %>% 
+#     filter(clonal_volume < 1000) %>% 
+#     glimpse()
 
 ```
 
@@ -252,7 +252,7 @@ purrr::walk2(
   airr_fmt_tcrb_list, 
   names(airr_fmt_tcrb_list),
   function(df, sample_name) {
-    imml_input_rep <- "/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/sample_repertoires"
+    imml_input_rep <- "/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/sample_repertoires"
     output_path <- glue::glue("{imml_input_rep}/{sample_name}.tsv")
     # write_csv(df, output_path)
     write_tsv(df, output_path)
@@ -279,7 +279,7 @@ purrr::walk2(
   airr_fmt_tcrb_list_pids, 
   names(airr_fmt_tcrb_list_pids),
   function(df, sample_name) {
-    imml_input_rep <- "/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires"
+    imml_input_rep <- "/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires"
     output_path <- glue::glue("{imml_input_rep}/{sample_name}.tsv")
     write_tsv(df, output_path)
   }
@@ -299,7 +299,26 @@ full_pid_meta <- metadata %>%
     mutate(subject_id = participant_id) %>%
     filter(participant_id %in% unique(tcrb_df$participant_id)) %>%
     mutate(ID = subject_id) %>% # for deepRC
+    left_join(clonotype_volume_pid_df, by = c("subject_id" = "participant_id")) %>%
+    # NOTE: Here we remove participants with clonal volume < 500
+    filter(clonal_volume >= 500) %>%
+    mutate(clonal_volume_binned = cut(clonal_volume,
+        breaks = quantile(clonal_volume, probs = seq(0, 1, 0.2), na.rm = TRUE),
+        include.lowest = TRUE,
+        labels = paste0(1:5)
+    ) %>% as.numeric()
+    ) %>%
+    mutate(age_at_baseline_binned = cut(age_at_baseline,
+        breaks = quantile(age_at_baseline, probs = seq(0, 1, 0.2), na.rm = TRUE),
+        include.lowest = TRUE,
+        labels = paste0(1:5)
+    ) %>% as.numeric()
+    ) %>%
+    # filter(clonal_volume_binned != "NA") %>%
     glimpse()
+
+full_pid_meta$clonal_volume_binned %>% table()
+full_pid_meta$age_at_baseline_binned %>% table()
 
 # Save metadata for ImmuneML analysis
 readr::write_csv(full_pid_meta,
@@ -318,7 +337,6 @@ readr::write_csv(full_pid_meta %>% filter(study == "HBS"),
     glue("{imml_root}/metadata/metadata_pid_hbs.csv")
     )
 
-
 # For LOSO Models
 readr::write_csv(full_pid_meta %>% filter(study != "PDBP"),
     glue("{imml_root}/metadata/metadata_pid_pdbp_loso.csv")
@@ -332,6 +350,23 @@ readr::write_csv(full_pid_meta %>% filter(study != "BioFIND"),
 readr::write_csv(full_pid_meta %>% filter(study != "HBS"), 
     glue("{imml_root}/metadata/metadata_pid_hbs_loso.csv")
     )
+
+# TST Data for pipeline dev
+set.seed(123)
+full_pid_meta %>% filter(study == "PDBP") %>% 
+    group_by(case_control_other_latest) %>% 
+    sample_n(20) %>% 
+    readr::write_csv(.,
+    glue("{imml_root}/metadata/MINIMAL_TEST_metadata_pid_pdbp.csv")
+    )
+full_pid_meta %>% filter(study == "PPMI") %>% 
+    group_by(case_control_other_latest) %>% 
+    sample_n(20) %>% 
+    readr::write_csv(.,
+    glue("{imml_root}/metadata/MINIMAL_TEST_metadata_pid_ppmi.csv")
+    )
+
+
 
 ```
 

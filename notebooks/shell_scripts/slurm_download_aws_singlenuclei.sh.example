@@ -6,8 +6,8 @@
 #SBATCH --time=1-00:00:00   # time limit
 #SBATCH --mail-user=jboktor@caltech.edu   # email address
 #SBATCH --mail-type=FAIL   # Notify on failure.
-#SBATCH --output=/central/groups/MazmanianLab/joeB/single_nuclei_data/download_%j.log
-#SBATCH --error=/central/groups/MazmanianLab/joeB/single_nuclei_data/download_%j.err
+#SBATCH --output=/resnick/groups/MazmanianLab/jboktor/single_nuclei_data/download_%j.log
+#SBATCH --error=/resnick/groups/MazmanianLab/jboktor/single_nuclei_data/download_%j.err
 
 source /home/${USER}/.bashrc
 module load awscli/1.27.84-gcc-13.2.0-bnn4tw3
@@ -17,7 +17,7 @@ export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 
-cd /central/groups/MazmanianLab/joeB/single_nuclei_data/
+cd /resnick/groups/MazmanianLab/jboktor/single_nuclei_data/
 
 s5cmd cp "s3://scrap-dm/UCSF_CAT/BW12971/*" ./2025-03-09/
 # aws s3 cp s3://scrap-dm/UCSF_CAT/BW12971/ ./2025-03-09/ --recursive --no-guess-mime-type

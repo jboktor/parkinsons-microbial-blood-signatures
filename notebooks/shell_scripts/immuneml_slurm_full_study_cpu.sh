@@ -11,8 +11,8 @@ source /home/${USER}/.bashrc
 # Args: $1 = design (S2S or LOSO), $2 = yaml filename (without .yaml)
 DESIGN=$1
 CONFIG_NAME=$2
-CONFIGS=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs/${DESIGN}
-RESULTS=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results/${DESIGN}
+CONFIGS=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs/${DESIGN}
+RESULTS=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results/${DESIGN}
 
 echo "=== Running ${DESIGN}/${CONFIG_NAME} ==="
 echo "Start time: $(date)"

@@ -4,7 +4,7 @@ library(glue)
 
 # This script is supposed to be run within a cloned git repo of pogorely/ALICE .. moved here for record keeping
 
-wkdir <- "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures"
+wkdir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr"
 load("VDJT.rda")
 source("ALICE.R")
 
@@ -55,7 +55,7 @@ tcrb_alice <- ALICE_pipeline(
 print(sapply(tcrb_alice, nrow))
 
 output_dir <- glue(
-    "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures",
+    "/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr",
     "/data/interim/ALICE"
 )
 saveRDS(tcrb_alice,

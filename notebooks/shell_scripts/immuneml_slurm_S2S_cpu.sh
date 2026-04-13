@@ -9,8 +9,8 @@
 source /home/${USER}/.bashrc
 
 MODEL_NAME=$1
-CONFIGS=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs
-RESULTS=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results
+CONFIGS=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs
+RESULTS=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results
 
 echo "=== Running S2S_test_${MODEL_NAME} ==="
 echo "Start time: $(date)"

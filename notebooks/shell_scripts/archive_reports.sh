@@ -10,18 +10,18 @@
 # Notify at the beginning, end of job and on failure.
 #SBATCH --mail-user=jboktor@caltech.edu   # email address
 #SBATCH --mail-type=FAIL
-#SBATCH --output=/central/scratch/jbok/slurmdump/Archive_Krakens_%j.out
+#SBATCH --output=/resnick/scratch/jbok/slurmdump/Archive_Krakens_%j.out
 
 source /home/${USER}/.bashrc
 source activate wol
 
-cd /central/groups/MazmanianLab/joeB/PDMBS/classification
+cd /resnick/groups/MazmanianLab/jboktor/PDMBS/classification
 today=$(date +"%Y-%m-%d")
 
 # place archived files in scratch folder for now (remove scratch prefix later)
-tar -cvf /central/scratch/jbok/RefSeqPlusPF_mapped_reports_${today}.tar RefSeqPlusPF_mapped/*report_RefSeqPlusPF.tsv
-tar -cvf /central/scratch/jbok/UHGG_mapped_reports_${today}.tar UHGG_mapped/*report_UHGG.tsv
-tar -cvf /central/scratch/jbok/WoL_mapped_reports_${today}.tar WoL_mapped/*report_WoL.tsv
+tar -cvf /resnick/scratch/jbok/RefSeqPlusPF_mapped_reports_${today}.tar RefSeqPlusPF_mapped/*report_RefSeqPlusPF.tsv
+tar -cvf /resnick/scratch/jbok/UHGG_mapped_reports_${today}.tar UHGG_mapped/*report_UHGG.tsv
+tar -cvf /resnick/scratch/jbok/WoL_mapped_reports_${today}.tar WoL_mapped/*report_WoL.tsv
 
 
 # kraken-biom RefSeqPlusPF_mapped/*_report_RefSeqPlusPF.tsv \

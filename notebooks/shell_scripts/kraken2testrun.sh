@@ -19,15 +19,15 @@
 source /home/${USER}/.bashrc
 source activate wol
 
-kraken2 --db /central/groups/MazmanianLab/joeB/WebOfLife/databases/kraken2/ \
+kraken2 --db /resnick/groups/MazmanianLab/jboktor/WebOfLife/databases/kraken2/ \
 -threads 2 \
 --gzip-compressed \
---classified-out /central/groups/MazmanianLab/joeB/PDBM/WoL_mapped/BF-1002__classified_WoL.tsv \
---unclassified-out /central/groups/MazmanianLab/joeB/PDBM/WoL_mapped/BF-1002__unclassified_WoL.tsv \
---report /central/groups/MazmanianLab/joeB/PDBM/WoL_mapped/BF-1002__report_WoL.tsv \
-<(cat /central/groups/MazmanianLab/joeB/PDBM/test_input/BF-1002_single.fq.gz && /home/jboktor/bbmap/bbmerge-auto.sh in1=/central/groups/MazmanianLab/joeB/PDBM/test_input/BF-1002_1.fq.gz in2=/central/groups/MazmanianLab/joeB/PDBM/test_input/BF-1002_2.fq.gz)
+--classified-out /resnick/groups/MazmanianLab/jboktor/PDBM/WoL_mapped/BF-1002__classified_WoL.tsv \
+--unclassified-out /resnick/groups/MazmanianLab/jboktor/PDBM/WoL_mapped/BF-1002__unclassified_WoL.tsv \
+--report /resnick/groups/MazmanianLab/jboktor/PDBM/WoL_mapped/BF-1002__report_WoL.tsv \
+<(cat /resnick/groups/MazmanianLab/jboktor/PDBM/test_input/BF-1002_single.fq.gz && /home/jboktor/bbmap/bbmerge-auto.sh in1=/resnick/groups/MazmanianLab/jboktor/PDBM/test_input/BF-1002_1.fq.gz in2=/resnick/groups/MazmanianLab/jboktor/PDBM/test_input/BF-1002_2.fq.gz)
 
-# kraken2 --db /central/groups/MazmanianLab/joeB/Downloads/refseq_pluspf_v4/ \
+# kraken2 --db /resnick/groups/MazmanianLab/jboktor/Downloads/refseq_pluspf_v4/ \
 # --threads 4 \
 # --gzip-compressed \
 # --classified-out testrun/test_classfied_refseq.tsv \
@@ -39,7 +39,7 @@ kraken2 --db /central/groups/MazmanianLab/joeB/WebOfLife/databases/kraken2/ \
 # <(cat testdatacp/BF-1003_single.fq.gz && $HOME/FLASH-1.2.11-Linux-x86_64/flash --max-overlap 150  testdatacp/BF-1003_1.fq.gz testdatacp/BF-1003_2.fq.gz) 
 
 
-# kraken2 --db /central/groups/MazmanianLab/joeB/Downloads/uhgg_kraken2-db/ \
+# kraken2 --db /resnick/groups/MazmanianLab/jboktor/Downloads/uhgg_kraken2-db/ \
 # --threads 16 \
 # --gzip-compressed \
 # --classified-out test_classified_uhgg.tsv \
@@ -47,5 +47,5 @@ kraken2 --db /central/groups/MazmanianLab/joeB/WebOfLife/databases/kraken2/ \
 # --report test_report_uhgg \
 # testdata/618fa114-17bc-49fc-95c1-56667e68cebc_cram_to_fastq_workflow_8d71236f-cdd5-4d19-9c62-75f5484601d1_call-cram_to_fastq_attempt-2_BF-1003_single.fq.gz
 
-#--db /central/groups/MazmanianLab/joeB/WebOfLife/databases/kraken2/ \
-#--db /central/groups/MazmanianLab/joeB/Downloads/refseq_pluspf_v4/ \
+#--db /resnick/groups/MazmanianLab/jboktor/WebOfLife/databases/kraken2/ \
+#--db /resnick/groups/MazmanianLab/jboktor/Downloads/refseq_pluspf_v4/ \

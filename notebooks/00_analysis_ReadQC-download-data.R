@@ -1,6 +1,6 @@
 
 # install.packages("tidyverse",  dependences = TRUE, 
-#                  lib = "/central/groups/MazmanianLab/joeB/R-Libraries/")
+#                  lib = "/resnick/groups/MazmanianLab/jboktor/R-Libraries/")
 
 library(glue)
 library(purrr)
@@ -10,8 +10,8 @@ library(dplyr)
 library(stringr)
 
 # Download and save bbduk stdout QC file
-pdmbs_dir = "/central/groups/MazmanianLab/joeB/PDMBS/"
-setwd(glue("{pdmbs_dir}parkinsons-microbial-blood-signatures") )
+pdmbs_dir = "/resnick/groups/MazmanianLab/jboktor/PDMBS/"
+setwd(glue("{pdmbs_dir}pdairr") )
 
 # create list of all file paths
 clean_fqs <- glue("{pdmbs_dir}workflow/WGS/clean_fastqs")

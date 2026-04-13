@@ -54,16 +54,16 @@ library(patchwork)
 library(ggpubr)
 library(ggrepel)
 
-home_dir <- "/central/groups/MazmanianLab/joeB"
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
 ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 src_dir <- paste0(wkdir, "/notebooks")
 source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
 source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
 source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
 
-scratch_dir <- "/central/scratch/jbok/PDMBS"
+scratch_dir <- "/resnick/scratch/jbok/PDMBS"
 sonnia_dir <- glue("{wkdir}/data/interim/olga_sonnia")
 sonnia_output_dir <- glue("{sonnia_dir}/results")
 sonnia_analysis_dir <- glue("{sonnia_dir}/analysis")

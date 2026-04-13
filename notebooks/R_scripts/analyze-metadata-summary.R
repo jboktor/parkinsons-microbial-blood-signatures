@@ -2,9 +2,9 @@
 # Caltech - Mazmanian Lab
 # Dec 2021
 
-pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+pdmbs_dir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS"
 wgs_wkdir <- paste0(pdmbs_dir, "/workflow/WGS")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
 source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
 library(phyloseq)

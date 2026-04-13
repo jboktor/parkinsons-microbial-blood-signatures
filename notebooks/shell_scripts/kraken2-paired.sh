@@ -26,8 +26,8 @@ source /home/${USER}/.bashrc
 source activate pdmbsR
 # define enviornmental vars
 threads=$SLURM_CPUS_PER_TASK 
-# REPORT_DIR="/central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/results/kraken2"
-# FASTQ_DIR="/central/groups/MazmanianLab/joeB/PDMBS/workflow/WGS/clean_reads"
+# REPORT_DIR="/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/results/kraken2"
+# FASTQ_DIR="/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/WGS/clean_reads"
 FORWARD_RD="${FASTQ_DIR}/${SAMPLE_NAME}_R1.fastq.gz"
 REVERSE_RD="${FASTQ_DIR}/${SAMPLE_NAME}_R2.fastq.gz"
 
@@ -58,9 +58,9 @@ kraken_run() {
 }
 
 # UHGG Classification
-time kraken_run "UHGG" "/central/groups/MazmanianLab/joeB/Downloads/uhgg_kraken2-db/"
+time kraken_run "UHGG" "/resnick/groups/MazmanianLab/jboktor/Downloads/uhgg_kraken2-db/"
 #"/dev/shm/uhgg_kraken2-db/"
 
 # RefSeqPlusPF Classification
-time kraken_run "RefSeqPlusPF" "/central/groups/MazmanianLab/joeB/Downloads/refseq_pluspf_v4/"
+time kraken_run "RefSeqPlusPF" "/resnick/groups/MazmanianLab/jboktor/Downloads/refseq_pluspf_v4/"
 #  "/dev/shm/refseq_pluspf_v4/"

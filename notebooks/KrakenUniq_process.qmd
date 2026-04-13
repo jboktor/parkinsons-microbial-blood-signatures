@@ -29,15 +29,15 @@ library(stringr)
 library(ggsci)
 library(aplot)
 
-home_dir <- "/central/groups/MazmanianLab/joeB"
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
 ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 src_dir <- paste0(wkdir, "/notebooks")
 source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
 source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
 load_dot_env(glue("{wkdir}/.env"))
-scratch_dir <- "/central/scratch/jbok/PDMBS"
+scratch_dir <- "/resnick/scratch/jbok/PDMBS"
 
 ```
 
@@ -46,7 +46,7 @@ Download the MicrobialDB KrakenUniq Indexes from: https://benlangmead.github.io/
 
 ```{r, eval = FALSE}
 log_dir <- glue("{wkdir}/.cluster_runs/{get_time()}_KrakenUniq_MicrobialDB_Download")
-outdir <- "/central/groups/MazmanianLab/joeB/Downloads/RefDBs/KrakenUniq/MicrobialDB"
+outdir <- "/resnick/groups/MazmanianLab/jboktor/Downloads/RefDBs/KrakenUniq/MicrobialDB"
 dir.create(log_dir, recursive = T, showWarnings = F)
 dir.create(outdir, recursive = T, showWarnings = F)
 
@@ -77,7 +77,7 @@ Generating a batchtools parameter dataframe.
 bowtie2_cleaned_reads <-
   data.frame(
     paths =
-      list.files("/central/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads",
+      list.files("/resnick/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads",
         full.names = TRUE
       )
   )
@@ -92,7 +92,7 @@ batchtools_params_krakenUniq <- bowtie2_cleaned_reads %>%
   ) %>%
   pivot_wider(names_from = fr, values_from = paths) %>%
     mutate(
-      outputdir = "/central/scratch/jbok/PDMBS/WGS/KrakenUniq_results",
+      outputdir = "/resnick/scratch/jbok/PDMBS/WGS/KrakenUniq_results",
       threads = 4,
       wkdir = wkdir
     )
@@ -141,7 +141,7 @@ submitJobs(jobs,
 
 Move results into group dir
 ```{r}
-list.files("/central/scratch/jbok/PDMBS/WGS/KrakenUniq_results",
+list.files("/resnick/scratch/jbok/PDMBS/WGS/KrakenUniq_results",
   full.names = TRUE, pattern = "_report.tsv"
   ) %>%
   file.copy(

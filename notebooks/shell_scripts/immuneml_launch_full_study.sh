@@ -3,9 +3,9 @@
 # Usage: bash launch_full_study.sh [S2S|LOSO|all]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIGS=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs
-RESULTS=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results
-LOG_DIR=/central/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs
+CONFIGS=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/configs
+RESULTS=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results
+LOG_DIR=/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/.cluster_runs
 
 MODE=${1:-all}
 SUBMITTED=0

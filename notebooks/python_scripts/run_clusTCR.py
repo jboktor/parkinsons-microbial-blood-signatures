@@ -7,7 +7,7 @@ from clustcr import Clustering
 import pandas as pd
 import pickle
 
-wkdir = '/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/interim/clusTCR'
+wkdir = '/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/clusTCR'
 # clustering = Clustering()
 clustering = Clustering(n_cpus=31)
 

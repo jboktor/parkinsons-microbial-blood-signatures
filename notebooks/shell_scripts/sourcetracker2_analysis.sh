@@ -10,12 +10,12 @@
 # Notify at the beginning, end of job and on failure.
 #SBATCH --mail-user=<jboktor>@caltech.edu   # email address
 #SBATCH --mail-type=FAIL
-#SBATCH --output=/central/scratch/jbok/slurmdump/Sourcetracker2_%j.out
+#SBATCH --output=/resnick/scratch/jbok/slurmdump/Sourcetracker2_%j.out
 
 
 source /home/${USER}/.bashrc
 source activate st2
-cd /central/groups/MazmanianLab/joeB/PDBM
+cd /resnick/groups/MazmanianLab/jboktor/PDBM
 
 
 sourcetracker2 gibbs -i classification/RefSeqPlusPF_kraken2.biom -m RefSeqPlusPF_mapping.txt -o st2analysis/ --jobs 10 

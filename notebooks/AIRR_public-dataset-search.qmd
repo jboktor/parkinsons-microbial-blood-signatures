@@ -55,17 +55,17 @@ library(ggpubr)
 library(scico)
 library(ggside)
 
-home_dir <- "/central/groups/MazmanianLab/joeB"
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
 ref_dir <- paste0(home_dir, "/Downloads/RefDBs")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 src_dir <- paste0(wkdir, "/notebooks")
 source(paste0(src_dir, "/R_scripts/_load-core-pkgs.R"))
 source(paste0(src_dir, "/R_scripts/_misc_functions.R"))
 source(paste0(src_dir, "/R_scripts/_airr-modeling_funcs.R"))
 source(paste0(src_dir, "/R_scripts/_airr_analyze-permanova.R"))
 source(paste0(src_dir, "/R_scripts/_airr_mcpas_vdjdb_funcs.R"))
-scratch_dir <- "/central/scratch/jbok/PDMBS"
+scratch_dir <- "/resnick/scratch/jbok/PDMBS"
 refdir <- glue("{wkdir}/data/input/reference_datasets")
 metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
 mcpas_stats_dir <- glue("{metrics_dir}/association_screening_McPAS")

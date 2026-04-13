@@ -1,7 +1,7 @@
 
-pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+pdmbs_dir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS"
 wgs_wkdir <- paste0(pdmbs_dir, "/workflow/WGS")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
 source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
 library(phyloseq)
@@ -858,8 +858,8 @@ mixed_reads_rates %>%
 
 
 
-pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+pdmbs_dir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS"
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
 source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
 library(janitor)
@@ -912,9 +912,9 @@ cat(
 
 
 
-pdmbs_dir <- "/central/groups/MazmanianLab/joeB/PDMBS"
+pdmbs_dir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS"
 wgs_wkdir <- paste0(pdmbs_dir, "/workflow/WGS")
-wkdir <- paste0(pdmbs_dir, "/parkinsons-microbial-blood-signatures")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
 source(paste0(wkdir, "/notebooks/R_scripts/_misc_functions.R"))
 source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
 
@@ -926,11 +926,11 @@ source(paste0(wkdir, "/notebooks/R_scripts/_load-core-pkgs.R"))
 hcom2 <- readxl::read_xlsx(glue("{wkdir}/1-s2.0-S0092867422009904-mmc2 (2).xlsx"), sheet = 'hCom2')
 gzfiles <- hcom2 %>% pull(Public_URI) %>% keep(grepl(".gz", .))
 for (f in gzfiles) {
-  shell_do(glue("wget -P /central/groups/MazmanianLab/shared/reference_genomes/hCom2/ {f}"))
+  shell_do(glue("wget -P /resnick/groups/MazmanianLab/shared/reference_genomes/hCom2/ {f}"))
 }
 gca_files <- read.table("gca_loc.txt", sep = "\t")
 for (f in gca_files$V1) {
-  shell_do(glue("wget {f} -P /central/groups/MazmanianLab/shared/reference_genomes/hCom2/"))
+  shell_do(glue("wget {f} -P /resnick/groups/MazmanianLab/shared/reference_genomes/hCom2/"))
 }
 
 
@@ -950,9 +950,9 @@ for (f in gca_files$V1) {
 
 
 # library(SRAdb)
-# if(!file.exists('/central/groups/MazmanianLab/joeB/Downloads/SRAmetadb.sqlite')) {
-#   system("wget https://gbnci.cancer.gov/sra/SRAmetadb.sqlite.gz -P /central/groups/MazmanianLab/joeB/Downloads/")
-#   system("gunzip /central/groups/MazmanianLab/joeB/Downloads/SRAmetadb.sqlite.gz")
+# if(!file.exists('/resnick/groups/MazmanianLab/jboktor/Downloads/SRAmetadb.sqlite')) {
+#   system("wget https://gbnci.cancer.gov/sra/SRAmetadb.sqlite.gz -P /resnick/groups/MazmanianLab/jboktor/Downloads/")
+#   system("gunzip /resnick/groups/MazmanianLab/jboktor/Downloads/SRAmetadb.sqlite.gz")
 #   sqlfile <<- 'SRAmetadb.sqlite'
 # }
 # sqlfile <<- 'SRAmetadb.sqlite'
@@ -1223,8 +1223,8 @@ run_list <- sampleIDs_rna %>%
 
 # bowtie2_cmd <- glue(
 #   "bowtie2 -x {bowtiew_ind}",
-#   " -b /central/groups/MazmanianLab/joeB/PDMBS/SY-PDZH104KR2.sam",
-#   " -S /central/groups/MazmanianLab/joeB/PDMBS/REMAPPED_SY-PDZH104KR2.sam",
+#   " -b /resnick/groups/MazmanianLab/jboktor/PDMBS/SY-PDZH104KR2.sam",
+#   " -S /resnick/groups/MazmanianLab/jboktor/PDMBS/REMAPPED_SY-PDZH104KR2.sam",
 #   # " --align-paired-reads",
 #   " --preserve-tags"
 # )
@@ -1246,23 +1246,23 @@ run_list <- sampleIDs_rna %>%
 
 
 tst <- read.delim(
-  glue("/central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/stats_clean_reads_bowtie2_CHM13/PP-92834-SVM6T1_stderr.txt"),
+  glue("/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/stats_clean_reads_bowtie2_CHM13/PP-92834-SVM6T1_stderr.txt"),
   header = FALSE
 )
 suppressWarnings(has_error_message(
-  glue("/central/groups/MazmanianLab/joeB/PDMBS/workflow/RNASEQ/stats_clean_reads_bowtie2_CHM13/PP-92834-SVM6T1_stderr.txt")
+  glue("/resnick/groups/MazmanianLab/jboktor/PDMBS/workflow/RNASEQ/stats_clean_reads_bowtie2_CHM13/PP-92834-SVM6T1_stderr.txt")
 ))
 
 fsize <- sampleIDs %>%
   purrr::set_names() %>%
-  purrr::map( ~ file.size(glue("/central/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads/{.}_R1.fastq.gz")))
+  purrr::map( ~ file.size(glue("/resnick/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads/{.}_R1.fastq.gz")))
 
 fsize %>% unlist() %>% sort()  %>%  head(200)
 
 
 
 # # KrakenUniq test run command
-# krakenuniq --db /central/groups/MazmanianLab/joeB/Downloads/RefDBs/KrakenUniq/MicrobialDB \
+# krakenuniq --db /resnick/groups/MazmanianLab/jboktor/Downloads/RefDBs/KrakenUniq/MicrobialDB \
 # --threads 8 \
 # --paired \
 # --preload \
@@ -1270,18 +1270,18 @@ fsize %>% unlist() %>% sort()  %>%  head(200)
 # --report-file testrun_KrakenUniq_report.tsv \
 # --only-classified-output \
 # --classified-out testrun_classified.fastq \
-# /central/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads/PP-40543_R1.fastq.gz \
-# /central/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads/PP-40543_R2.fastq.gz
+# /resnick/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads/PP-40543_R1.fastq.gz \
+# /resnick/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads/PP-40543_R2.fastq.gz
 
 
-# krakenuniq --db /central/groups/MazmanianLab/joeB/Downloads/RefDBs/KrakenUniq/MicrobialDB \
+# krakenuniq --db /resnick/groups/MazmanianLab/jboktor/Downloads/RefDBs/KrakenUniq/MicrobialDB \
 # --threads 8 \
 # --paired \
 # --preload \
 # --output testrun2_KrakenUniq_read-classification.tsv \
 # --report-file testrun2_KrakenUniq_report.tsv \
-# /central/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads/PP-40543_R1.fastq.gz \
-# /central/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads/PP-40543_R2.fastq.gz
+# /resnick/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads/PP-40543_R1.fastq.gz \
+# /resnick/scratch/jbok/PDMBS/WGS/bowtie2_clean_reads/PP-40543_R2.fastq.gz
 
 
 

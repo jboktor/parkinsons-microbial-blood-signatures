@@ -10,7 +10,7 @@ metadata <- readRDS(
 pilot_pids <- metadata$participant_id %>% unique()
 
 # Read the Excel file
-pbmc_inventory <- read_excel("/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/input/temp/PBMC_Inventory_ForResearcher_9-15-2025.xlsx") %>% 
+pbmc_inventory <- read_excel("/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/input/temp/PBMC_Inventory_ForResearcher_9-15-2025.xlsx") %>% 
     janitor::clean_names() %>% 
     mutate(participant_id = glue::glue("PP-{id}")) %>% 
     glimpse()
@@ -177,7 +177,7 @@ sample_info_table_for_grant <- full_sample_set %>%
   tally()
 
 readr::write_csv(sample_info_table_for_grant, 
-  "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures/data/input/temp/sample_info_table_for_grant.csv"
+  "/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/input/temp/sample_info_table_for_grant.csv"
   )
 
 

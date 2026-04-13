@@ -5,7 +5,7 @@ require(tidyverse)
 require(furrr)
 require(nlme)
 
-wkdir <- "/central/groups/MazmanianLab/joeB/PDMBS/parkinsons-microbial-blood-signatures"
+wkdir <- "/resnick/groups/MazmanianLab/jboktor/PDMBS/pdairr"
 metrics_dir <- glue("{wkdir}/data/interim/airr/immunarch/metrics_tcrb")
 mcpas_stats_dir <- glue("{metrics_dir}/association_screening_McPAS")
 vdjdb_stats_dir <- glue("{metrics_dir}/association_screening_VDJdb")
