@@ -67,12 +67,13 @@ KeyError: 'ID'
 Added before `DeepRCRepDatasetSubset(...)`:
 ```python
 if indices is None:
-    indices = np.arange(len(full_dataset))
+    indices = np.arange(len(full_dataset.target_features))
 ```
 
 **Why:** `_predict_proba` calls `make_data_loader` with `indices=None` to use all samples,
 but DeepRC's `DeepRCRepDatasetSubset.__init__` calls `np.asarray(indices, dtype=np.int)`
-which fails on None with `TypeError: int() argument must be a string...`.
+which fails on None. Must use `target_features` length (from metadata CSV), NOT
+`len(full_dataset)` which returns `n_samples` from HDF5 (all samples, not just the subset).
 
 ---
 
