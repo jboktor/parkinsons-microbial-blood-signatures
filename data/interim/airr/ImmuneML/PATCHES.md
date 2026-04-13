@@ -76,5 +76,34 @@ which fails on None with `TypeError: int() argument must be a string...`.
 
 ---
 
-**Note:** All three patches must be reapplied if the `immuneml_deeprc` environment is recreated.
+---
+
+## DeepRC._model_predict missing sequence_lengths arg (immuneML v3.0.21)
+
+**File patched:** `immuneml_deeprc` conda env:
+`$CONDA_PREFIX/lib/python3.11/site-packages/immuneML/ml_methods/classifiers/DeepRC.py`
+
+**Line ~416 — `_model_predict` method:**
+
+Original:
+```python
+logit_outputs = model(inputs, n_sequences)
+```
+
+Patched:
+```python
+logit_outputs = model(inputs, sequence_lengths, n_sequences)
+```
+
+**Why:** The `deeprc` package's `DeepRC.forward()` signature is
+`forward(self, inputs_flat, sequence_lengths_flat, n_sequences_per_bag)` — 3 positional args.
+The immuneML wrapper omitted `sequence_lengths`, causing:
+```
+TypeError: DeepRC.forward() missing 1 required positional argument: 'n_sequences_per_bag'
+```
+The training code in `deeprc.training.train` correctly passes all 3 args.
+
+---
+
+**Note:** All four patches must be reapplied if the `immuneml_deeprc` environment is recreated.
 Consider reporting upstream to https://github.com/immuneML/immuneML/issues.
