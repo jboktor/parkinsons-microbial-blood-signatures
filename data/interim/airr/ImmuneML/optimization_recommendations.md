@@ -1,343 +1,333 @@
-# ImmuneML Transfer-Study Optimization Diagnostic & Recommendations
+# ImmuneML Transfer-Study Optimization Recommendations (Dataset-Aware)
 
 **Date:** 2026-04-14
-**Based on:** 95/96 completed jobs across S2S (4-way pairwise) + LOSO transfer-study matrix
+**Scope:** 95/96 completed jobs from the S2S + LOSO matrix
 
 ---
 
-## 1. Current State Diagnostic
+## 0. Dataset Structure — Hard Constraints for Tuning
 
-### Performance Summary
+Every recommendation below is grounded in the actual shape of this dataset:
 
-| Model | N runs | Mean bacc | Min | Max | Std | Verdict |
-|---|---|---|---|---|---|---|
-| **kmer_rf** | 16 | 0.516 | 0.430 | 0.594 | 0.038 | Modest signal, best variance |
-| **kmer_logreg** | 16 | 0.514 | 0.431 | 0.602 | 0.040 | Best peak (0.602), interpretable |
-| **kmer_svm** | 16 | 0.507 | 0.449 | 0.566 | 0.030 | Weak signal |
-| **pubclone** | 15 | 0.499 | 0.436 | 0.549 | 0.034 | At chance, slight nonzero signal |
-| **compairr** | 14 | 0.500 | 0.500 | 0.500 | 0.000 | **Completely at chance** (red flag) |
-| **deeprc** | 16 | 0.500 | 0.500 | 0.500 | 0.000 | **Completely at chance** (undertrained) |
+| Study | N samples | Clonal volume (min / median / max) |
+|---|---|---|
+| **BioFIND** | 174 | 501 / 1077 / 4661 |
+| **PDBP** | 1234 | 500 / 1916 / 16000 |
+| **PPMI** | 1421 | 500 / 3088 / 14896 |
+| **HBS** | 746 | 936 / 3903 / 8464 |
 
-### Wall Time by Model
+- Every repertoire was **pre-filtered to clonal_volume ≥ 500** (see `AIRR_ml_prep.qmd` line 304).
+- **Median depth 1,000-4,000 sequences/repertoire.** This is ~100× shallower than the datasets DeepRC / CompAIRR were designed for (Emerson 2017 had ~10⁵ seqs/repertoire; Rawat 2020 used ~10⁶).
+- Metadata includes binned covariates: `sex`, `age_at_baseline_binned` (1-5), `clonal_volume_binned` (1-5), `ethnicity`, `race` — use these for `PerformancePerLabel` to detect confounders.
 
-| Model | Mean (min) | Min (min) | Max (min) |
+**Implications for hyperparameters:**
+1. DeepRC `sample_n_sequences` must be ≤ minimum repertoire size (~500). My earlier suggestion of 10,000 was wrong — that exceeds every repertoire.
+2. Nested 5×5 CV on BioFIND means ~78 train / 20 val / 20 test per fold. DeepRC will overfit badly at this scale — restrict deep methods to PDBP/PPMI/HBS or LOSO folds that combine them.
+3. CompAIRR `p_value_threshold=0.001` is statistically unreachable when each repertoire only contains ~1k unique clones — effectively no feature can pass Bonferroni-corrected significance.
+
+---
+
+## 1. CRITICAL: Current Transfer-Study Design Bug
+
+Every current S2S config defines both `train_dataset` (e.g., PDBP) and `test_dataset` (e.g., PPMI), but the `TrainMLModel` instruction only references:
+
+```yaml
+instructions:
+  S2S_pdbp_to_ppmi_kmer_logreg:
+    type: TrainMLModel
+    dataset: train_dataset    # ← only train_dataset is used!
+    assessment:
+      split_strategy: random
+      training_percentage: 0.7  # ← 70/30 random split WITHIN PDBP
+```
+
+**What this means:** The "PDBP → PPMI" run is actually *PDBP train / 30% of PDBP test* — **it never touches PPMI at all.** The `test_dataset` block is imported but ignored. So our entire "transfer-study matrix" is currently measuring within-cohort generalization, not cross-cohort transfer.
+
+### Fix: use `MLApplication` as a second instruction, chained after `TrainMLModel`
+
+```yaml
+instructions:
+  train_on_pdbp:
+    type: TrainMLModel
+    dataset: pdbp_dataset
+    assessment:
+      split_strategy: stratified_k_fold
+      split_count: 5
+    selection:
+      split_strategy: stratified_k_fold
+      split_count: 5
+    labels: [{case_control_other_latest: {positive_class: Case}}]
+    # …
+
+  apply_to_ppmi:
+    type: MLApplication
+    dataset: ppmi_dataset
+    config_path: train_on_pdbp/optimal_case_control_other_latest/  # path to trained model
+    label: case_control_other_latest
+    metrics: [auc, balanced_accuracy, precision, recall, f1_micro]
+```
+
+This runs CV on the train study to pick the best model, then **actually applies it** to the held-out test study. Without this fix, **the transfer-study results so far are not transfer results** — they're within-PDBP, within-PPMI, etc., labelled with the wrong destination.
+
+**Priority: fix this before spending more GPU time on DeepRC.**
+
+---
+
+## 2. Per-Model Recommendations (Dataset-Grounded)
+
+### 2A. DeepRC — needs data-scaled retraining
+
+| Param | Current | Recommended | Rationale |
 |---|---|---|---|
-| kmer_rf | 62 | 5 | 149 |
-| kmer_svm | 61 | 6 | 160 |
-| kmer_logreg | 90 | 8 | 228 |
-| compairr | 139 | 7 | 394 |
-| pubclone | 188 | 5 | 1182 |
-| deeprc | 487 | 5 | 1076 |
+| `n_updates` | 10,000 | **100,000** | Paper used 10⁵ as minimum; 3×10⁵ is overkill for small repertoires |
+| `evaluate_at` | 2,000 | 5,000 | Paper default |
+| `sample_n_sequences` | 2,000 | **500** | Must be ≤ smallest repertoire (clonal_volume floor is 500) |
+| `kernel_size` | 5 | `[5, 7]` sweep | Start shorter — our CDR3β ~8-11 AAs |
+| `n_kernels` | 16 | 32 | Paper optimum |
+| `n_additional_convs` | 1 | 1 | Keep shallow to prevent overfit at ~1000-sample train sets |
+| `l2_weight_decay` | 0.001 | **0.001 (keep)** | Strong regularization IS warranted at this depth |
+| `learning_rate` | 5e-5 | 5e-5 | Keep |
 
-### Resource Failures
-- **2 LOSO CompAIRR jobs OOM at 600GB** (BioFIND/HBS LOSO = 2829-3401 samples)
-  - CompAIRR distance matrix scales O(N²) — 3400² ≈ 12M pairs
-  - Need sharding or the `--no-matrix` flag
+**Do NOT run DeepRC on BioFIND-only training** (174 samples × 0.7 = 122; nested CV gets ~78 train). It will overfit. Restrict DeepRC to:
+- Single-study training: PDBP, PPMI, HBS (all ≥ 746 samples)
+- All 4 LOSO configs (train sets 2154-3401 samples)
 
-### Critical Diagnostic Gaps
-1. **No per-fold CV metrics** — we can't tell if the modest kmer signal is fold-stable or fluke
-2. **No train vs test performance comparison** — can't detect overfitting
-3. **No learning curves** for DeepRC — can't tell if it's plateaued, diverged, or just not trained long enough
-4. **No confusion matrices** — don't know if models are biased toward one class
-5. **No attention/motif extraction** from DeepRC — can't interpret what signal the model did/didn't learn
-6. **Single random split per assessment** (split_count=1) — point estimate, no confidence interval
+That's 3 S2S-source studies × 3 test targets + 4 LOSO = **13 DeepRC runs instead of 16**.
+
+### 2B. K-mer Models — Keep & Extend
+
+K-mer models are the only ones showing real signal (0.43-0.60 range). Extend the encoding space:
+
+```yaml
+encodings:
+  kmer3_all:         # current, keep
+    KmerFrequency: {k: 3, sequence_encoding: continuous_kmer, normalization_type: relative_frequency, reads: all, scale_to_unit_variance: true, scale_to_zero_mean: true, sequence_type: amino_acid, region_type: IMGT_CDR3}
+  kmer4_all:         # add — longer motifs
+    KmerFrequency: {k: 4, sequence_encoding: continuous_kmer, normalization_type: relative_frequency, reads: all, scale_to_unit_variance: true, scale_to_zero_mean: true, sequence_type: amino_acid, region_type: IMGT_CDR3}
+  gapped_2_2:        # add — non-contiguous motifs
+    KmerFrequency: {k_left: 2, k_right: 2, min_gap: 0, max_gap: 3, sequence_encoding: gapped_kmer, normalization_type: relative_frequency, sequence_type: amino_acid, region_type: IMGT_CDR3}
+```
+
+For ML methods, add elastic net:
+
+```yaml
+log_reg_elastic:
+  LogisticRegression:
+    penalty: elasticnet
+    l1_ratio: [0.1, 0.5, 0.9]
+    C: [0.001, 0.01, 0.1, 1.0, 10.0]
+    max_iter: 10000
+    solver: saga
+  model_selection_cv: true
+  model_selection_n_folds: 5
+```
+
+### 2C. CompAIRR — Reduce memory AND relax threshold
+
+```yaml
+compairr_1mm:
+  CompAIRRSequenceAbundance:
+    compairr_path: /central/groups/MazmanianLab/jboktor/software/compairr/src/compairr
+    p_value_threshold: [0.05, 0.01, 0.001]   # sweep; shallow depth needs relaxed
+    ignore_genes: true                        # huge memory + time saving
+    threads: 8
+    sequence_batch_size: 5000                 # default 10000; reduce for LOSO large datasets
+    keep_temporary_files: false
+```
+
+For LOSO CompAIRR (2800-3400 train samples), even this may OOM. Options:
+- Raise SLURM `--mem=900GB`
+- Or subsample the LOSO train set to ≤ 2000 samples (stratified by study and class) first
+
+### 2D. Pubclone — Broaden hyperparameter grid
+
+```yaml
+seq_abundance:
+  SequenceAbundance:
+    p_value_threshold: [0.5, 0.1, 0.01]      # current 0.1 only; sweep
+prob_binary:
+  ProbabilisticBinaryClassifier:
+    max_iterations: 1000                      # current 200
+    update_rate: 0.01
+```
+
+Add `comparison_attributes: [amino_acid_sequence, v_gene, j_gene]` if V/J genes are in the AIRR files — this increases specificity.
+
+### 2E. Assessment/Selection — Fix Statistical Power
+
+**All configs currently use:**
+```yaml
+assessment: {split_strategy: random, split_count: 1, training_percentage: 0.7}
+```
+This gives a single point estimate, no CI, no way to detect overfitting.
+
+**Recommended for within-study CV (before MLApplication to other studies):**
+```yaml
+assessment: {split_strategy: stratified_k_fold, split_count: 5}
+selection:  {split_strategy: stratified_k_fold, split_count: 5}
+```
+
+**For transfer-study (PDBP→PPMI):** use the `MLApplication` pattern above. The `TrainMLModel` step does 5×5 nested CV on PDBP only; `MLApplication` applies the refit model to PPMI. Reports on PPMI become out-of-distribution performance.
 
 ---
 
-## 2. Root Cause Analysis
+## 3. Diagnostic Reports — Add Everywhere
 
-### Why DeepRC = 0.500 (undertrained)
+| Report | What it tells us | Requirement |
+|---|---|---|
+| `ConfusionMatrix` | Is the model biased toward one class? | All models |
+| `ROCCurve` / `ROCCurveSummary` | Per-fold ROC curves with mean ± SD | All models |
+| `PrecisionRecallCurveSummary` | Better than ROC under class imbalance | All models |
+| `TrainingPerformance` | Train vs test metrics — detects overfit | All models |
+| `MLSettingsPerformance` | Compare settings side-by-side in one plot | All models |
+| `Coefficients` (`n_largest: 100`) | Top features for interpretability | LogReg, SVM-linear, RF |
+| `PerformancePerLabel` | Stratified by covariate — detect confounders | All models |
+| `DeepRCMotifDiscovery` | Integrated gradients on PD-positive samples | DeepRC only |
+| `KernelSequenceLogo` | Visualize CNN kernel motifs | DeepRC only |
+| `DesignMatrixExporter` | Dump encoded feature matrix for external analysis | K-mer models |
+| `SignificantKmerPositions` | Which CDR3 positions contribute | K-mer models |
 
-Our config uses:
-```yaml
-n_updates: 10000        # 30× below paper's 300,000
-evaluate_at: 2000
-sample_n_sequences: 2000  # Paper uses 10,000
-kernel_size: 5           # Paper's original sweep: 5–9
-n_kernels: 16            # Paper sweep: 8–32
-```
-
-The original DeepRC paper ([Widrich et al. 2020](https://proceedings.neurips.cc/paper/2020/hash/da4902cb0bc38210839714ebdcf0efc3-Abstract.html)) states:
-> "Every 5×10³ updates, the current model was evaluated against the validation fold. The early stopping hyperparameter was determined by selecting the model with the best loss on the validation fold after **10⁵ updates**."
-
-**We trained for 10⁴ — one order of magnitude below the minimum.**
-
-### Why CompAIRR = 0.500 (no signal found)
-
-Our config: `p_value_threshold: 0.001` with `max_edit_distance=1` (1mm).
-
-At shallow sequencing depth with only ~500-5000 sequences per repertoire, no individual TCR clone reaches Bonferroni-corrected significance. The spec sheet called this out as expected:
-> "Expected AUROC ≈ 0.50 (chance) due to shallow depth. Serves as lower bound."
-
-### Why K-mer models show modest signal but with large pair-to-pair variance
-
-The variance in performance across study pairs (std ≈ 0.04) suggests **batch effects dominate**. BioFIND as training set consistently produces better models — likely because BioFIND has different library prep/sequencing characteristics that are learned by the simpler k-mer models.
-
----
-
-## 3. Optimization Recommendations
-
-### 3A. DeepRC — Highest Priority
-
-**Parameter changes (aligned with published spec):**
+**`PerformancePerLabel` alternative_labels to use** (all available in our metadata):
 
 ```yaml
-ml_methods:
-  deeprc_model:
-    DeepRC:
-      # Core training length (30× increase)
-      n_updates: 300000        # was 10000
-      evaluate_at: 10000       # was 2000
-
-      # Architecture (from paper optimal)
-      kernel_size: 9           # was 5; Rawat used 9 for longer motifs
-      n_kernels: 32            # was 16; grid [16, 32]
-      n_additional_convs: 2    # was 1
-      n_attention_network_layers: 2
-      n_attention_network_units: 64  # was 32
-
-      # Input sampling (match paper)
-      sample_n_sequences: 10000  # was 2000
-
-      # Regularization (critical for shallow-depth data)
-      learning_rate: 5.0e-5
-      l2_weight_decay: 0.0001   # was 0.001; reduce to allow signal
-      l1_weight_decay: 0
-
-      # Batch size + workers
-      training_batch_size: 4
-      n_workers: 4
-
-      pytorch_device_name: cuda:0
+perf_by_sex:
+  PerformancePerLabel:
+    alternative_label: sex
+    metric: balanced_accuracy
+perf_by_age_bin:
+  PerformancePerLabel:
+    alternative_label: age_at_baseline_binned
+    metric: balanced_accuracy
+perf_by_depth_bin:
+  PerformancePerLabel:
+    alternative_label: clonal_volume_binned   # ← critical: reveals depth-as-signal confound
+    metric: balanced_accuracy
 ```
 
-**SLURM changes:**
-```bash
-#SBATCH --gres=gpu:nvidia_h200:1   # or h100
-#SBATCH --time=72:00:00            # 300k updates takes longer
-#SBATCH --mem=64GB                 # more headroom for large repertoires
-#SBATCH --cpus-per-task=8          # feed GPU faster
-```
+**Do NOT include `alternative_label: study`** in S2S configs — S2S trains within one study so there's no variation. Only use it in LOSO configs.
 
-**Expected speedup:** H200 is ~3× faster than P100 for transformer/attention workloads. 300k updates × 3× = ~9× total compute, but H200 cuts it to 3× wall-time.
-
-### 3B. DeepRC Diagnostic Reports — Critical for Interpretability
-
-Add these reports to every DeepRC config:
+**One-time data characterization reports** (run once via `ExploratoryAnalysisInstruction`, not in every model config):
 
 ```yaml
-reports:
-  # Training curves per fold
-  roc_summary: ROCCurveSummary
-  pr_curve: PrecisionRecallCurveSummary
-  ml_settings: MLSettingsPerformance
-  conf_matrix: ConfusionMatrix
-
-  # DeepRC-specific interpretability
-  deeprc_motifs:
-    DeepRCMotifDiscovery:
-      threshold: 0.5         # IG contribution threshold
-      n_steps: 50            # IG integration steps
-
-  # Per-class performance stratified by covariates
-  perf_sex:
-    PerformancePerLabel:
-      alternative_label: sex
-      metric: balanced_accuracy
-  perf_age:
-    PerformancePerLabel:
-      alternative_label: age_at_baseline_binned
-      metric: balanced_accuracy
-```
-
-### 3C. K-mer Model Optimizations
-
-**Current K-mer signal exists — amplify it:**
-
-```yaml
-encodings:
-  # Add 4-mer for longer motifs
-  kmer4_all:
-    KmerFrequency:
-      k: 4
-      sequence_encoding: continuous_kmer
-      normalization_type: l2     # try L2 instead of relative_frequency
-      reads: all
-      sequence_type: amino_acid
-      region_type: IMGT_CDR3
-
-  # Gapped k-mers capture non-contiguous motifs
-  gapped_3mer:
-    KmerFrequency:
-      k_left: 2
-      k_right: 2
-      min_gap: 0
-      max_gap: 3
-      sequence_encoding: gapped_kmer
-      normalization_type: relative_frequency
-
-ml_methods:
-  log_reg_elastic:
-    LogisticRegression:
-      penalty: elasticnet
-      l1_ratio: [0.1, 0.5, 0.9]     # sweep L1/L2 mix
-      C: [0.001, 0.01, 0.1, 1.0, 10.0]
-      max_iter: 10000
-      solver: saga
-    model_selection_cv: true
-    model_selection_n_folds: 5
-```
-
-### 3D. Assessment Split Strategy — Fix Statistical Power
-
-**Current:**
-```yaml
-assessment:
-  split_strategy: random
-  split_count: 1          # SINGLE split, no CI
-  training_percentage: 0.7
-```
-
-**Recommended:**
-```yaml
-assessment:
-  split_strategy: stratified_k_fold  # ensures class balance
-  split_count: 5                     # get mean ± SD across 5 folds
-  reports:
-    models: [coefficients, conf_matrix, roc]
-selection:
-  split_strategy: stratified_k_fold
-  split_count: 5
-```
-
-This gives us:
-- 5-fold × 5-fold nested CV = 25 models trained
-- Can detect train/test gap per fold
-- Confidence intervals on bacc
-- Robust to unlucky splits
-
-### 3E. CompAIRR Memory Fix
-
-```yaml
-encodings:
-  compairr_1mm:
-    CompAIRRSequenceAbundance:
-      compairr_path: /central/groups/MazmanianLab/jboktor/software/compairr/src/compairr
-      p_value_threshold: [0.01, 0.001, 0.0001]  # less strict; grid sweep
-      ignore_genes: true       # was false; huge memory/time savings
-      threads: 8               # was default
-      keep_temporary_files: false
-      sequence_batch_size: 10000  # default; reduce for LOSO large
-```
-
-**SLURM:** Use `--mem=900GB` for LOSO datasets (the 2 that failed).
-
-### 3F. Pubclone (ProbabilisticBinaryClassifier)
-
-Current threshold `p_value_threshold: 0.1` may be too strict (or too loose).
-
-```yaml
-encodings:
-  seq_abundance:
-    SequenceAbundance:
-      p_value_threshold: [0.5, 0.1, 0.01]  # sweep
-      comparison_attributes:
-        - amino_acid_sequence
-        - v_gene          # add V gene for specificity
-        - j_gene
-ml_methods:
-  prob_binary:
-    ProbabilisticBinaryClassifier:
-      max_iterations: 1000    # was 200
-      update_rate: 0.01
-```
-
-### 3G. Universal Data Reports (add once, run everywhere)
-
-```yaml
-reports:
-  # Understand dataset balance/diversity
-  label_dist: LabelDist
-  seq_count_dist: SequenceCountDistribution
-  shannon: ShannonDiversityOverview
-  repertoire_summary:
-    RepertoireClonotypeSummary:
-      color_label: case_control_other_latest
-  aa_freq:
-    AminoAcidFrequencyDistribution:
-      label: case_control_other_latest
-      split_by_label: true
-      alignment: IMGT
-      region_type: IMGT_CDR3
+label_dist: LabelDist
+seq_count_dist: SequenceCountDistribution
+shannon_diversity: ShannonDiversityOverview
+clonotype_summary:
+  RepertoireClonotypeSummary:
+    color_label: case_control_other_latest
+aa_freq_by_disease:
+  AminoAcidFrequencyDistribution:
+    label: case_control_other_latest
+    split_by_label: true
+    alignment: IMGT
+    region_type: IMGT_CDR3
 ```
 
 ---
 
-## 4. SLURM Resource Recommendations
+## 4. SLURM Strategy — CPU and GPU Stay SEPARATE
 
-| Tier | Model | Partition | GPU | RAM | Time | CPUs |
+**The existing split in `shell_scripts/` is correct and must be preserved:**
+- `immuneml_slurm_full_study_cpu.sh` → expansion partition, no GPU
+- `immuneml_slurm_full_study_deeprc.sh` → gpu partition, 1 GPU
+
+**Do not combine these into one array.** Each partition has different limits, each GPU tier (P100 vs H200) has different queue behavior, and mixing them in an array breaks scheduling.
+
+### Proposed structure: Two independent arrays
+
+**Array A — CPU models (expansion partition)**
+- 80 jobs (5 CPU models × 16 study pairs)
+- Generate from `immuneml_generate_S2S_yamls.py`
+- Submit as `--array=0-79%30` (max 30 concurrent)
+- Single SLURM script, reads yaml name from a manifest file indexed by `$SLURM_ARRAY_TASK_ID`
+
+**Array B — DeepRC GPU (gpu partition, H200)**
+- 13 jobs (DeepRC on 3 S2S-source studies × 3 targets + 4 LOSO; skip BioFIND-as-source)
+- Submit as `--array=0-12%8` (max 8 concurrent H200s)
+- Separate SLURM script with H200 `--gres` and 72h walltime
+
+### CPU resource tiers (within Array A, use `--mem` per-job based on model)
+
+Different CPU models have different memory profiles. Submit them as separate arrays per tier, not one monolithic array, to avoid over-allocating memory for fast jobs:
+
+| Tier | Models | Partition | RAM | Time | CPUs | Array size |
 |---|---|---|---|---|---|---|
-| **Fast** | kmer_svm, kmer_rf | expansion | — | 64GB | 4h | 4 |
-| **Medium** | kmer_logreg | expansion | — | 96GB | 8h | 8 |
-| **Heavy-CPU** | compairr, pubclone | expansion | — | **900GB** | 24h | 8 |
-| **GPU-light** | DeepRC (minimal) | gpu | p100 | 32GB | 4h | 4 |
-| **GPU-heavy** | DeepRC (spec-compliant) | gpu | **h200** | 64GB | 72h | 8 |
+| **Fast-CPU** | kmer_svm, kmer_rf, kmer_logreg | expansion | 96GB | 8h | 4 | 48 jobs (3 × 16 pairs) |
+| **Heavy-CPU** | pubclone | expansion | 256GB | 24h | 8 | 16 jobs |
+| **Heavy-CPU** | compairr | expansion | 900GB | 24h | 8 | 16 jobs |
 
-### Array jobs instead of individual submits
+### GPU tier (Array B)
 
-Convert the 96 separate submissions into a SLURM array:
+| Tier | Model | Partition | GPU | RAM | Time | CPUs | Array size |
+|---|---|---|---|---|---|---|---|
+| **GPU** | DeepRC (spec-compliant) | gpu | h200 | 64GB | 48h | 8 | 13 jobs |
+
+### Array job pattern
+
 ```bash
-#SBATCH --array=0-79%20   # max 20 concurrent
+#!/bin/bash
+#SBATCH --array=0-47%20
+#SBATCH --partition=expansion
+#SBATCH --mem=96GB
+#SBATCH --time=08:00:00
+#SBATCH --cpus-per-task=4
+
+MANIFEST=/path/to/cpu_jobs_manifest.txt
+LINE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" $MANIFEST)
+DESIGN=$(echo $LINE | cut -d' ' -f1)
+CONFIG=$(echo $LINE | cut -d' ' -f2)
+
+mamba activate immuneml
+immune-ml /path/to/configs/$DESIGN/$CONFIG.yaml /path/to/results/$DESIGN/$CONFIG
 ```
-Simpler dependency management, easier to cancel/resubmit batches.
 
-### Job output consolidation
+Manifest file = plain text, one job per line: `S2S S2S_pdbp_to_ppmi_kmer_logreg`.
 
-Currently 96 jobs × 2 files = 192 log files. Recommend:
-- Consolidated TSV of results emitted by each job (append to shared results CSV)
-- Single Python post-run aggregator that reads all log dirs
-
----
-
-## 5. Priority-Ranked Action List
-
-### P0 — Do first (biggest signal gains)
-1. **Retrain DeepRC with `n_updates: 300000` on H200**. Current runs are undertrained by 30×. Expected to actually learn signal.
-2. **Switch assessment to `stratified_k_fold` with `split_count: 5`**. Fixes statistical robustness of all k-mer results.
-3. **Add `DeepRCMotifDiscovery`, `TrainingPerformance`, `ConfusionMatrix` reports** to every config.
-
-### P1 — Diagnostic resolution
-4. Add `PerformancePerLabel` with `alternative_label: sex` and `study` to detect confounder leakage.
-5. Add `ROCCurve` and `PrecisionRecallCurveSummary` for per-fold curves (not just summary).
-6. Enable `DesignMatrixExporter` to dump encoded features — lets us do external analysis.
-
-### P2 — Extend model space
-7. Add gapped k-mer encoding (captures non-contiguous motifs).
-8. Add elastic net LogReg (between L1 and L2 extremes).
-9. CompAIRR with `ignore_genes: true` and stricter p-value sweep.
-
-### P3 — Infrastructure
-10. Convert to SLURM array jobs.
-11. Write centralized results aggregator (Python script that reads all `full_*.yaml` + log + metrics and emits a unified CSV).
-12. Resubmit failed LOSO compairr jobs with 900GB + `ignore_genes: true`.
+**Benefits over individual sbatch:**
+- One cancel for the whole batch: `scancel <array_job_id>`
+- One output dir pattern per array
+- Automatic retry on failure with `--requeue`
 
 ---
 
-## 6. Interpretation Caveats
+## 5. Priority Ranked Actions
 
-**Why all DeepRC/CompAIRR results are exactly 0.500:** Both produced models that predicted the majority class (or couldn't train), resulting in exactly balanced accuracy of 0.5 on the held-out test. This is not a numerical tie — it's a sign of training failure or no signal found.
+### P0 — Blocks further GPU spend
+1. **Fix transfer-study design with `MLApplication`**. Current "S2S" results are within-study, not cross-study. Without this, no DeepRC retraining will produce meaningful transfer results.
 
-**Why BioFIND-as-train wins:** BioFIND has 174 samples but distinct batch characteristics. The model may be learning batch-specific TCR patterns that happen to correlate with PD status in that cohort, and these generalize (weakly) to other cohorts. **This is a confound to investigate, not a real biological signal.**
+### P1 — Statistical robustness
+2. Switch all assessment splits to `stratified_k_fold` `split_count=5`.
+3. Add `ConfusionMatrix`, `TrainingPerformance`, `PerformancePerLabel(clonal_volume_binned)` to every config.
 
-**Effect sizes to target:** Published TCR-based PD classifiers (Rawat et al. 2020) achieved AUROC ≈ 0.70 using DeepRC on a single cohort with deeper sequencing (~10⁵ sequences/repertoire). Our shallow data (~500-5000 seqs) is likely a ceiling at bacc ≈ 0.60-0.65 even with optimal models.
+### P2 — DeepRC retraining (after P0/P1)
+4. Scale DeepRC params to **actual** repertoire depth: `sample_n_sequences: 500`, `n_updates: 100000`.
+5. Skip DeepRC where N_train < 200 (i.e., skip BioFIND-as-source).
+
+### P3 — Extend signal space
+6. Add 4-mer, gapped k-mer encodings.
+7. Add elastic net LogReg.
+8. CompAIRR p-value sweep with `ignore_genes: true`.
+
+### P4 — Infrastructure
+9. Convert to two separate SLURM arrays (CPU array, GPU array).
+10. Write centralized results aggregator Python script.
+11. Run one-time `ExploratoryAnalysisInstruction` for diversity / motif overviews.
+
+---
+
+## 6. Interpretation Caveats Updated for This Dataset
+
+- **Shallow depth ceiling:** at ~1000-4000 seqs/repertoire, no existing method is expected to achieve >0.65 bacc. Papers with 0.70+ used 10⁵-10⁶ seqs.
+- **BioFIND-as-train wins may be a within-study overfit artifact** — recall the current bug treats "PDBP → PPMI" as "PDBP random 70/30 split." The strong BioFIND numbers may just reflect the model fitting to BioFIND's idiosyncratic clonal-volume distribution (median 1077, the lowest of any study). Once `MLApplication` is used for actual transfer, expect this to drop.
+- **Expected true transfer bacc:** ~0.50-0.55 for k-mer models, 0.50 for DeepRC until retrained, 0.50 for CompAIRR/pubclone.
 
 ---
 
 ## Sources
 
-- [DeepRC: Immune repertoire classification with attention-based deep MIL](https://proceedings.neurips.cc/paper/2020/hash/da4902cb0bc38210839714ebdcf0efc3-Abstract.html) — n_updates=10⁵ reference
-- [DeepRC GitHub](https://github.com/ml-jku/DeepRC) — architecture details
-- [CompAIRR paper](https://pubmed.ncbi.nlm.nih.gov/35852318/) — memory characteristics
-- [CompAIRR GitHub](https://github.com/uio-bmi/compairr) — `--no-matrix`, `--threads` flags
-- [immuneML docs](https://docs.immuneml.uio.no/latest/) — report specs
-- [immuneML Nat Mach Intell paper](https://www.nature.com/articles/s42256-021-00413-z) — benchmark design
+- [DeepRC: NeurIPS 2020](https://proceedings.neurips.cc/paper/2020/hash/da4902cb0bc38210839714ebdcf0efc3-Abstract.html)
+- [DeepRC GitHub](https://github.com/ml-jku/DeepRC)
+- [CompAIRR paper](https://pubmed.ncbi.nlm.nih.gov/35852318/) — O(N²) distance matrix memory scaling
+- [CompAIRR GitHub](https://github.com/uio-bmi/compairr) — `--no-matrix`, `--threads`
+- [immuneML docs](https://docs.immuneml.uio.no/latest/) — reports, MLApplication, troubleshooting
+- [Emerson et al. 2017](https://pubmed.ncbi.nlm.nih.gov/28369033/) — original public-clone benchmark depth (~10⁵ seqs)
