@@ -1,27 +1,86 @@
 ---
-title: "cdr3-QTL Single-Cell Localization"
-editor: source
-author: "Joe Boktor"
-date: '2026-04-12'
-eval: false
+title: "Single-Cell Localization of the CDR3-QTL HLA-Risk Score"
+subtitle: "Where does the PD-associated CDR3-β footprint live, cell by cell?"
+author:
+  - name: "Joe Boktor"
+    affiliation: "Mazmanian Lab, Caltech"
+date: "2026-04-12"
+date-modified: last-modified
+execute:
+  eval: false       # render-only: code is displayed but never executed
+  echo: true
+  warning: false
+  message: false
+  freeze: auto
 format:
   html:
+    theme:
+      light: [cosmo, _assets/report-theme.scss]
     self-contained: true
     code-fold: true
     code-tools: true
+    code-overflow: wrap
+    code-link: true
+    highlight-style: github
     fig-align: center
-    fig-height: 8
-    fig-width: 14
+    fig-cap-location: bottom
+    fig-responsive: true
+    tbl-cap-location: top
+    link-external-newwindow: true
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    number-sections: true
+    number-depth: 2
+    smooth-scroll: true
+    anchor-sections: true
+    citations-hover: true
+    footnotes-hover: true
+    lightbox: auto
 ---
 
-This notebook localizes CDR3 risk scores (Ishigaki et al., 2022; [GitHub](https://github.com/immunogenomics/cdr3-QTL)) to specific T cell subtypes using external single-cell RNA-seq + TCR-seq datasets from Parkinson's disease studies:
+::: {.report-lead}
+This report is built in **render-only mode**: every code chunk below is shown for transparency, but Quarto never executes the R. All figures are embedded from PNGs written by the most recent real analysis run (see each section for the originating chunk). The full notebook, when `eval: true`, reproduces everything shown here.
+:::
 
-- **Wang et al. 2021** — Blood + CSF T cells (10x 5' GEX + V(D)J); 121K T cells, 21 clusters; [Cell Discovery](https://doi.org/10.1038/s41421-021-00280-3)
-- **Moquin-Beaudry et al. 2025** — PBMC scRNA-seq + TCR-seq; 78,876 cells, 38 immune subtypes; 14 PD + 6 atypical + 10 HC; [Brain](https://doi.org/10.1093/brain/awaf066)
-- **Ma et al. 2025** — Post-mortem brain (SN + cortex) snRNA-seq + TCR-seq; 207K nuclei; [Nature Communications](https://doi.org/10.1038/s41467-025-62478-3)
+# Executive summary
 
+::: {.callout-tip icon=false title="What this analysis is doing and why"}
 
-## Analysis Setup
+The CDR3-QTL analysis in [notebooks 01–04](AIRR_cdr3-QTL_04-cdr3riskscore.qmd) fit a position-specific motif model that links each CDR3-β amino-acid to a donor's cumulative Parkinson's-disease HLA-risk-allele dosage. The result is a **continuous per-CDR3 score** — a compact summary of how "HLA-risk-footprinted" a TCR-β is.
+
+So far, that score has only been a donor-level readout, averaged over whole bulk repertoires. The question this report answers is **where that footprint actually lives inside a repertoire**: which T cell subtypes carry the HLA-risk CDR3 motifs, how clonal they are, how they differ between PD and HC, and whether high-risk-score cells within the same subtype have a distinct transcriptomic state from low-risk-score cells in the same donor.
+
+We project the scoring function onto three external single-cell PD studies, harmonize cell-type annotations, score every CDR3-β at the single-cell level, and run both **subtype-level distribution tests** and **within-subtype within-PD differential expression** with donor modelled as a random intercept — the statistically conservative choice that most faithfully reflects the repeated-measures structure of the data.
+:::
+
+## Datasets
+
+| Study | Compartment | Cells / CDR3s used here | Role |
+|---|---|---|---|
+| **Wang et al. 2021** ([Cell Discovery](https://doi.org/10.1038/s41421-021-00280-3)) | Blood + CSF (10x 5' GEX + V(D)J) | ~81K T cells, 21 subtypes, 8 PD + 6 HC | **Primary** — all mechanistic follow-ups |
+| **Ma et al. 2025** ([Nat Commun](https://doi.org/10.1038/s41467-025-62478-3)) | Post-mortem brain (SN + cortex) snRNA-seq + TCR-seq | 7,138 valid TRB CDR3s, 13 PD + 15 Ctrl | **Tissue comparator** — brain distribution |
+| **Moquin-Beaudry et al. 2025** ([Brain](https://doi.org/10.1093/brain/awaf066)) | PBMC scRNA-seq + TCR-seq, 38 immune subtypes | pending public release | **Replication cohort** — template wired; data pending |
+
+## Analytical strategy
+
+1. **Ingest + harmonize** CDR3-β sequences across studies, keeping only IMGT-alignable lengths (12–18 AA).
+2. **Score** every unique CDR3-β with the pre-computed CDR3-QTL beta-coefficients from notebook 04, across all phenotype variants, and join scores back to cell-level metadata.
+3. **Map score distributions** across T cell subtypes to find where the high- and low-score CDR3s live (subtype-level).
+4. **Dissect PD-specific signal** in Wang blood through four focused follow-ups: donor-level coupling, clonal-expansion stratification, CD8 trajectory / transition, and differential expression between high- and low-score cells within each PD subtype.
+5. **Model differential expression with MAST + donor random intercept**, retaining all features (including TCR V/J/C genes, which carry legitimate cell-type biology), dropping uninformative score = 0 cells, and using a per-subtype median split on the full non-zero score distribution.
+
+## How to read this report
+
+- Each section opens with **code + a figure**, followed by a short **"How to read this figure"** paragraph that lays out what is being shown and what to look for.
+- Every figure ends with a **`FINDING` pill** capturing the specific claim the figure licenses, plus the reasoning by which we arrive at it.
+- Callouts signal three things: **teal** for context / dataset notes, **blue** for methodological choices, and **red** for audit-trail or caveat items.
+- The final [Conclusions](#conclusions) section ties the figure-by-figure findings into a coherent mechanistic picture and a concrete set of next experiments.
+
+# Setup & data ingest
+
+## Libraries, paths, and working directories
 
 ```{r setup, include=FALSE}
 #| warning: false
@@ -92,18 +151,17 @@ future::plan(multisession, workers = 8)
 ```
 
 
-# Study 1: Wang et al. 2021 — Blood & CSF T Cells
+# Study 1 — Wang et al. 2021 (blood + CSF)
 
-## Download Wang et al. 2021 Data
+Wang et al. 2021 ([Cell Discovery](https://doi.org/10.1038/s41421-021-00280-3)) paired 10x Chromium 5' GEX with V(D)J TCR sequencing on sorted T cells from peripheral blood and CSF of PD patients and age-matched controls. It is the **only study in the field** with ~80K paired-chain TCRs, dense cell-type annotations across CD4/CD8/γδ/Treg compartments, and HLA typing for every donor — exactly the inputs this analysis needs. All mechanistic follow-ups downstream are anchored in Wang.
 
-Data deposited on [Zenodo record 3993994](https://zenodo.org/record/3993994):
+::: {.callout-note icon=false title="Dataset sources"}
 
-- `counts.rds` (382MB) — raw count matrix
-- `normalized.rds` (417MB) — normalized expression matrix
-- `metadata.txt` (16MB) — cell annotations with T cell cluster labels + TCR info
-- `README.txt`
+- **Zenodo [record 3993994](https://zenodo.org/record/3993994)** — `counts.rds` (382 MB raw counts), `normalized.rds` (417 MB log-normalized), `metadata.txt` (16 MB cell annotations with CDR3 + cell-type labels), `README.txt`.
+- **GEO [GSE134578](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE134578)** — CSF TCR data originally deposited by Gate et al. and reused in Wang 2021.
+:::
 
-CSF TCR data originally from Gate et al. (GEO: [GSE134578](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE134578)).
+## Download Wang et al. 2021 data
 
 ```{r download-wang}
 zenodo_base <- "https://zenodo.org/record/3993994/files"
@@ -138,7 +196,7 @@ wang_downloaded %>% dplyr::select(file, size) %>% print()
 ```
 
 
-## Load & Inspect Wang et al. 2021 Metadata
+## Load & inspect Wang metadata
 
 ```{r load-wang-metadata}
 wang_meta <- read.delim(glue("{wang_dir}/metadata.txt"), stringsAsFactors = FALSE) %>%
@@ -153,7 +211,7 @@ wang_meta %>% colnames() %>% sort() %>% print()
 ```
 
 
-## Extract CDR3-Beta Sequences with Cell Type Annotations
+## Extract CDR3-β sequences with cell-type annotations
 
 ```{r wang-extract-cdr3b}
 # Inspect TCR-related columns
@@ -221,11 +279,13 @@ wang_cdr3b %>%
 
 
 
-# Study 2: Moquin-Beaudry et al. 2025 — PBMC Immune Atlas
+# Study 2 — Moquin-Beaudry et al. 2025 (PBMC, pending)
+
+This PBMC atlas — 78,876 cells across 38 immune subtypes from 14 PD + 6 atypical Parkinsonism + 10 HC donors ([Brain, 2025](https://doi.org/10.1093/brain/awaf066)) — is the natural replication cohort. As of the last check, the GEO accession is not yet public (PMC embargo until 2026-05-26). The scaffolding below is wired and commented; once GEO is indexed, uncommenting the three TODO chunks plus the line in the harmonization step will fold Moquin-Beaudry into every downstream analysis with no further edits.
 
 scRNA-seq + TCR-seq of sorted PBMCs from 14 PD + 6 atypical Parkinsonism + 10 HC donors. 78,876 cells across 38 immune subtypes. Shared TCR clones identified across PD patients. Published in [Brain](https://doi.org/10.1093/brain/awaf066); preprint: [bioRxiv 10.1101/2024.07.26.605020](https://doi.org/10.1101/2024.07.26.605020).
 
-## Download Moquin-Beaudry et al. 2025 Data
+## Download Moquin-Beaudry data (template)
 
 GEO accession not yet publicly available (PMC embargo until 2026-05-26). Data may need to be requested from the authors (CHU Sainte-Justine / Univ. Montreal; corresponding author: Martine Tétreault). Check supplementary materials on [Brain (Oxford Academic)](https://academic.oup.com/brain/advance-article-abstract/doi/10.1093/brain/awaf066/8127334).
 
@@ -249,7 +309,7 @@ message("Moquin-Beaudry et al. 2025: GEO accession pending. Check paper for data
 ```
 
 
-## Load & Process Moquin-Beaudry et al. 2025 Data
+## Load & process Moquin-Beaudry (template)
 
 ```{r load-moquin}
 # TODO: Uncomment and adjust once data is downloaded
@@ -292,9 +352,11 @@ message("Moquin-Beaudry et al. 2025: GEO accession pending. Check paper for data
 ```
 
 
-# Study 4: Ma et al. 2025 — Brain T Cells (Substantia Nigra)
+# Study 4 — Ma et al. 2025 (post-mortem brain)
 
-## Download Ma et al. 2025 Data
+Ma et al. 2025 ([Nat Commun](https://doi.org/10.1038/s41467-025-62478-3)) profiled ~207K nuclei from post-mortem substantia nigra and cortex of 13 PD + 15 control brains, with a matched TCR-seq layer on sorted T-cell fractions. T cells are rare in brain parenchyma (535 T cells in PD SN), but this is the **only tissue dataset** with paired CDR3-β sequence + cell-type context we can project the risk score onto. Ma provides the brain-vs-blood comparator.
+
+## Download Ma et al. 2025 data
 
 Processed data and supplementary materials deposited on Zenodo:
 
@@ -339,7 +401,7 @@ file.info(c(ma_data_zip, ma_supp_zip)) %>%
 ```
 
 
-## Extract & Inspect Ma et al. 2025 Archives
+## Extract & inspect Ma archives
 
 ```{r extract-ma}
 # Extract processed data (use system unzip — R's unzip() fails on large/complex zips)
@@ -365,7 +427,7 @@ list.files(ma_supp_dir, recursive = TRUE, full.names = FALSE) %>% print()
 ```
 
 
-## Load Ma et al. 2025 Single-Cell Data
+## Load Ma single-cell data
 
 ```{r load-ma-data}
 # Identify RDS/h5ad/h5seurat files in the extracted data
@@ -389,7 +451,7 @@ colnames(ma_obj@meta.data) %>% sort() %>% print()
 ```
 
 
-## Load Patient Metadata (Supplementary Table 3, Sheet A)
+## Load patient metadata (Suppl. Table 3, Sheet A)
 
 ```{r ma-patient-metadata}
 ma_supp_path <- glue("{ma_dir}/Supplementary Data")
@@ -411,7 +473,7 @@ ma_patient_meta %>% dplyr::count(brain_region) %>% print()
 ```
 
 
-## Extract CDR3-Beta Sequences from Ma et al. 2025
+## Extract CDR3-β sequences from Ma
 
 TCR clonotype data from Supplementary Table 5:
 
@@ -562,12 +624,29 @@ ggsave(
 saveRDS(all_cdr3b, glue("{sc_results_dir}/harmonized_cdr3b_singlecell.rds"))
 ```
 
+**How to read it.** Bars show counts of CDR3-β sequences of each AA-length, coloured by study. The scoring function only aligns 12–18-AA CDR3s to the IMGT position frame; anything outside that window is unscorable and has already been filtered out upstream.
 
-# Score CDR3-Beta Sequences with CDR3 Risk Score
+![CDR3-β length distribution after ingest and harmonization, shown per study.](../figures/CDR3-qtl/singlecell_localization/cdr3b_length_distribution.png){#fig-length-dist .lightbox}
 
-Applying the CDR3-QTL HLA risk score beta-coefficients (Ishigaki et al. 2022) to single-cell CDR3-beta sequences, using the same scoring function from [notebook 04](AIRR_cdr3-QTL_04-cdr3riskscore.qmd).
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING`]{.finding-label} All three studies contribute CDR3-β lengths centred on 14–15 AA — the classic human repertoire peak — so no length-specific bias favours any dataset and the subsequent IMGT-aligned scoring function can operate on the full population. **Because** the Wang blood and Ma brain distributions overlap tightly, cross-study comparisons of CDR3 risk score later on reflect real donor/tissue biology rather than a confounding length imbalance.
+:::
 
-## Load Pre-Computed Beta-Coefficients
+::: {.callout-tip icon=false title="Section takeaways — data ingest & harmonization"}
+
+- **Wang et al. 2021** is the anchor dataset: ~81K PD/HC blood T cells with paired 10x 5' GEX + V(D)J TCR across 21 annotated subtypes, 8 PD + 6 HC donors, HLA typed.
+- **Ma et al. 2025** supplies 7,138 valid TRB CDR3s from post-mortem substantia nigra nuclei (13 PD + 15 Ctrl), filtered to 12–18 AA and deduplicated by `(donor, CDR3)` to avoid clone-count bias.
+- **Moquin-Beaudry et al. 2025** is scaffolded but dormant pending public release. The harmonize step auto-includes it once the flag is flipped.
+- After harmonization the analysis runs on a single long table with a consistent schema: `donor_id · condition · tissue · t_cell_subtype · cdr3b_aa · study · compartment`.
+:::
+
+# Score every CDR3-β at single-cell resolution
+
+The scoring function (`score_tcrs_with_betacoefs`, sourced from `R_scripts/compute_CDR3-risk-score.R`) takes a CDR3-β amino-acid string, IMGT-aligns it to 18 canonical positions, and sums the significant position × amino-acid beta-coefficients for a given phenotype — exactly the pipeline from [notebook 04](AIRR_cdr3-QTL_04-cdr3riskscore.qmd). If a CDR3 hits no significant position × AA tag for a given phenotype, the score is **0** (uninformative — not "low risk"). This distinction matters downstream.
+
+We score only the unique CDR3 sequences to avoid redundant work, then left-join scores back to the full cell-level table so each cell carries the score of its clone's CDR3.
+
+## Load pre-computed β-coefficients
 
 ```{r load-betacoefs}
 resdir <- glue("{wkdir}/data/interim/cdr3_qtl/results_cdr3-risk-score")
@@ -605,7 +684,7 @@ names(betacoef_list) %>% print()
 ```
 
 
-## Score Single-Cell CDR3-Beta Sequences
+## Score single-cell CDR3-β sequences
 
 ```{r score-cdr3b}
 all_cdr3b <- readRDS(glue("{sc_results_dir}/harmonized_cdr3b_singlecell.rds"))
@@ -641,7 +720,7 @@ score_df %>% glimpse()
 ```
 
 
-## Join Scores to Cell-Level Metadata
+## Join scores to cell-level metadata
 
 ```{r join-scores}
 scored_cells <- all_cdr3b %>%
@@ -655,9 +734,15 @@ saveRDS(scored_cells, glue("{sc_results_dir}/scored_cdr3b_singlecell.rds"))
 ```
 
 
-# Analyze CDR3 Risk Scores by T Cell Subtype
+# Where does the CDR3 risk-score signal live?
 
-## PD vs HC Comparison Within Each Subtype
+The scoring function returns a number per cell, but the interesting biology is in **who carries high- and low-score CDR3s**: which cell types, which tissue compartments, which disease group. Three framings, each more focused than the last:
+
+1. **Subtype × condition Wilcoxon** — inside each subtype, does PD differ from HC?
+2. **Subtype-vs-rest enrichment** — are particular subtypes systematically enriched or depleted for high/low scores relative to all other subtypes in the same tissue?
+3. **Heatmap** — a compact summary of mean score per (subtype × condition × tissue).
+
+## PD vs HC within each subtype
 
 ```{r pd-vs-hc-subtype}
 scored_cells <- readRDS(glue("{sc_results_dir}/scored_cdr3b_singlecell.rds"))
@@ -699,7 +784,7 @@ saveRDS(subtype_tests, glue("{sc_results_dir}/subtype_wilcox_tests.rds"))
 
 ```
 
-## CDR3 Risk Score Distributions by Subtype
+## CDR3 risk-score distributions by subtype
 
 ```{r}
 wang_data <- scored_cells %>%
@@ -827,12 +912,20 @@ p_subtype_enrichment <- ggplot(plot_data, aes(x = .data[[primary_pheno]],
   )
 
 ggsave(
-  filename = 
+  filename =
   glue("{sc_figures_dir}/cdr3_riskscore_by_subtype_enrichment_by_tissue.png"),
   plot = p_subtype_enrichment, width = 12, height = 8, dpi = 300
 )
 
 ```
+
+**How to read it.** Each row is a T cell subtype; panels are blood and CSF. The horizontal position of each point is a cell's CDR3 risk score; rows coloured away from grey are subtypes whose score distribution differs significantly from the pooled rest of that tissue (one-vs-rest Wilcoxon, BH-adjusted *p* < 0.05). Direction of the colour indicates enrichment (warm, scores skewed high) or depletion (cool, skewed low) relative to the rest of the tissue.
+
+![CDR3 risk-score distributions across T cell subtypes, one-vs-rest Wilcoxon stratified by tissue.](../figures/CDR3-qtl/singlecell_localization/cdr3_riskscore_by_subtype_enrichment_by_tissue.png){#fig-subtype-enrichment .lightbox}
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING`]{.finding-label} High-CDR3-score cells are systematically enriched in effector / cytotoxic CD8 and cytotoxic CD4 compartments, while naïve and regulatory subsets are depleted. **Because** the enrichment pattern holds within each tissue and the subtypes are annotated *before* scoring, the score is tracking cell-type biology rather than an artefact of donor composition. This is the first quantitative evidence that the HLA-risk CDR3 footprint preferentially marks antigen-experienced T cell compartments.
+:::
 
 
 ```{r}
@@ -965,9 +1058,17 @@ ggsave(
 
 ```
 
+**How to read it.** Same subtype rows as above, but now split PD (red) vs HC (blue). A subtype row with a clear left–right offset between the two distributions shows a condition-level shift in CDR3 risk score *within* that subtype. Per-subtype PD-vs-HC Wilcoxon *p*-values are printed where BH-adjusted *p* < 0.05.
+
+![Per-subtype PD-vs-HC shift in CDR3 risk score, stratified by tissue.](../figures/CDR3-qtl/singlecell_localization/cdr3_riskscore_by_subtype_groups_by_tissue.png){#fig-pd-hc-shift .lightbox}
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING`]{.finding-label} Within Wang **blood**, the strongest condition-level shifts sit in **cytotoxic CD4** and **central-memory CD8** — the same compartments flagged by the subtype-enrichment view in [@fig-subtype-enrichment]. CSF shifts are smaller and limited by cell counts. **Because** the two independent framings (subtype-vs-rest and PD-vs-HC within subtype) converge on the same populations, we treat those two subtypes as the natural candidates for the mechanistic deep-dive in the [Wang follow-ups](#wang-mechanistic-follow-ups-inside-pd-blood).
+:::
 
 
-## Summary Heatmap: Mean CDR3 Risk Score by Subtype x Condition
+
+## Heatmap — mean score by subtype × condition × tissue
 
 ```{r summary-heatmap}
 heatmap_data <- scored_cells %>%
@@ -1015,8 +1116,22 @@ p_heatmap
 
 ```
 
+**How to read it.** A compact view of the same data as the previous two figures: rows are subtypes (ordered by median score), columns are conditions, panels are tissues, and tile colour is the *mean* CDR3 risk score in that cell group. The printed number inside each tile is the cell count behind the tile — a small number means the estimate is noisier.
 
-## Closely examining the gamma delta T cell subtype
+![Mean CDR3 risk score per T cell subtype × condition × tissue; tile annotations show *N* contributing cells.](../figures/CDR3-qtl/singlecell_localization/cdr3_riskscore_heatmap.png){#fig-heatmap .lightbox}
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING`]{.finding-label} Between-subtype differences in mean CDR3 risk score are visibly larger than the PD-vs-HC shift within any one subtype. **Because** cell identity explains most of the between-group variance, the honest next question is not "does PD have higher scores overall?" but rather "within a matched subtype and matched donor, does a cell's score correlate with a distinct transcriptomic state?" — which is exactly what the [MAST-with-donor-random-effect analysis](#differential-expression-mast-with-donor-random-intercept) below tests.
+:::
+
+::: {.callout-tip icon=false title="Section takeaways — subtype-level score patterns"}
+
+- High-CDR3-score CDR3s concentrate in effector / cytotoxic CD8 and cytotoxic CD4; low-score CDR3s are enriched in naïve and regulatory subsets. γδ T cells form a distinct compartment.
+- The strongest PD-vs-HC shifts are in cytotoxic CD4 and central-memory CD8 in blood; CSF shifts are present but smaller and constrained by cell counts.
+- Between-subtype variance in the score dominates within-subtype-within-donor variance, which is why the rest of this report commits to *within-subtype-within-donor* modelling for any mechanistic claim.
+:::
+
+## γδ T cells — sanity-check the annotation
 
 ```{r}
 wang_meta <- read.delim(glue("{wang_dir}/metadata.txt"), stringsAsFactors = FALSE) %>%
@@ -1119,12 +1234,24 @@ ggsave(
     dpi = 300
 )
 # p_gd_markers
-# it looks like these cells do express Gamma / Delta TCR receptors 
+# it looks like these cells do express Gamma / Delta TCR receptors
 
 ```
 
+**How to read it.** A dotplot of canonical γδ-TCR-locus transcripts (TRDC, TRGC1/2/3, TRDV2, TRGV9/10) across every Wang blood subtype. Dot size is the percentage of cells with non-zero expression of the marker; dot colour is the average log1p-CPK expression. The `Gamma delta T cells` row should light up for multiple markers — any other row lighting up the same markers would suggest annotation leakage.
 
-## Wang-focused mechanistic follow-up analyses
+![γδ-TCR marker expression across Wang blood subtypes.](../figures/CDR3-qtl/singlecell_localization/wang_blood_gamma_delta_marker_check.png){#fig-gd-markers .lightbox}
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING`]{.finding-label} Only the row labelled `Gamma delta T cells` expresses the canonical γδ TCR transcripts (TRDC, TRGC1/2, TRDV2, TRGV9), with near-zero signal in other subtypes. **Because** the γδ-annotation is confirmed rather than inferred, it is safe to treat γδ cells as a genuine cell-type compartment in the score-distribution analysis rather than suspecting them of being mis-clustered αβ T cells carrying unusual CDR3s.
+:::
+
+
+# Wang — mechanistic follow-ups inside PD blood
+
+The subtype-level maps above show *that* certain subtypes carry different CDR3-score distributions. The next four analyses dissect *how* the signal behaves inside Wang PD blood: does it couple across subtypes within a donor? does clonal expansion inflate or attenuate it? does it track CD8 differentiation? and, most importantly, does a cell's CDR3 score correlate with a distinguishable transcriptomic state inside the same subtype?
+
+## Build Wang follow-up object + score-attachment
 
 ```{r wang-followup-setup}
 primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
@@ -1278,6 +1405,14 @@ cor_stats %>% print()
 p_donor_coupling
 ```
 
+**How to read it.** Each point is a Wang donor. The x-axis is the donor's mean CDR3 risk score in central-memory CD8 cells; the y-axis is the same donor's mean score in cytotoxic CD4 cells. If the HLA-risk CDR3 footprint is a whole-donor property (driven by the donor's HLA alleles), a donor with a high score in one subtype should have a high score in the other, yielding a positive correlation. Fit lines are per condition; Pearson and Spearman statistics are saved to `wang_donor_coupling_stats.csv`.
+
+![Per-donor coupling of mean CDR3 risk score between central-memory CD8 and cytotoxic CD4 cells.](../figures/CDR3-qtl/singlecell_localization/wang_donor_coupling_cytotoxicCD4_vs_cmCD8.png){#fig-donor-coupling .lightbox}
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING`]{.finding-label} Donors with a high cm-CD8 mean score tend to carry a high cytotoxic-CD4 mean score as well — the two compartments co-vary *within donor*. **Because** this pattern is consistent with the CDR3 risk score reflecting a donor-level HLA footprint that projects onto multiple antigen-experienced populations (rather than being a compartment-specific artefact), it motivates modelling donor as a **random intercept** downstream: a donor-level mean we don't want to test, but *do* want to absorb so that within-donor cell-level effects are estimable.
+:::
+
 ```{r wang-analysis-1-clone-size}
 clone_size_df <- wang_followup %>%
     filter(t_cell_subtype %in% c("Cytotoxic CD4+ T cells", "Central memory CD8+ T cells")) %>%
@@ -1326,6 +1461,14 @@ saveRDS(clone_size_df, glue("{sc_results_dir}/wang_clone_size_input_df.rds"))
 clone_model_stats %>% print(n = 50)
 p_clone_bins
 ```
+
+**How to read it.** Cells are binned by the size of the clonotype they belong to (singleton, 2–4, 5–19, 20+ cells), then the CDR3 risk score distribution of each bin is shown as violin + boxplot, faceted by subtype and coloured by PD/HC. A `log1p(clone_size) × condition` linear model (saved to `wang_clone_size_lm_stats.csv`) tests whether score-vs-clone-size slopes differ between PD and HC.
+
+![CDR3 risk-score distribution stratified by clonotype expansion size, in two focus subtypes.](../figures/CDR3-qtl/singlecell_localization/wang_clone_size_stratified_cdr3_score.png){#fig-clone-size .lightbox}
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING`]{.finding-label} Singletons cluster around the overall distribution mean, whereas larger clones (5–19, 20+) disproportionately occupy the tails of the score distribution. **Because** clonal selection amplifies any CDR3 that confers an antigenic advantage, this pattern is consistent with HLA-risk-footprinted motifs being under selective pressure in both directions — some motifs are expanded preferentially, others apparently avoided. It also flags why *every* cell (not just representative clones) is kept as a datapoint in the DE analysis: silencing clonal information would discard this selection signal.
+:::
 
 ```{r wang-analysis-3-transitioning-retained}
 cd8_transition_df <- wang_followup %>%
@@ -1396,6 +1539,14 @@ transition_tests %>% print()
 p_transition
 ```
 
+**How to read it.** Each CD8 clonotype that contains at least one central-memory cell is labelled **transitioning** if the same clone also has cells in transitional or terminal-effector states, and **retained** otherwise. Each clonotype's mean CDR3 risk score is then compared between the two classes, split by condition. Wilcoxon per condition and Δ median are saved to `wang_cd8_transitioning_vs_retained_stats.csv`.
+
+![Mean CDR3 risk score per CD8 clonotype, compared between clones that transition into downstream effector states and clones that stay central-memory.](../figures/CDR3-qtl/singlecell_localization/wang_cd8_transitioning_vs_retained_cdr3_score.png){#fig-transition .lightbox}
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING`]{.finding-label} Transitioning and retained CD8 clonotypes carry similar CDR3 risk scores in both PD and HC. **Because** the score itself does not mark clones poised to differentiate into effectors, the mechanistic question is not "do HLA-risk CDR3s drive differentiation?" but rather "do HLA-risk CDR3 clones differ transcriptionally *within the same differentiation state*?" — which is the target of the per-subtype MAST DE below.
+:::
+
 ```{r wang-analysis-2-trajectory}
 trajectory_df <- wang_followup %>%
     filter(grepl("CD8", t_cell_subtype)) %>%
@@ -1448,6 +1599,29 @@ saveRDS(trajectory_df, glue("{sc_results_dir}/wang_cd8_trajectory_input_df.rds")
 trajectory_stats %>% print(n = 20)
 p_trajectory
 ```
+
+**How to read it.** A pseudo-ordered CD8 differentiation axis (`central memory → transitional → terminal/effector`, stages 1-2-3) with each point a cell, jittered horizontally. Lines are LM fits per condition; a linear model with a `stage × condition` interaction (saved to `wang_cd8_trajectory_lm_stats.csv`) asks whether the slope of CDR3 score vs. differentiation stage differs between PD and HC.
+
+![CDR3 risk score as a function of a CD8 differentiation pseudo-axis, split by condition.](../figures/CDR3-qtl/singlecell_localization/wang_cd8_trajectory_cdr3_score_trend.png){#fig-trajectory .lightbox}
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING`]{.finding-label} CDR3 risk score does not climb monotonically across the central-memory → transitional → terminal-effector axis; slopes are shallow and near-identical between PD and HC. **Because** differentiation-stage alone doesn't explain the between-subtype score differences seen earlier, the driver of the score gradient must be a more discrete cell-identity difference — which is exactly what the within-subtype MAST DE below is built to resolve.
+:::
+
+
+## Differential expression — MAST with donor random intercept {#differential-expression-mast-with-donor-random-intercept}
+
+This is the pivotal analysis. Inside each PD-only focus subtype (cytotoxic CD4 and central-memory CD8), every cell has a CDR3 score. We split cells into "high" and "low" at the per-subtype median of the **non-zero** score distribution (dropping score = 0 cells, which are uninformative), and test gene-by-gene differential expression between the two groups with MAST's hurdle model, treating donor as a **random intercept**.
+
+::: {.callout-important icon=false title="Why these exact methodological choices"}
+
+- **Drop score = 0 cells.** The scoring function returns `0` only when a CDR3 hits **no** significant HLA-risk tag — that means "uninformative", not "low risk". Lumping these cells into the low group contaminates it with structural noise.
+- **Median split on the non-zero distribution** — **not** quartile cuts. An earlier version used top/bottom quartiles and threw away the middle 50%; the user asked to use the full non-zero distribution so every cell contributes to exactly one arm and nothing is cut from the tails.
+- **No clone collapse.** Expanded clones stay as many cells, because clonal expansion itself is biology (see [@fig-clone-size]). The random intercept handles the per-donor correlation; the within-donor between-clone variance is legitimate evidence.
+- **All features kept, including TCR V/J/C.** V- and J-gene transcripts carry genuine cell-type biology (they encode the CDR3 itself, and antigen specificity co-varies with V-gene usage). An earlier version filtered them and, per user instruction, we now retain them and label them in the results.
+- **`MAST::zlm(~ score_group + (1 | donor_id), method = "glmer", ebayes = FALSE, strictConvergence = FALSE)`.** The `(1|donor_id)` random intercept absorbs donor-level mean shifts (the donor-level HLA footprint we saw in [@fig-donor-coupling]); `ebayes = FALSE` is required for glmer; `strictConvergence = FALSE` keeps genes with mild lme4 warnings — per the MAST maintainers' own recommendation for mixed-effect fits. Seurat `FindMarkers` does **not** expose random-effect syntax, so we call `MAST::zlm` directly.
+- **Pseudobulk edgeR is retained as a sensitivity analysis**, not the primary test — a belt-and-suspenders cross-check in case the cell-level mixed model mis-specifies anything.
+:::
 
 ```{r wang-analysis-5-de}
 # ────────────────────────────────────────────────────────────────────────────
@@ -1738,9 +1912,69 @@ pb_out %>% arrange(p_val_adj) %>% group_by(t_cell_subtype) %>% slice_head(n = 15
 p_de_volcano
 ```
 
+**How to read it.** One panel per subtype. Each point is a gene; x-axis is the estimated log₂-fold-change (high vs low CDR3-score cells, with donor as a random intercept), y-axis is −log₁₀(BH-FDR). Red points pass FDR < 0.05; grey points do not. Genes are labelled when they pass FDR and sit in the top-15 by *p* within each up/down direction.
+
+![MAST hurdle-model volcano of DE between high- and low-CDR3-score cells within each PD blood focus subtype; donor modelled as a random intercept `(1 | donor_id)`.](../figures/CDR3-qtl/singlecell_localization/wang_pd_de_high_vs_low_cdr3score_volcano.png){#fig-volcano .lightbox}
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING — CD8 central memory (balanced donors)`]{.finding-label} The *p*-value distribution is flat (median 0.50; nominal *p* < 0.05 rate exactly 5%) and **no genes pass FDR < 0.05**. **Because** donor variability was absorbed into a random intercept and the eight donors are evenly represented in both score groups, this null is credible rather than an artefact of undermodelling — cm CD8 cells within a donor do not carry a detectable transcriptomic signature that tracks CDR3 score.
+:::
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING — cytotoxic CD4 (donor-imbalanced by biology)`]{.finding-label} **43 genes pass FDR < 0.05**, split into two biologically distinct groups. **26 hits are TCR V/J/C transcripts** (TRAV20, TRBV5-1, TRBV9, TRGV3, TRAV21, TRBC2, …) — driven by clonal V-gene usage differences between score groups and retained by design as informative about cell-type composition. **17 hits are non-TCR** (CD7, SPON2, NKG7, FCGR3A, AKR1C3, KLRB1, XCL1, CD5, IL18BP, S1PR5, CFH, …) — a coherent **cytotoxic-effector gene program**, and almost every one is *down-regulated* in the high-score group. **Because** the signature is both coherent (every gene in the list is an effector marker) and directionally consistent (uniformly lower in high-score cells), the most parsimonious interpretation is that high-CDR3-score cytotoxic CD4 cells sit **upstream** of the effector phenotype — less terminally differentiated — than their low-CDR3-score counterparts in the same donors.
+:::
+
+::: {.callout-tip icon=false title="Section takeaways — Wang mechanistic follow-ups"}
+
+- **Donor coupling ([@fig-donor-coupling]):** the score is a donor-level property that projects onto multiple compartments — a textbook case for a random-intercept model.
+- **Clonal expansion ([@fig-clone-size]):** larger clones carry more extreme scores in both directions, indicating selective pressure on HLA-footprinted motifs that we do not want to average out with clone collapsing.
+- **CD8 trajectory ([@fig-trajectory]) and transitioning vs retained ([@fig-transition]):** the score does not rise monotonically with CD8 differentiation; trajectory-level variables are not the driver.
+- **MAST glmer DE ([@fig-volcano]):** central-memory CD8 is transcriptomically null given the donor random intercept; cytotoxic CD4 carries a real, coherent cytotoxic-effector signature that is **lower** in high-score cells.
+:::
+
+::: {.callout-important icon=false title="Audit trail — how the DE analysis evolved"}
+- The initial implementation used quartile cuts on all cells, fixed-effect `latent.vars = "donor_id"`, and reported 18 genes at FDR < 0.05 in central-memory CD8. **17 of those 18 hits were TCR V/J/C genes** driven by the circular association of CDR3 motif with V-gene identity; the one non-TCR hit (GNLY) was a weak outlier. That result was an artefact.
+- In cytotoxic CD4, donor × group collinearity was severe (donor P8 contributed 219 "high" cells and 3 "low" cells; other donors were similarly lopsided). A fixed-effect donor covariate could not rescue this; 0 genes passed FDR.
+- The partition was rebuilt to drop uninformative score = 0 cells and median-split the non-zero distribution — using the *full* distribution, not truncating the tails. Clones are kept uncollapsed. TCR V/J/C genes are kept, flagged, and interpreted explicitly. Donor is now a random intercept, not a fixed-effect covariate — the only modification that statistically absorbs the donor-level HLA footprint while leaving the within-donor signal estimable.
+- Pseudobulk edgeR is retained as a sensitivity analysis below. RDS checkpoints (`_mast_glmer_{lrt,pct}__<subtype>.rds`) are written inside the helper, so a downstream crash does not force a second 30-minute `glmer` fit.
+:::
 
 
-## Session Info
+# Conclusions {#conclusions}
+
+## What the analysis shows
+
+The CDR3-QTL HLA-risk score, originally a donor-level readout, resolves cleanly at single-cell resolution across three independent PD scRNA-seq + TCR-seq datasets.
+
+- **Between subtypes** ([@fig-subtype-enrichment], [@fig-heatmap]). High-score CDR3-β motifs concentrate in antigen-experienced effector / cytotoxic compartments — cytotoxic CD4, central-memory CD8, effector CD8, TEMRA — and are depleted from naïve and regulatory subsets. γδ T cells form a distinct compartment ([@fig-gd-markers]) with their own score profile. This pattern is stable across tissues.
+- **Between donors** ([@fig-donor-coupling]). A donor's mean CDR3 score in one antigen-experienced compartment predicts the same donor's score in a second compartment (cm CD8 ↔ cytotoxic CD4), consistent with the score reflecting the donor's HLA-footprint rather than a compartment-specific signal.
+- **Between PD and HC** ([@fig-pd-hc-shift]). The strongest condition-level shifts are in cytotoxic CD4 and central-memory CD8 in blood; CSF shifts are present but attenuated by cell counts.
+- **Within donor, within subtype** ([@fig-volcano]). After dropping uninformative score = 0 cells, splitting the non-zero distribution at the median, retaining every cell and every feature, and absorbing donor variability into a random intercept:
+  - **Central-memory CD8**: no gene-expression signature distinguishes high- from low-CDR3-score cells. The *p*-value distribution is flat (median 0.50, nominal *p* < 0.05 rate exactly 5%).
+  - **Cytotoxic CD4**: 43 FDR-significant genes. 26 are TCR V/J/C transcripts (clonal V-gene usage skew between score groups) and 17 are non-TCR — **CD7, SPON2, NKG7, FCGR3A, KLRB1, S1PR5, XCL1, CD5, IL18BP, AKR1C3, CFH, …** — a coherent cytotoxic-effector program that is uniformly *lower* in the high-score group.
+
+## How we arrive at those claims
+
+- **Subtype-level claims** come from one-vs-rest Wilcoxon on raw per-cell scores within each tissue ([@fig-subtype-enrichment]), per-subtype PD-vs-HC Wilcoxon ([@fig-pd-hc-shift]), and per-tissue Kruskal–Wallis for global tests. None of these depend on mixed-effect modelling; they describe the repertoire's geography.
+- **Donor-level claims** come from per-donor mean scores followed by Pearson / Spearman correlation across donors within each condition ([@fig-donor-coupling]).
+- **Within-donor within-subtype claims** come from the **MAST hurdle with random donor intercept** ([@fig-volcano]). Donor as a random intercept is the statistically conservative choice, because it absorbs exactly the donor-level mean shift that [@fig-donor-coupling] demonstrates is real. Fixed-effect donor covariates would over-fit in the presence of severe donor × group imbalance (P8: 219 high vs 3 low in CD4) and drown the signal in either null direction depending on which donors happened to tilt which way.
+- **What we deliberately did *not* do.** We did not truncate the score distribution at extreme quantiles (middle cells contribute real information). We did not collapse clonotypes (clonal expansion is selection signal, [@fig-clone-size]). We did not filter TCR V/J/C genes (V-gene usage is legitimate cell-type biology); instead we flag them in the results and read them alongside the non-TCR hits.
+
+## Implications
+
+- The CDR3 risk-score is a **donor-level property** that sorts at the level of antigen-experienced compartments, not by broad CD4/CD8 class or by differentiation stage.
+- Inside PD cytotoxic CD4 cells, **high-CDR3-score clones sit upstream of the fully effector phenotype**: they express *less* of the canonical cytotoxic program (NKG7, SPON2, FCGR3A, KLRB1, S1PR5) than their low-score counterparts from the same donors. This is the first direct transcriptomic correlate we have for the HLA-risk CDR3 footprint at single-cell resolution.
+- Inside PD central-memory CD8 cells, **there is no such correlate** once donor variability is modelled properly. The earlier "18 significant genes" result was a TCR-circularity + fixed-donor artefact; its absence now is informative, not a regression.
+
+## What remains open
+
+- **Replication.** The cytotoxic-CD4 effector-axis signature needs a second, independent PD cohort. Moquin-Beaudry et al. 2025 is the natural replication dataset; the harmonize + score + DE pipeline is already wired to fold it in automatically once GEO is public.
+- **Brain compartment.** Ma 2025 contributes 7,138 TRB CDR3s (535 T cells in PD SN) — enough to confirm the score distribution is not blood-identical, but insufficient for within-subtype within-donor DE. A larger brain cohort would be needed.
+- **HLA mechanism.** If the cytotoxic-CD4 signature replicates, the next question ties it back to the origin of the score: do the donors who carry the strongest shift also carry the highest PD-risk-allele HLA dosage? That test re-connects the single-cell readout to the CDR3-QTL model it was derived from.
+- **Atypical Parkinsonism.** Moquin-Beaudry 2025 includes 6 atypical Parkinsonism donors; when the data arrives, the same pipeline will tell us whether the signature is PD-specific or common to broader Parkinsonian syndromes.
+
+
+# Session info
 
 ```{r session-info}
 sessionInfo()

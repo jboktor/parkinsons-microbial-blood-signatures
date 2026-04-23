@@ -1,0 +1,240 @@
+/*-- scss:defaults --*/
+
+// Fonts — use system stacks plus Google Fonts fallback where common
+$font-family-sans-serif: "Inter", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif !default;
+$font-family-monospace: "JetBrains Mono", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace !default;
+$headings-font-family: "Inter", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif !default;
+
+// Palette — muted academic with a single accent
+$body-color:        #2b2b2b !default;
+$body-bg:           #fbfbfa !default;
+$link-color:        #1f4f82 !default;
+$headings-color:    #0d2c4a !default;
+$secondary-color:   #6c6c6c !default;
+$accent:            #a23b3b !default;
+$soft-bg:           #f3f1ec !default;
+$rule-color:        #d8d2c4 !default;
+
+// Typography
+$font-size-base:    1.02rem !default;
+$line-height-base:  1.65 !default;
+$headings-font-weight: 600 !default;
+
+// Code
+$code-bg:           #f4f1eb !default;
+$code-color:        #873b2a !default;
+$pre-bg:            #f8f6f0 !default;
+$pre-border-color:  #e4ddcc !default;
+
+// Callouts
+$callout-border-width: 3px !default;
+$callout-color-note:    #1f4f82 !default;
+$callout-color-tip:     #2e7d54 !default;
+$callout-color-important: #a23b3b !default;
+$callout-color-warning: #b57f14 !default;
+$callout-color-caution: #a23b3b !default;
+
+/*-- scss:rules --*/
+
+// Page-wide breathing room
+body {
+    font-feature-settings: "ss01", "cv11";
+    letter-spacing: 0.003em;
+}
+
+.quarto-title-block {
+    border-bottom: 2px solid $rule-color;
+    padding-bottom: 1.25rem;
+    margin-bottom: 2.5rem;
+}
+.quarto-title-block .title {
+    font-size: 2.25rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: $headings-color;
+}
+.quarto-title-block .subtitle {
+    font-size: 1.15rem;
+    color: $secondary-color;
+    font-weight: 400;
+}
+.quarto-title-block .author,
+.quarto-title-block .date {
+    color: $secondary-color;
+    font-size: 0.95rem;
+}
+
+// Typography
+h1, h2, h3, h4 {
+    letter-spacing: -0.005em;
+    color: $headings-color;
+}
+h1.title { letter-spacing: -0.015em; }
+h1 {
+    margin-top: 3rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1.5px solid $rule-color;
+    font-size: 1.8rem;
+}
+h2 {
+    margin-top: 2.2rem;
+    font-size: 1.35rem;
+    color: $headings-color;
+}
+h3 {
+    margin-top: 1.6rem;
+    font-size: 1.1rem;
+    color: lighten($headings-color, 10%);
+}
+h4 {
+    margin-top: 1.1rem;
+    font-size: 1rem;
+    color: $secondary-color;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+}
+
+// Paragraphs & lists
+p  { margin-bottom: 0.9rem; }
+ul, ol { margin-bottom: 1rem; }
+li { margin-bottom: 0.25rem; }
+
+// Inline accents
+strong { color: darken($body-color, 5%); }
+em     { color: $headings-color; font-style: italic; }
+
+// Code blocks
+pre, code, kbd, samp, .sourceCode {
+    font-family: $font-family-monospace;
+    font-size: 0.87em;
+}
+pre {
+    border: 1px solid $pre-border-color;
+    border-radius: 6px;
+    padding: 0.85rem 1rem;
+    line-height: 1.55;
+}
+code:not(pre code) {
+    background: $code-bg;
+    color: $code-color;
+    padding: 0.08em 0.35em;
+    border-radius: 3px;
+    font-size: 0.92em;
+}
+
+// Figures
+figure {
+    margin: 1.8rem 0;
+}
+figure img {
+    border-radius: 6px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+    border: 1px solid $rule-color;
+    max-width: 100%;
+}
+figcaption, .figure-caption {
+    color: $secondary-color;
+    font-size: 0.92rem;
+    line-height: 1.5;
+    margin-top: 0.6rem;
+    font-style: italic;
+    text-align: left;
+}
+
+// Blockquotes
+blockquote, .blockquote {
+    border-left: 3px solid $accent;
+    background: $soft-bg;
+    padding: 0.9rem 1.1rem;
+    margin: 1.5rem 0;
+    color: darken($body-color, 3%);
+    font-style: normal;
+    border-radius: 0 4px 4px 0;
+}
+blockquote p:last-child { margin-bottom: 0; }
+
+// Callouts — cleaner, more generous spacing
+.callout {
+    border-radius: 6px;
+    margin: 1.8rem 0;
+    border: 1px solid $rule-color;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+.callout-header {
+    font-weight: 600;
+    letter-spacing: -0.003em;
+    padding: 0.65rem 1rem;
+}
+.callout-body {
+    padding: 1rem 1.1rem 1rem 1.1rem;
+    font-size: 0.98rem;
+    line-height: 1.6;
+}
+.callout-note    { border-left: $callout-border-width solid $callout-color-note !important; }
+.callout-tip     { border-left: $callout-border-width solid $callout-color-tip !important; }
+.callout-important { border-left: $callout-border-width solid $callout-color-important !important; }
+.callout-warning { border-left: $callout-border-width solid $callout-color-warning !important; }
+.callout-caution { border-left: $callout-border-width solid $callout-color-caution !important; }
+
+// Tables
+table {
+    font-size: 0.94rem;
+    border-collapse: collapse;
+    margin: 1rem 0;
+}
+thead th {
+    border-bottom: 2px solid $headings-color;
+    color: $headings-color;
+    font-weight: 600;
+    text-align: left;
+}
+tbody tr + tr td {
+    border-top: 1px solid $rule-color;
+}
+td, th { padding: 0.4rem 0.7rem; }
+
+// TOC
+.sidebar nav[role=doc-toc] ul li a {
+    color: $secondary-color;
+    font-size: 0.9rem;
+    padding: 0.18rem 0;
+}
+.sidebar nav[role=doc-toc] ul li a.active,
+.sidebar nav[role=doc-toc] ul li a:hover {
+    color: $headings-color;
+    font-weight: 600;
+}
+.sidebar nav[role=doc-toc] > ul > li > a {
+    font-weight: 600;
+    color: $headings-color;
+}
+
+// Section-divider helper for intro blocks
+.report-lead {
+    font-size: 1.08rem;
+    line-height: 1.65;
+    color: darken($body-color, 2%);
+    border-top: 1px solid $rule-color;
+    border-bottom: 1px solid $rule-color;
+    padding: 1.25rem 0;
+    margin: 1.5rem 0 2.5rem 0;
+}
+
+// Key-finding pill used at top of each figure interpretation
+.finding-label {
+    display: inline-block;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: $accent;
+    margin-right: 0.5rem;
+}
+
+// Fig/evidence separator
+hr {
+    border: none;
+    border-top: 1px solid $rule-color;
+    margin: 2.2rem 0;
+}
