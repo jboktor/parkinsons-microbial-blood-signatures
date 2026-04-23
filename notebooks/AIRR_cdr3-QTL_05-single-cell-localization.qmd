@@ -1924,6 +1924,16 @@ p_de_volcano
 [`FINDING — cytotoxic CD4 (donor-imbalanced by biology)`]{.finding-label} **43 genes pass FDR < 0.05**, split into two biologically distinct groups. **26 hits are TCR V/J/C transcripts** (TRAV20, TRBV5-1, TRBV9, TRGV3, TRAV21, TRBC2, …) — driven by clonal V-gene usage differences between score groups and retained by design as informative about cell-type composition. **17 hits are non-TCR** (CD7, SPON2, NKG7, FCGR3A, AKR1C3, KLRB1, XCL1, CD5, IL18BP, S1PR5, CFH, …) — a coherent **cytotoxic-effector gene program**, and almost every one is *down-regulated* in the high-score group. **Because** the signature is both coherent (every gene in the list is an effector marker) and directionally consistent (uniformly lower in high-score cells), the most parsimonious interpretation is that high-CDR3-score cytotoxic CD4 cells sit **upstream** of the effector phenotype — less terminally differentiated — than their low-CDR3-score counterparts in the same donors.
 :::
 
+### Same fit, display with V/J genes hidden
+
+The primary volcano above keeps every gene — V and J segments included — because V-gene usage carries legitimate cell-type biology and the decision to retain them was deliberate. To make the non-TCR signal easier to read, the figure below shows the **same MAST glmer fit and the same BH-adjusted *p*-values**, with one change: the 78 TCR V and J transcripts (pattern `^(TRAV|TRAJ|TRBV|TRBJ|TRDV|TRDJ|TRGV|TRGJ)`) are dropped from the display only. Constant-region transcripts (TRAC, TRBC1, TRBC2, TRDC, TRGC1/2) are kept — they reflect αβ/γδ cell identity, not clonal V-gene choice. Nothing in the statistical model changed; the *p*-values and FDR are identical to the primary run.
+
+![Same MAST glmer fit as @fig-volcano, with TCR V and J transcripts filtered from the display. FDR unchanged — this is a visual filter, not a re-test.](../figures/CDR3-qtl/singlecell_localization/wang_pd_de_high_vs_low_cdr3score_volcano_noVJ.png){#fig-volcano-noVJ .lightbox}
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING — V/J-filtered view`]{.finding-label} Removing the 78 V/J transcripts from the display leaves **18 FDR-significant genes in cytotoxic CD4** (17 non-TCR effector-program genes plus TRBC2, a constant-region transcript) and **still zero in central-memory CD8**. **Because** the non-V/J signal is the same coherent cytotoxic-effector signature surfaced in [@fig-volcano] — CD7, SPON2, NKG7, FCGR3A, KLRB1, S1PR5, XCL1, CD5, IL18BP, and kin — with the same direction (lower in high-CDR3-score cells), this view confirms the biological story is robust to whether we keep or hide the TCR-locus signal: high-score cytotoxic CD4 cells are less effector-differentiated than their low-score peers in the same donors.
+:::
+
 ::: {.callout-tip icon=false title="Section takeaways — Wang mechanistic follow-ups"}
 
 - **Donor coupling ([@fig-donor-coupling]):** the score is a donor-level property that projects onto multiple compartments — a textbook case for a random-intercept model.
