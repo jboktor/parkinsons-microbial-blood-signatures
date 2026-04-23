@@ -106,5 +106,36 @@ The training code in `deeprc.training.train` correctly passes all 3 args.
 
 ---
 
-**Note:** All four patches must be reapplied if the `immuneml_deeprc` environment is recreated.
+---
+
+## ProbabilisticBinaryClassifier missing defaults (immuneML v3.0.21)
+
+**File patched:** `immuneml` conda env (not `immuneml_deeprc`):
+`$CONDA_PREFIX/lib/python3.11/site-packages/immuneML/ml_methods/classifiers/ProbabilisticBinaryClassifier.py`
+
+**Line 56 — `__init__` signature:**
+
+Original:
+```python
+def __init__(self, max_iterations: int, update_rate: float, likelihood_threshold: float):
+```
+
+Patched:
+```python
+def __init__(self, max_iterations: int = 1000, update_rate: float = 0.01, likelihood_threshold: float = -1e-10):
+```
+
+**Why:** `MLApplicationInstruction` calls `MLImport.import_hp_setting` which instantiates the
+ML method class without args (`ReflectionHandler.get_class_by_name(config.ml_method)()`) before
+unpickling the trained state. Classes without default argument values raise:
+```
+Exception: ProbabilisticBinaryClassifier.__init__() missing 3 required positional arguments
+```
+Adding defaults allows the empty constructor call, after which `load()` overwrites them with
+the saved values.
+
+---
+
+**Note:** The first four patches apply to `immuneml_deeprc`. This last one applies to `immuneml`.
+All must be reapplied if the respective environments are recreated.
 Consider reporting upstream to https://github.com/immuneML/immuneML/issues.
