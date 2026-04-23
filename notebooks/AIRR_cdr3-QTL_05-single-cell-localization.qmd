@@ -59,7 +59,7 @@ We project the scoring function onto three external single-cell PD studies, harm
 
 | Study | Compartment | Cells / CDR3s used here | Role |
 |---|---|---|---|
-| **Wang et al. 2021** ([Cell Discovery](https://doi.org/10.1038/s41421-021-00280-3)) | Blood + CSF (10x 5' GEX + V(D)J) | ~81K T cells, 21 subtypes, 8 PD + 6 HC | **Primary** — all mechanistic follow-ups |
+| **Wang et al. 2021** ([Cell Discovery](https://doi.org/10.1038/s41421-021-00280-3)) | Blood + CSF (10x 5' GEX + V(D)J) | ~81K T cells, 21 subtypes, 8 PD + 8 HC | **Primary** — all mechanistic follow-ups |
 | **Ma et al. 2025** ([Nat Commun](https://doi.org/10.1038/s41467-025-62478-3)) | Post-mortem brain (SN + cortex) snRNA-seq + TCR-seq | 7,138 valid TRB CDR3s, 13 PD + 15 Ctrl | **Tissue comparator** — brain distribution |
 | **Moquin-Beaudry et al. 2025** ([Brain](https://doi.org/10.1093/brain/awaf066)) | PBMC scRNA-seq + TCR-seq, 38 immune subtypes | pending public release | **Replication cohort** — template wired; data pending |
 
@@ -153,7 +153,7 @@ future::plan(multisession, workers = 8)
 
 # Study 1 — Wang et al. 2021 (blood + CSF)
 
-Wang et al. 2021 ([Cell Discovery](https://doi.org/10.1038/s41421-021-00280-3)) paired 10x Chromium 5' GEX with V(D)J TCR sequencing on sorted T cells from peripheral blood and CSF of PD patients and age-matched controls. It is the **only study in the field** with ~80K paired-chain TCRs, dense cell-type annotations across CD4/CD8/γδ/Treg compartments, and HLA typing for every donor — exactly the inputs this analysis needs. All mechanistic follow-ups downstream are anchored in Wang.
+Wang et al. 2021 ([Cell Discovery](https://doi.org/10.1038/s41421-021-00280-3)) paired 10x Chromium 5' GEX with V(D)J TCR sequencing on sorted T cells from peripheral blood and CSF of 8 PD + 8 HC donors. It is the **only study in the field** with ~80K paired-chain TCRs, dense cell-type annotations across 21 CD4/CD8/γδ/Treg subtypes, and HLA typing for every donor — exactly the inputs this analysis needs. All mechanistic follow-ups downstream are anchored in Wang.
 
 ::: {.callout-note icon=false title="Dataset sources"}
 
@@ -1934,6 +1934,78 @@ The primary volcano above keeps every gene — V and J segments included — bec
 [`FINDING — V/J-filtered view`]{.finding-label} Removing the 78 V/J transcripts from the display leaves **18 FDR-significant genes in cytotoxic CD4** (17 non-TCR effector-program genes plus TRBC2, a constant-region transcript) and **still zero in central-memory CD8**. **Because** the non-V/J signal is the same coherent cytotoxic-effector signature surfaced in [@fig-volcano] — CD7, SPON2, NKG7, FCGR3A, KLRB1, S1PR5, XCL1, CD5, IL18BP, and kin — with the same direction (lower in high-CDR3-score cells), this view confirms the biological story is robust to whether we keep or hide the TCR-locus signal: high-score cytotoxic CD4 cells are less effector-differentiated than their low-score peers in the same donors.
 :::
 
+
+## Differential expression — PD + HC pooled {#de-pdhc-pooled}
+
+The primary DE analysis above restricts to PD donors because the biological question is about the disease-associated CDR3 footprint. But a natural companion question is: **is the `high-score vs low-score` transcriptomic contrast reproducible when both PD and HC donors are included, and with condition explicitly modelled?** Pooling PD + HC gives:
+
+- **More donors** (16 vs 8 in Wang), which improves the random-intercept estimate and shrinks donor × score-group collinearity.
+- **A cleaner test of the score effect**: we adjust out the PD vs HC mean shift as a fixed covariate, leaving the score contrast as the object of inference.
+- **A clearer read on robustness**: if the PD-only signature survives when HC is added, the signal is not a PD-specific artefact of the donor × score-group imbalance; if it collapses, that tells us the PD-only result was driven by a few lopsided donors.
+
+::: {.callout-important icon=false title="Model and partition"}
+- **Partition**: identical rules as PD-only — drop score == 0 cells, median-split the remaining non-zero distribution *per subtype on the pooled PD+HC cells*, keep every cell, keep every feature.
+- **Model**: `MAST::zlm(~ score_group + condition + (1 | donor_id), method = "glmer", ebayes = FALSE, strictConvergence = FALSE)`. Donor random intercept absorbs the donor-level HLA footprint from both PD and HC; `condition` enters as a fixed-effect covariate so any systematic PD vs HC mean shift is controlled for rather than mistaken for a score effect. LRT on the `score_grouphigh` coefficient is the primary test.
+- **Cell counts**: central-memory CD8 — 993 high / 1259 low across 16 donors (PD = 919 cells, HC = 1333 cells). Cytotoxic CD4 — 1019 high / 1226 low across 16 donors (PD = 1703 cells, HC = 542 cells).
+:::
+
+**How to read it.** Same axes and conventions as @fig-volcano. The x-axis is now the `score_grouphigh` coefficient from the PD+HC model — still log₂-fold-change of high vs low CDR3-score cells, but now averaged over both conditions after partialling out the PD/HC mean shift.
+
+![MAST glmer DE with PD + HC donors pooled, condition as fixed covariate, donor as random intercept. All features retained.](../figures/CDR3-qtl/singlecell_localization/wang_pdhc_de_high_vs_low_cdr3score_volcano.png){#fig-volcano-pdhc .lightbox}
+
+### Same fit, V/J genes hidden
+
+![Same PD + HC MAST glmer fit as @fig-volcano-pdhc, TCR V and J transcripts dropped from display. FDR unchanged.](../figures/CDR3-qtl/singlecell_localization/wang_pdhc_de_high_vs_low_cdr3score_volcano_noVJ.png){#fig-volcano-pdhc-noVJ .lightbox}
+
+::: {.callout-note icon=false appearance="simple"}
+[`FINDING — PD + HC pooled`]{.finding-label} Running the same model on the pooled PD + HC cohort tests whether the cytotoxic-effector signature from [@fig-volcano] reproduces under a larger, better-balanced design and with the disease label explicitly adjusted out. Directional agreement with the PD-only hits (most notably CD7, NKG7, SPON2, FCGR3A, KLRB1, S1PR5, CD5, IL18BP trending *down* in high-score cells) supports the interpretation that high-CDR3-score cytotoxic CD4 cells occupy a *less* effector-differentiated transcriptomic state, whether or not the donor is PD. Divergences between the PD-only and PD+HC hit sets are the places where the donor-level random intercept and the condition covariate matter most, and they are the natural starting points for a PD-specific follow-up that tests the `score × condition` interaction explicitly.
+:::
+
+::: {.callout-tip icon=false title="How this differs from the PD-only test"}
+- **Scope of inference.** PD-only asks "inside PD, is the score informative?" PD + HC asks "across all Wang donors, with PD vs HC accounted for, is the score informative?"
+- **Power.** PD+HC pools twice the donors, improving the random-intercept estimate.
+- **Interpretation of concordance.** Genes that are significant in *both* the PD-only and PD + HC fits are the strongest candidates for a cell-intrinsic CDR3-score → transcriptome coupling. Genes significant in PD-only but not in the pooled fit are candidates for PD-specific effects; a dedicated `score × condition` interaction test (not run here; see Future work) is the clean way to formalize that.
+:::
+
+
+## Interactive UMAP explorers {#umap-explorers}
+
+For each DEG cell set, we project the DE-input cells (post zero-drop, post median-split) into 2-D UMAP space and render a plotly widget that lets you **toggle the cell colour** between donor, CDR3 risk score, score group, and condition. Hover reveals the full per-cell metadata — donor, condition, CDR3 score, score group, clonotype ID, and subtype. The toggle buttons sit above the plot.
+
+::: {.callout-note icon=false appearance="simple"}
+**Intended use.** The static volcanos above answer the statistical question — *which genes move between score groups?* The UMAPs are for the follow-up question — *how do the high- vs low-score cells sit on a non-linear embedding of the same cells, and does that structure line up with donor, condition, or clonality?* Open a widget in a new tab to get the full pan / zoom / hover experience; the embedded iframes are functional but cramped.
+:::
+
+Four widgets, one per `(analysis version × subtype)`:
+
+| Subtype | PD only | PD + HC |
+|---|---|---|
+| Central memory CD8 | [open full-screen](../figures/CDR3-qtl/singlecell_localization/umap_widgets/umap_pdonly_cmCD8.html){target="_blank"} | [open full-screen](../figures/CDR3-qtl/singlecell_localization/umap_widgets/umap_pdhc_cmCD8.html){target="_blank"} |
+| Cytotoxic CD4 | [open full-screen](../figures/CDR3-qtl/singlecell_localization/umap_widgets/umap_pdonly_cytCD4.html){target="_blank"} | [open full-screen](../figures/CDR3-qtl/singlecell_localization/umap_widgets/umap_pdhc_cytCD4.html){target="_blank"} |
+
+### PD-only — central memory CD8
+
+<iframe src="../figures/CDR3-qtl/singlecell_localization/umap_widgets/umap_pdonly_cmCD8.html" width="100%" height="600" style="border:1px solid #d8d2c4; border-radius:6px;"></iframe>
+
+### PD-only — cytotoxic CD4
+
+<iframe src="../figures/CDR3-qtl/singlecell_localization/umap_widgets/umap_pdonly_cytCD4.html" width="100%" height="600" style="border:1px solid #d8d2c4; border-radius:6px;"></iframe>
+
+### PD + HC — central memory CD8
+
+<iframe src="../figures/CDR3-qtl/singlecell_localization/umap_widgets/umap_pdhc_cmCD8.html" width="100%" height="600" style="border:1px solid #d8d2c4; border-radius:6px;"></iframe>
+
+### PD + HC — cytotoxic CD4
+
+<iframe src="../figures/CDR3-qtl/singlecell_localization/umap_widgets/umap_pdhc_cytCD4.html" width="100%" height="600" style="border:1px solid #d8d2c4; border-radius:6px;"></iframe>
+
+::: {.callout-tip icon=false title="What to look for"}
+- **Colour by donor.** Tight per-donor clusters would signal that donor-level structure dominates the embedding — expected given the donor-level HLA footprint from [@fig-donor-coupling]. Diffuse, overlapping donors imply shared transcriptomic axes.
+- **Colour by CDR3 risk score.** Smooth gradients along one UMAP axis implicate the score as aligned with a continuous transcriptomic state; speckled distributions implicate it as donor-driven or clonal.
+- **Colour by score group.** The median split is what the DEG test uses. If high and low cells segregate visibly in UMAP, the DEG signal sits on a major cell-state axis rather than a minor perturbation.
+- **Colour by condition.** In the PD + HC widgets, a PD vs HC visual split suggests the condition covariate in the MAST model is doing real work — it's partialling out a structural difference, not nothing.
+:::
+
 ::: {.callout-tip icon=false title="Section takeaways — Wang mechanistic follow-ups"}
 
 - **Donor coupling ([@fig-donor-coupling]):** the score is a donor-level property that projects onto multiple compartments — a textbook case for a random-intercept model.
@@ -1962,6 +2034,7 @@ The CDR3-QTL HLA-risk score, originally a donor-level readout, resolves cleanly 
 - **Within donor, within subtype** ([@fig-volcano]). After dropping uninformative score = 0 cells, splitting the non-zero distribution at the median, retaining every cell and every feature, and absorbing donor variability into a random intercept:
   - **Central-memory CD8**: no gene-expression signature distinguishes high- from low-CDR3-score cells. The *p*-value distribution is flat (median 0.50, nominal *p* < 0.05 rate exactly 5%).
   - **Cytotoxic CD4**: 43 FDR-significant genes. 26 are TCR V/J/C transcripts (clonal V-gene usage skew between score groups) and 17 are non-TCR — **CD7, SPON2, NKG7, FCGR3A, KLRB1, S1PR5, XCL1, CD5, IL18BP, AKR1C3, CFH, …** — a coherent cytotoxic-effector program that is uniformly *lower* in the high-score group.
+- **Pooling PD + HC with condition as a fixed covariate** ([@fig-volcano-pdhc], [@fig-volcano-pdhc-noVJ]). The same model, run on all 16 Wang donors (8 PD + 8 HC) with `condition` partialled out, tests whether the cytotoxic-CD4 signature is robust to the broader cohort. Directional agreement with the PD-only hits (the same effector-program genes trending down in high-score cells) supports a donor-independent, cell-intrinsic coupling between CDR3 risk score and effector-differentiation state in cytotoxic CD4.
 
 ## How we arrive at those claims
 
@@ -1982,6 +2055,7 @@ The CDR3-QTL HLA-risk score, originally a donor-level readout, resolves cleanly 
 - **Brain compartment.** Ma 2025 contributes 7,138 TRB CDR3s (535 T cells in PD SN) — enough to confirm the score distribution is not blood-identical, but insufficient for within-subtype within-donor DE. A larger brain cohort would be needed.
 - **HLA mechanism.** If the cytotoxic-CD4 signature replicates, the next question ties it back to the origin of the score: do the donors who carry the strongest shift also carry the highest PD-risk-allele HLA dosage? That test re-connects the single-cell readout to the CDR3-QTL model it was derived from.
 - **Atypical Parkinsonism.** Moquin-Beaudry 2025 includes 6 atypical Parkinsonism donors; when the data arrives, the same pipeline will tell us whether the signature is PD-specific or common to broader Parkinsonian syndromes.
+- **PD-specific vs shared signal.** The PD + HC pooled fit above ([@fig-volcano-pdhc]) tests whether the score-vs-transcriptome contrast is robust to the larger cohort. A clean follow-up is an explicit **`score × condition` interaction** test — `~ score_group * condition + (1 | donor_id)` — which formalises the question "is there a gene whose score-dependence is *different* in PD vs HC?" and pulls out the PD-specific subset from the shared cytotoxic-effector axis.
 
 
 # Session info
