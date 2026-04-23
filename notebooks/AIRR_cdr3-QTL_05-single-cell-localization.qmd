@@ -17,6 +17,7 @@ format:
 This notebook localizes CDR3 risk scores (Ishigaki et al., 2022; [GitHub](https://github.com/immunogenomics/cdr3-QTL)) to specific T cell subtypes using external single-cell RNA-seq + TCR-seq datasets from Parkinson's disease studies:
 
 - **Wang et al. 2021** — Blood + CSF T cells (10x 5' GEX + V(D)J); 121K T cells, 21 clusters; [Cell Discovery](https://doi.org/10.1038/s41421-021-00280-3)
+- **Moquin-Beaudry et al. 2025** — PBMC scRNA-seq + TCR-seq; 78,876 cells, 38 immune subtypes; 14 PD + 6 atypical + 10 HC; [Brain](https://doi.org/10.1093/brain/awaf066)
 - **Ma et al. 2025** — Post-mortem brain (SN + cortex) snRNA-seq + TCR-seq; 207K nuclei; [Nature Communications](https://doi.org/10.1038/s41467-025-62478-3)
 
 
@@ -38,6 +39,7 @@ library(seqinr)
 library(nlme)
 library(broom.mixed)
 library(Seurat)
+library(readxl)
 # plotting
 library(ggsci)
 library(scico)
@@ -46,6 +48,8 @@ library(aplot)
 library(patchwork)
 library(ggpubr)
 library(ggrepel)
+library(ggridges)
+library(dunn.test)
 
 home_dir <- "/resnick/groups/MazmanianLab/jboktor"
 pdmbs_dir <- paste0(home_dir, "/PDMBS")
@@ -73,11 +77,13 @@ tcr_cdr3_riskscore_complied <-
 # External single-cell data directories
 ext_sc_dir <- glue("{wkdir}/data/input/external_singlecell")
 wang_dir <- glue("{ext_sc_dir}/wang_2021")
+moquin_dir <- glue("{ext_sc_dir}/moquin_beaudry_2025")
 ma_dir <- glue("{ext_sc_dir}/ma_2025")
 sc_results_dir <- glue("{wkdir}/data/interim/cdr3_qtl/singlecell_localization")
 sc_figures_dir <- glue("{wkdir}/figures/CDR3-qtl/singlecell_localization")
 
 dir.create(wang_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(moquin_dir, showWarnings = FALSE, recursive = TRUE)
 dir.create(ma_dir, showWarnings = FALSE, recursive = TRUE)
 dir.create(sc_results_dir, showWarnings = FALSE, recursive = TRUE)
 dir.create(sc_figures_dir, showWarnings = FALSE, recursive = TRUE)
@@ -172,93 +178,117 @@ wang_meta %>%
 
 
 ```{r wang-clean-cdr3b}
-# NOTE: Column names below need to be adjusted based on actual metadata column names
-# after inspecting the output from the chunk above.
-# Expected columns (rename as needed):
-#   - CDR3 beta AA sequence
-#   - Cell type / cluster annotation
-#   - Donor ID
-#   - Condition (PD vs HC)
-#   - Tissue (blood vs CSF)
 
-# Example mapping — UPDATE column names after inspection:
 wang_cdr3b <- wang_meta %>%
-    # rename(
-    #     cdr3b_aa = <CDR3_BETA_COLUMN>,
-    #     t_cell_subtype = <CLUSTER_COLUMN>,
-    #     donor_id = <DONOR_COLUMN>,
-    #     condition = <CONDITION_COLUMN>,
-    #     tissue = <TISSUE_COLUMN>
-    # ) %>%
-    # filter(!is.na(cdr3b_aa) & cdr3b_aa != "") %>%
-    # filter(nchar(cdr3b_aa) >= 12 & nchar(cdr3b_aa) <= 18) %>%
+    mutate(condition = strex::str_before_first(sample_type, "\\(")) %>% 
+    mutate(condition = gsub("MCI", "PD", condition)) %>% 
+    mutate(condition = gsub("Parkinson", "PD", condition)) %>% 
+    mutate(tissue = case_when(
+        grepl("CSF", sample_type) ~ "CSF",
+        grepl("Blood", sample_type) ~ "Blood",
+        TRUE ~ "ERROR"
+    )) %>% 
+    rename(
+        cdr3b_aa = beta_cdr3_aa,
+        t_cell_subtype = cell_type2,
+        donor_id = sample
+    ) %>%
+    filter(!is.na(cdr3b_aa) & cdr3b_aa != "") %>%
+    filter(nchar(cdr3b_aa) >= 12 & nchar(cdr3b_aa) <= 18) %>%
     mutate(
         study = "Wang_2021",
-        compartment = "peripheral"  # blood + CSF
+        compartment = tissue
     ) %>%
     glimpse()
 
 # CDR3 length distribution
-# wang_cdr3b %>%
-#     mutate(cdr3_len = nchar(cdr3b_aa)) %>%
-#     count(cdr3_len) %>%
-#     print()
+wang_cdr3b %>%
+    mutate(cdr3_len = nchar(cdr3b_aa)) %>%
+    dplyr::count(cdr3_len) %>%
+    print()
 
 # T cell subtype breakdown
-# wang_cdr3b %>%
-#     count(t_cell_subtype, sort = TRUE) %>%
-#     print()
+wang_cdr3b %>%
+    dplyr::count(t_cell_subtype, sort = TRUE) %>%
+    print()
 
 # Condition breakdown
-# wang_cdr3b %>%
-#     count(condition) %>%
-#     print()
+wang_cdr3b %>%
+    dplyr::count(condition) %>%
+    print()
+
 ```
 
 
-## Download CSF TCR Data (GSE134578)
 
-The CSF T cell TCR data used in Wang et al. 2021 comes from Gate et al. 2020 ([GSE134578](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE134578)).
+# Study 2: Moquin-Beaudry et al. 2025 — PBMC Immune Atlas
 
-```{r download-csf-tcr}
-csf_dir <- glue("{wang_dir}/csf_GSE134578")
-dir.create(csf_dir, showWarnings = FALSE, recursive = TRUE)
+scRNA-seq + TCR-seq of sorted PBMCs from 14 PD + 6 atypical Parkinsonism + 10 HC donors. 78,876 cells across 38 immune subtypes. Shared TCR clones identified across PD patients. Published in [Brain](https://doi.org/10.1093/brain/awaf066); preprint: [bioRxiv 10.1101/2024.07.26.605020](https://doi.org/10.1101/2024.07.26.605020).
 
-# Download supplementary files from GEO
-# GEO FTP for supplementary data:
-csf_supp_url <- "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE134nnn/GSE134578/suppl/"
+## Download Moquin-Beaudry et al. 2025 Data
 
-# List files available — check manually or use:
-# system(glue("wget -r -np -nd -P {csf_dir} {csf_supp_url}"))
+GEO accession not yet publicly available (PMC embargo until 2026-05-26). Data may need to be requested from the authors (CHU Sainte-Justine / Univ. Montreal; corresponding author: Martine Tétreault). Check supplementary materials on [Brain (Oxford Academic)](https://academic.oup.com/brain/advance-article-abstract/doi/10.1093/brain/awaf066/8127334).
 
-message("Check GEO supplementary files at: ", csf_supp_url)
-message("Download TCR contig/clonotype files with cell barcodes and CDR3 sequences.")
-message("Files may include filtered_contig_annotations.csv or similar 10x VDJ output.")
+```{r download-moquin}
+# TODO: Update with GEO accession or direct download URL when available
+# GEO accession: GSE?????? (check Brain article Data Availability section)
+#
+# Expected data:
+#   - scRNA-seq count matrix / Seurat object
+#   - TCR-seq: filtered_contig_annotations.csv or clonotype files
+#   - Cell type annotations (38 subtypes)
+#   - Donor metadata (PD, atypical Parkinsonism, HC)
+#
+# When GEO accession becomes available:
+# geo_acc <- "GSE??????"
+# moquin_supp_url <- glue("https://ftp.ncbi.nlm.nih.gov/geo/series/GSE???nnn/{geo_acc}/suppl/")
+# system2("curl", args = c("-L", "-o", shQuote(glue("{moquin_dir}/data.tar.gz")),
+#     "--retry", "3", "-C", "-", shQuote(glue("{moquin_supp_url}/{geo_acc}_RAW.tar"))))
+
+message("Moquin-Beaudry et al. 2025: GEO accession pending. Check paper for data availability.")
 ```
 
 
-```{r load-csf-tcr}
-# After downloading, load CSF TCR data
-# csf_files <- list.files(csf_dir, pattern = "\\.csv$|\\.tsv$|\\.txt$", full.names = TRUE)
-# message("CSF TCR files found: ", length(csf_files))
-# csf_files %>% print()
+## Load & Process Moquin-Beaudry et al. 2025 Data
 
-# Load and process CSF TCR data — adjust based on actual file format
-# csf_tcr <- read_csv(csf_files[1]) %>%
+```{r load-moquin}
+# TODO: Uncomment and adjust once data is downloaded
+
+# Load cell metadata with TCR info
+# moquin_meta <- read_csv(glue("{moquin_dir}/metadata.csv")) %>%
 #     janitor::clean_names() %>%
 #     glimpse()
 
-# Extract CDR3-beta with cell annotations
-# csf_cdr3b <- csf_tcr %>%
-#     filter(chain == "TRB") %>%
-#     dplyr::select(barcode, cdr3, ...) %>%
-#     rename(cdr3b_aa = cdr3) %>%
+# Inspect columns for CDR3, cell type, donor, condition
+# moquin_meta %>% colnames() %>% sort() %>% print()
+# moquin_meta %>%
+#     dplyr::select(matches("cdr3|CDR3|trb|TRB|tcr|TCR|chain|clono", ignore.case = TRUE)) %>%
+#     colnames() %>% print()
+```
+
+
+```{r moquin-extract-cdr3b}
+# TODO: Uncomment and adjust column names once data structure is known
+# Expected: 38 immune subtypes including T cell subsets with paired TCR
+
+# moquin_cdr3b <- moquin_meta %>%
+#     rename(
+#         cdr3b_aa = <CDR3_BETA_COLUMN>,
+#         t_cell_subtype = <CELLTYPE_COLUMN>,
+#         donor_id = <DONOR_COLUMN>,
+#         condition = <CONDITION_COLUMN>
+#     ) %>%
+#     filter(!is.na(cdr3b_aa) & cdr3b_aa != "") %>%
 #     filter(nchar(cdr3b_aa) >= 12 & nchar(cdr3b_aa) <= 18) %>%
 #     mutate(
-#         study = "Wang_2021",
-#         tissue = "CSF",
-#         compartment = "CSF"
-#     )
+#         study = "MoquinBeaudry_2025",
+#         tissue = "Blood",
+#         compartment = "peripheral"
+#     ) %>%
+#     glimpse()
+
+# moquin_cdr3b %>% dplyr::count(t_cell_subtype, sort = TRUE) %>% print()
+# moquin_cdr3b %>% dplyr::count(condition) %>% print()
 ```
 
 
@@ -268,8 +298,8 @@ message("Files may include filtered_contig_annotations.csv or similar 10x VDJ ou
 
 Processed data and supplementary materials deposited on Zenodo:
 
-- [Processed data](https://zenodo.org/records/19454949) — `data.zip` (6.7GB): snRNA-seq processed objects
-- [Supplementary data](https://zenodo.org/records/19457731) — `SupplementaryData.zip` (105MB): supplementary tables
+- [Processed data](https://zenodo.org/records/19454950) — `data.zip` (6.7GB): snRNA-seq processed objects
+- [Supplementary data](https://zenodo.org/records/19457732) — `SupplementaryData.zip` (105MB): supplementary tables
 - [GitHub](https://github.com/dalhoomist/T-cell_and_glial_pathology_in_PD): analysis code
 
 ```{r download-ma}
@@ -280,7 +310,7 @@ if (!file.exists(ma_data_zip)) {
     system2("curl",
         args = c("-L", "-o", shQuote(ma_data_zip),
                  "--retry", "3", "--retry-delay", "5", "-C", "-",
-                 shQuote("https://zenodo.org/records/19454949/files/data.zip")),
+                 shQuote("https://zenodo.org/records/19454950/files/data.zip")),
         stdout = "", stderr = ""
     )
 } else {
@@ -294,7 +324,7 @@ if (!file.exists(ma_supp_zip)) {
     system2("curl",
         args = c("-L", "-o", shQuote(ma_supp_zip),
                  "--retry", "3", "--retry-delay", "5", "-C", "-",
-                 shQuote("https://zenodo.org/records/19457731/files/SupplementaryData.zip")),
+                 shQuote("https://zenodo.org/records/19457732/files/SupplementaryData.zip")),
         stdout = "", stderr = ""
     )
 } else {
@@ -312,18 +342,18 @@ file.info(c(ma_data_zip, ma_supp_zip)) %>%
 ## Extract & Inspect Ma et al. 2025 Archives
 
 ```{r extract-ma}
-# Extract processed data
+# Extract processed data (use system unzip — R's unzip() fails on large/complex zips)
 ma_data_dir <- glue("{ma_dir}/data")
 if (!dir.exists(ma_data_dir)) {
     message("Extracting data.zip...")
-    unzip(ma_data_zip, exdir = ma_dir)
+    system2("unzip", args = c("-o", shQuote(ma_data_zip), "-d", shQuote(ma_dir)))
 }
 
 # Extract supplementary data
 ma_supp_dir <- glue("{ma_dir}/SupplementaryData")
 if (!dir.exists(ma_supp_dir)) {
     message("Extracting SupplementaryData.zip...")
-    unzip(ma_supp_zip, exdir = ma_dir)
+    system2("unzip", args = c("-o", shQuote(ma_supp_zip), "-d", shQuote(ma_dir)))
 }
 
 # List contents
@@ -350,99 +380,186 @@ message("H5 files found:")
 ma_h5_files %>% print()
 
 # Load the primary object — adjust path based on extracted contents
-# ma_obj <- readRDS(ma_rds_files[1])
-# OR: ma_obj <- SeuratDisk::LoadH5Seurat(ma_h5_files[1])
+# should be processed_tcell_obj.rds
+ma_obj <- readRDS(ma_rds_files[6])
+ma_obj
 
-# Inspect structure
-# ma_obj
-# head(ma_obj@meta.data) %>% glimpse()
-# colnames(ma_obj@meta.data) %>% sort() %>% print()
+head(ma_obj@meta.data) %>% glimpse()
+colnames(ma_obj@meta.data) %>% sort() %>% print()
+```
+
+
+## Load Patient Metadata (Supplementary Table 3, Sheet A)
+
+```{r ma-patient-metadata}
+ma_supp_path <- glue("{ma_dir}/Supplementary Data")
+
+# Patient metadata — Sheet A
+ma_patient_meta <- read_excel(
+    glue("{ma_supp_path}/41467_2025_62478_MOESM3_ESM.xlsx"),
+    sheet = "A") %>%
+    janitor::clean_names() %>%
+    filter(tcr_seq == "Y") %>% 
+    glimpse()
+
+# Key columns: tcr_seq, sn_rna_seq, st, tb_number, sequencing_id,
+#   brain_region, condition, neuropath_diagnosis, age, sex, path_braak_nft,
+#   path_braak_asyn, path_cerad
+ma_patient_meta %>% dplyr::count(condition) %>% print()
+ma_patient_meta %>% dplyr::count(brain_region) %>% print()
+
 ```
 
 
 ## Extract CDR3-Beta Sequences from Ma et al. 2025
 
+TCR clonotype data from Supplementary Table 5:
+
+- **Sheet A**: Full alpha (TRA) repertoire (155K sequences) — columns: Clonotype, copy, Sample, Region, Condition
+- **Sheet B**: Curated paired chains (19K sequences, ~12K TRB) — columns: Clonotype, copy, Sample, Chain, Condition
+
+Clonotype format: `{CDR3_AA}_{V_gene}_{J_gene}` (e.g., `ASSAYRLETQY_hTRBV2*03_hTRBJ2-5*01`)
+
+```{r ma-load-tcr}
+# Sheet A is 100% alpha (TRA) — no beta sequences
+# Sheet B has paired chains: 6,971 TRA + 12,121 TRB with explicit Chain column
+ma_tcr_sheet_b <- read_excel(
+    glue("{ma_supp_path}/41467_2025_62478_MOESM5_ESM.xlsx"),
+    sheet = "B") %>%
+    janitor::clean_names() %>%
+    rename(clonotype_id = 1)
+
+message(glue("Sheet B: {nrow(ma_tcr_sheet_b)} clonotypes"))
+ma_tcr_sheet_b %>% dplyr::count(chain) %>% print()
+```
+
+
 ```{r ma-extract-cdr3b}
-# Check supplementary tables for TCR clonotype data
-ma_supp_files <- list.files(ma_supp_dir, recursive = TRUE, full.names = TRUE)
-ma_supp_files %>% print()
+# Parse CDR3 AA, V gene, J gene from Clonotype column
+# Format: {CDR3_AA}_{V_gene}_{J_gene}
+parse_clonotype <- function(df) {
+    df %>%
+        mutate(
+            cdr3_aa = str_extract(clonotype, "^[^_]+"),
+            v_gene = str_extract(clonotype, "(?<=_)[^_]+(?=_)"),
+            j_gene = str_extract(clonotype, "[^_]+$")
+        )
+}
 
-# Look for TCR-related files
-ma_tcr_files <- ma_supp_files[grepl("tcr|TCR|clono|CDR3|vdj", ma_supp_files, ignore.case = TRUE)]
-message("TCR-related supplementary files:")
-ma_tcr_files %>% print()
+# Extract TRB from Sheet B and parse clonotype fields
+ma_trb <- ma_tcr_sheet_b %>%
+    filter(chain == "hTRB") %>%
+    parse_clonotype() %>%
+    rename(donor_id = sample)
 
-# Load TCR data — adjust based on actual file format
-# ma_tcr <- read_csv(ma_tcr_files[1]) %>%
-#     janitor::clean_names() %>%
-#     glimpse()
+message(glue("TRB clonotypes: {nrow(ma_trb)}"))
+
+# Join brain region from patient metadata (Sheet B lacks Region column)
+ma_trb <- ma_trb %>%
+    left_join(
+        ma_patient_meta %>%
+            dplyr::select(tb_number, brain_region) %>% distinct(),
+        by = c("donor_id" = "tb_number")
+    ) %>%
+    rename(tissue = brain_region)
+
+message(glue("Tissue NAs after join: {sum(is.na(ma_trb$tissue))}"))
+
+# Deduplicate by donor + CDR3 sequence
+ma_trb_all <- ma_trb %>%
+    distinct(donor_id, cdr3_aa, .keep_all = TRUE)
+
+message(glue("Unique TRB clonotypes: {nrow(ma_trb_all)}"))
+ma_trb_all %>% dplyr::count(condition) %>% print()
+ma_trb_all %>% dplyr::count(tissue) %>% print()
 ```
 
 
 ```{r ma-clean-cdr3b}
-# NOTE: Column names need to be adjusted based on actual data inspection.
-# The Ma et al. study identified 535 T cells in PD substantia nigra with
-# TCR sequences showing homology to alpha-synuclein-reactive clones.
+# Filter to valid CDR3-beta lengths for IMGT alignment (12-18 AA)
+ma_cdr3b <- ma_trb_all %>%
+    rename(cdr3b_aa = cdr3_aa) %>%
+    filter(!is.na(cdr3b_aa) & cdr3b_aa != "") %>%
+    filter(nchar(cdr3b_aa) >= 12 & nchar(cdr3b_aa) <= 18) %>%
+    mutate(
+        study = "Ma_2025",
+        compartment = "CNS",
+        # No single-cell subtype annotations — bulk TCR from snRNA-seq
+        t_cell_subtype = "T_cell_brain"
+    ) %>%
+    glimpse()
 
-# Extract CDR3-beta sequences with cell annotations
-# ma_cdr3b <- ma_tcr %>%
-#     filter(chain == "TRB" | grepl("beta", chain, ignore.case = TRUE)) %>%
-#     rename(
-#         cdr3b_aa = <CDR3_COLUMN>,
-#         t_cell_subtype = <CELLTYPE_COLUMN>,
-#         donor_id = <DONOR_COLUMN>,
-#         condition = <CONDITION_COLUMN>
-#     ) %>%
-#     filter(!is.na(cdr3b_aa) & cdr3b_aa != "") %>%
-#     filter(nchar(cdr3b_aa) >= 12 & nchar(cdr3b_aa) <= 18) %>%
-#     mutate(
-#         study = "Ma_2025",
-#         tissue = "brain",
-#         compartment = "CNS"
-#     ) %>%
-#     glimpse()
+# CDR3 length distribution
+ma_cdr3b %>%
+    mutate(cdr3_len = nchar(cdr3b_aa)) %>%
+    dplyr::count(cdr3_len) %>%
+    print()
 
-# T cell subtype breakdown
-# ma_cdr3b %>% count(t_cell_subtype, sort = TRUE) %>% print()
-# ma_cdr3b %>% count(condition) %>% print()
+# Condition breakdown
+ma_cdr3b %>% dplyr::count(condition) %>% print()
+ma_cdr3b %>% dplyr::count(tissue) %>% print()
+
+message(glue("Ma et al. 2025: {nrow(ma_cdr3b)} TRB CDR3 sequences (length 12-18)"))
+
 ```
 
 
 # Harmonize CDR3-Beta Data Across Studies
 
 ```{r harmonize-cdr3b}
-# Combine CDR3-beta data from both studies
-# Standardize column names to: cell_id, donor_id, condition, tissue,
-#   t_cell_subtype, cdr3b_aa, study, compartment
+# Standardize columns across studies:
+#   donor_id, condition, tissue, t_cell_subtype, cdr3b_aa, study, compartment
 
-# all_cdr3b <- bind_rows(wang_cdr3b, ma_cdr3b) %>%
-#     mutate(
-#         # Standardize condition labels
-#         condition = case_when(
-#             grepl("PD|parkinson|case", condition, ignore.case = TRUE) ~ "PD",
-#             grepl("HC|healthy|control|ctrl", condition, ignore.case = TRUE) ~ "HC",
-#             TRUE ~ condition
-#         ),
-#         cdr3_len = nchar(cdr3b_aa)
-#     ) %>%
-#     glimpse()
+# Select harmonized columns from each study
+wang_harmonized <- wang_cdr3b %>%
+    dplyr::select(donor_id, condition, tissue, t_cell_subtype, cell,
+                  cdr3b_aa, study, compartment)
+
+# Moquin-Beaudry — uncomment when data is available
+# moquin_harmonized <- moquin_cdr3b %>%
+#     dplyr::select(donor_id, condition, tissue, t_cell_subtype,
+#                   cdr3b_aa, study, compartment)
+
+ma_harmonized <- ma_cdr3b %>%
+    dplyr::select(donor_id, condition, tissue, t_cell_subtype,
+                  cdr3b_aa, study, compartment)
+
+# Combine all studies (add moquin_harmonized when available)
+all_cdr3b <- bind_rows(wang_harmonized, ma_harmonized) %>%
+    mutate(
+        # Standardize condition labels
+        condition = case_when(
+            grepl("PD|parkinson|case", condition, ignore.case = TRUE) ~ "PD",
+            grepl("HC|healthy|control|ctrl", condition, ignore.case = TRUE) ~ "HC",
+            TRUE ~ condition
+        ),
+        cdr3_len = nchar(cdr3b_aa)
+    ) %>%
+    glimpse()
 
 # Summary
-# message(glue("Total cells with CDR3-beta: {nrow(all_cdr3b)}"))
-# all_cdr3b %>% count(study, condition) %>% print()
-# all_cdr3b %>% count(study, compartment) %>% print()
-# all_cdr3b %>% count(study, t_cell_subtype, sort = TRUE) %>% print()
+message(glue("Total CDR3-beta entries: {nrow(all_cdr3b)}"))
+all_cdr3b %>% dplyr::count(study, condition) %>% print()
+all_cdr3b %>% dplyr::count(study, compartment) %>% print()
+all_cdr3b %>% dplyr::count(study, t_cell_subtype, sort = TRUE) %>% print()
 
 # CDR3 length distribution by study
-# all_cdr3b %>%
-#     ggplot(aes(x = cdr3_len, fill = study)) +
-#     geom_bar(position = "dodge") +
-#     theme_bw() +
-#     labs(x = "CDR3-beta length (AA)", y = "Count", fill = "Study") +
-#     scale_fill_npg()
+p_cdr3_len <- all_cdr3b %>%
+    ggplot(aes(x = cdr3_len, fill = study)) +
+    geom_bar(position = "dodge") +
+    theme_bw() +
+    labs(x = "CDR3-beta length (AA)", y = "Count", fill = "Study") +
+    scale_fill_npg()
+p_cdr3_len
+
+ggsave(
+    filename = glue("{sc_figures_dir}/cdr3b_length_distribution.png"),
+    plot = p_cdr3_len,
+    width = 8, height = 5, dpi = 300
+)
 
 # Save harmonized data
-# saveRDS(all_cdr3b, glue("{sc_results_dir}/harmonized_cdr3b_singlecell.rds"))
+saveRDS(all_cdr3b, glue("{sc_results_dir}/harmonized_cdr3b_singlecell.rds"))
 ```
 
 
@@ -491,185 +608,1136 @@ names(betacoef_list) %>% print()
 ## Score Single-Cell CDR3-Beta Sequences
 
 ```{r score-cdr3b}
-# all_cdr3b <- readRDS(glue("{sc_results_dir}/harmonized_cdr3b_singlecell.rds"))
+all_cdr3b <- readRDS(glue("{sc_results_dir}/harmonized_cdr3b_singlecell.rds"))
 
 # Get unique CDR3-beta sequences to avoid redundant scoring
-# unique_cdr3b <- unique(all_cdr3b$cdr3b_aa)
-# message(glue("Scoring {length(unique_cdr3b)} unique CDR3-beta sequences"))
+unique_cdr3b <- unique(all_cdr3b$cdr3b_aa)
+message(glue("Scoring {length(unique_cdr3b)} unique CDR3-beta sequences"))
 
 # Score across all phenotype types
-# tic("CDR3 risk scoring")
-# score_results <- list()
-# for (p in names(betacoef_list)) {
-#     message(glue("Scoring phenotype: {p}"))
-#     score_results[[p]] <- unique_cdr3b %>%
-#         purrr::set_names() %>%
-#         furrr::future_map_dbl(
-#             ~ score_tcrs_with_betacoefs(
-#                 x = .,
-#                 phenotype_type = p,
-#                 betacoef_list = betacoef_list
-#             )
-#         )
-# }
-# toc()
+tic("CDR3 risk scoring")
+score_results <- list()
+for (p in names(betacoef_list)) {
+    message(glue("Scoring phenotype: {p}"))
+    score_results[[p]] <- unique_cdr3b %>%
+        purrr::set_names() %>%
+        furrr::future_map_dbl(
+            ~ score_tcrs_with_betacoefs(
+                x = .,
+                phenotype_type = p,
+                betacoef_list = betacoef_list
+            )
+        )
+}
+toc()
 
-# Convert to data frame
-# score_df <- score_results %>%
-#     purrr::imap(~ tibble(cdr3b_aa = names(.x), !!.y := .x)) %>%
-#     purrr::reduce(left_join, by = "cdr3b_aa")
+# Convert to data frame — one column per phenotype
+score_df <- score_results %>%
+    purrr::imap(~ tibble(cdr3b_aa = names(.x), !!.y := .x)) %>%
+    purrr::reduce(left_join, by = "cdr3b_aa")
 
-# message(glue("Scored {nrow(score_df)} unique CDR3-beta sequences"))
-# score_df %>% glimpse()
+message(glue("Scored {nrow(score_df)} unique CDR3-beta sequences"))
+score_df %>% glimpse()
 ```
 
 
 ## Join Scores to Cell-Level Metadata
 
 ```{r join-scores}
-# scored_cells <- all_cdr3b %>%
-#     left_join(score_df, by = "cdr3b_aa")
+scored_cells <- all_cdr3b %>%
+    left_join(score_df, by = "cdr3b_aa")
 
-# message(glue("Scored cells: {nrow(scored_cells)}"))
-# scored_cells %>% glimpse()
+message(glue("Scored entries: {nrow(scored_cells)}"))
+scored_cells %>% glimpse()
 
 # Save scored data
-# saveRDS(scored_cells, glue("{sc_results_dir}/scored_cdr3b_singlecell.rds"))
+saveRDS(scored_cells, glue("{sc_results_dir}/scored_cdr3b_singlecell.rds"))
 ```
 
 
 # Analyze CDR3 Risk Scores by T Cell Subtype
 
-## CDR3 Risk Score Distributions by Subtype
-
-```{r plot-scores-by-subtype}
-# scored_cells <- readRDS(glue("{sc_results_dir}/scored_cdr3b_singlecell.rds"))
-
-# Select a primary phenotype for visualization
-# primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
-
-# -- Per-study, per-subtype boxplot --
-# p_subtype_scores <- scored_cells %>%
-#     ggplot(aes(x = reorder(t_cell_subtype, .data[[primary_pheno]], FUN = median),
-#                y = .data[[primary_pheno]],
-#                fill = condition)) +
-#     geom_boxplot(outlier.size = 0.3, alpha = 0.8) +
-#     facet_wrap(~study, scales = "free_x") +
-#     coord_flip() +
-#     theme_bw() +
-#     labs(
-#         x = "T Cell Subtype",
-#         y = "CDR3 Risk Score",
-#         fill = "Condition",
-#         title = "CDR3 Risk Score by T Cell Subtype"
-#     ) +
-#     scale_fill_npg()
-
-# ggsave(
-#     filename = glue("{sc_figures_dir}/cdr3_riskscore_by_subtype.png"),
-#     plot = p_subtype_scores,
-#     width = 14, height = 10, dpi = 300
-# )
-# p_subtype_scores
-```
-
-
 ## PD vs HC Comparison Within Each Subtype
 
 ```{r pd-vs-hc-subtype}
-# primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
+scored_cells <- readRDS(glue("{sc_results_dir}/scored_cdr3b_singlecell.rds"))
+# scored_cells$tissue %>% table()
+primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
+scored_cells %>% glimpse()
 
 # Statistical testing: PD vs HC within each subtype
-# subtype_tests <- scored_cells %>%
-#     group_by(study, t_cell_subtype) %>%
-#     filter(n_distinct(condition) == 2) %>%
-#     summarize(
-#         n_pd = sum(condition == "PD"),
-#         n_hc = sum(condition == "HC"),
-#         median_pd = median(.data[[primary_pheno]][condition == "PD"]),
-#         median_hc = median(.data[[primary_pheno]][condition == "HC"]),
-#         wilcox_p = tryCatch(
-#             wilcox.test(
-#                 .data[[primary_pheno]][condition == "PD"],
-#                 .data[[primary_pheno]][condition == "HC"]
-#             )$p.value,
-#             error = function(e) NA_real_
-#         ),
-#         .groups = "drop"
-#     ) %>%
-#     mutate(
-#         delta_median = median_pd - median_hc,
-#         adj_p = p.adjust(wilcox_p, method = "BH")
-#     ) %>%
-#     arrange(adj_p)
+subtype_tests <- scored_cells %>%
+    # filter(study == "Wang_2021") %>%
+    filter(condition != "Alzheimer") %>%
+  filter(t_cell_subtype != "Gamma delta T cells")  %>% 
+    # group_by(t_cell_subtype) %>%
+    group_by(study, t_cell_subtype, tissue) %>%
+    filter(n_distinct(condition) == 2) %>%
+    summarize(
+        n_pd = sum(condition == "PD"),
+        n_hc = sum(condition == "HC"),
+        median_pd = median(.data[[primary_pheno]][condition == "PD"]),
+        median_hc = median(.data[[primary_pheno]][condition == "HC"]),
+        wilcox_p = tryCatch(
+            wilcox.test(
+                .data[[primary_pheno]][condition == "PD"],
+                .data[[primary_pheno]][condition == "HC"]
+            )$p.value,
+            error = function(e) NA_real_
+        ),
+        .groups = "drop"
+    ) %>%
+    mutate(
+        delta_median = median_pd - median_hc,
+        adj_p = p.adjust(wilcox_p, method = "BH")
+    ) %>%
+    arrange(adj_p)
 
-# subtype_tests %>% print(n = 50)
+subtype_tests %>% print(n = 50)
+# subtype_tests %>% View()
+saveRDS(subtype_tests, glue("{sc_results_dir}/subtype_wilcox_tests.rds"))
 
-# saveRDS(subtype_tests, glue("{sc_results_dir}/subtype_wilcox_tests.rds"))
+```
+
+## CDR3 Risk Score Distributions by Subtype
+
+```{r}
+wang_data <- scored_cells %>%
+  filter(condition != "Alzheimer", study == "Wang_2021") %>% 
+  filter(t_cell_subtype != "Gamma delta T cells") 
+
+# ── One-vs-rest Wilcoxon tests, stratified by tissue ──
+subtype_vs_rest <- wang_data %>%
+  distinct(tissue, t_cell_subtype) %>%
+  pmap_dfr(function(tissue, t_cell_subtype) {
+    tissue_data <- wang_data %>% filter(tissue == !!tissue)
+    in_grp  <- tissue_data %>% filter(t_cell_subtype == !!t_cell_subtype) %>% pull(.data[[primary_pheno]])
+    out_grp <- tissue_data %>% filter(t_cell_subtype != !!t_cell_subtype) %>% pull(.data[[primary_pheno]])
+    
+    # Guard against subtypes with too few cells in a tissue
+    if (length(in_grp) < 5 || length(out_grp) < 5) {
+      return(tibble(
+        tissue = tissue, t_cell_subtype = t_cell_subtype,
+        n = length(in_grp), median_subtype = median(in_grp),
+        median_rest = median(out_grp), wilcox_p = NA_real_,
+        delta_median = median(in_grp) - median(out_grp)
+      ))
+    }
+    
+    wt <- wilcox.test(in_grp, out_grp)
+    tibble(
+      tissue = tissue,
+      t_cell_subtype = t_cell_subtype,
+      n = length(in_grp),
+      median_subtype = median(in_grp),
+      median_rest = median(out_grp),
+      wilcox_p = wt$p.value,
+      delta_median = median(in_grp) - median(out_grp)
+    )
+  }) %>%
+  # Adjust p-values within each tissue separately
+  group_by(tissue) %>%
+  mutate(
+    p_adj = p.adjust(wilcox_p, method = "BH"),
+    direction = case_when(
+      is.na(p_adj)                      ~ "NS",
+      p_adj < 0.05 & delta_median > 0   ~ "Reduced Protection",
+      p_adj < 0.05 & delta_median < 0   ~ "Increased Protection",
+      TRUE                              ~ "NS"
+    ),
+    p_label = case_when(
+      is.na(p_adj)  ~ NA_character_,
+      p_adj < 0.001 ~ "p < 0.001",
+      p_adj < 0.05  ~ paste0("p = ", formatC(p_adj, format = "f", digits = 3)),
+      TRUE          ~ NA_character_
+    )
+  ) %>%
+  ungroup()
+
+# ── Merge direction back into plot data ──
+plot_data <- wang_data %>%
+  left_join(
+    subtype_vs_rest %>% select(tissue, t_cell_subtype, direction, p_label, delta_median),
+    by = c("tissue", "t_cell_subtype")
+  ) %>%
+  mutate(t_cell_subtype = reorder(t_cell_subtype, .data[[primary_pheno]], FUN = median))
+
+# ── Annotation df for p-value labels (significant only) ──
+sig_labels <- subtype_vs_rest %>%
+  filter(!is.na(p_label)) %>%
+  mutate(t_cell_subtype = factor(t_cell_subtype, levels = levels(plot_data$t_cell_subtype)))
+
+# ── Kruskal-Wallis per tissue ──
+kw_labels <- wang_data %>%
+  group_by(tissue) %>%
+  summarise(
+    kw_stat = kruskal.test(.data[[primary_pheno]] ~ t_cell_subtype)$statistic,
+    kw_p    = kruskal.test(.data[[primary_pheno]] ~ t_cell_subtype)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    kw_label = glue("Kruskal-Wallis \u03C7\u00B2 = {round(kw_stat, 1)}, p < 2.2e-16")
+  )
+
+# ── Plot ──
+p_subtype_enrichment <- ggplot(plot_data, aes(x = .data[[primary_pheno]],
+                                               y = t_cell_subtype,
+                                               fill = direction)) +
+  geom_density_ridges(alpha = 0.7, scale = 1.1, linewidth = 0.4,
+                      rel_min_height = 0.01) +
+  geom_vline(xintercept = 0, linetype = "dotted", color = "grey40") +
+  # P-values for significant subtypes
+  geom_text(
+    data = sig_labels,
+    aes(x = 1.8, y = t_cell_subtype, label = p_label),
+    inherit.aes = FALSE,
+    hjust = 0, size = 2.5, fontface = "italic", color = "grey30"
+  ) +
+  # Kruskal-Wallis annotation per tissue panel
+  geom_text(
+    data = kw_labels,
+    aes(x = 2.8, y = Inf, label = kw_label),
+    inherit.aes = FALSE,
+    hjust = 1, vjust = 1.5, size = 2.5, fontface = "italic", color = "grey30"
+  ) +
+  facet_grid(. ~ tissue) +
+  scale_fill_manual(
+    values = c(
+      "Reduced Protection"  = "#E8853B",
+      "Increased Protection" = "#5B7E9E",
+      "NS"                   = "#E8E8E8"
+    ),
+    name = "vs. all other subtypes"
+  ) +
+  coord_cartesian(xlim = c(-1.75, 2.5), clip = "off") +
+  theme_minimal(base_size = 12) +
+  labs(
+    x = "CDR3 Risk Score",
+    y = NULL,
+    title = "CDR3 risk score distributions vary across T cell subtypes",
+    subtitle = "Color indicates subtypes significantly enriched or depleted relative to all others within each tissue (BH-adjusted p < 0.05)"
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 9, color = "grey40"),
+    plot.margin = margin(5.5, 50, 5.5, 5.5),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(face = "bold", size = 11)
+  )
+
+ggsave(
+  filename = 
+  glue("{sc_figures_dir}/cdr3_riskscore_by_subtype_enrichment_by_tissue.png"),
+  plot = p_subtype_enrichment, width = 12, height = 8, dpi = 300
+)
+
 ```
 
 
-## Blood vs Brain Compartment Comparison
+```{r}
+scored_cells <- readRDS(glue("{sc_results_dir}/scored_cdr3b_singlecell.rds"))
+primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
 
-```{r compartment-comparison}
-# Compare CDR3 risk score profiles across tissue compartments
-# primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
+# ── Data ──
+wang_data <- scored_cells %>%
+  filter(condition != "Alzheimer", study == "Wang_2021") %>% 
+  filter(t_cell_subtype != "Gamma delta T cells") 
 
-# p_compartment <- scored_cells %>%
-#     ggplot(aes(x = compartment, y = .data[[primary_pheno]], fill = condition)) +
-#     geom_violin(alpha = 0.6, scale = "width") +
-#     geom_boxplot(width = 0.2, outlier.size = 0.3, position = position_dodge(0.9)) +
-#     theme_bw() +
-#     labs(
-#         x = "Compartment",
-#         y = "CDR3 Risk Score",
-#         fill = "Condition",
-#         title = "CDR3 Risk Score: Blood vs Brain"
-#     ) +
-#     scale_fill_npg()
+# ── Kruskal-Wallis per tissue ──
+kw_per_tissue <- wang_data %>%
+  group_by(tissue) %>%
+  summarise(
+    kw_stat = kruskal.test(.data[[primary_pheno]] ~ t_cell_subtype)$statistic,
+    kw_p    = kruskal.test(.data[[primary_pheno]] ~ t_cell_subtype)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(kw_label = glue("Kruskal-Wallis \u03C7\u00B2 = {round(kw_stat, 1)}, p = {formatC(kw_p, format = 'e', digits = 1)}"))
 
-# ggsave(
-#     filename = glue("{sc_figures_dir}/cdr3_riskscore_compartment.png"),
-#     plot = p_compartment,
-#     width = 8, height = 6, dpi = 300
-# )
-# p_compartment
+# ── Per-tissue, per-subtype Wilcoxon: PD vs HC ──
+subtype_tests_tissue <- wang_data %>%
+  distinct(tissue, t_cell_subtype) %>%
+  pmap_dfr(function(tissue, t_cell_subtype) {
+    tissue_subtype_data <- wang_data %>%
+      filter(tissue == !!tissue, t_cell_subtype == !!t_cell_subtype)
+    
+    pd_vals <- tissue_subtype_data %>% filter(condition == "PD") %>% pull(.data[[primary_pheno]])
+    hc_vals <- tissue_subtype_data %>% filter(condition != "PD") %>% pull(.data[[primary_pheno]])
+    
+    if (length(pd_vals) < 5 || length(hc_vals) < 5) {
+      return(tibble(
+        tissue = tissue, t_cell_subtype = t_cell_subtype,
+        n_pd = length(pd_vals), n_hc = length(hc_vals),
+        median_pd = median(pd_vals), median_hc = median(hc_vals),
+        wilcox_p = NA_real_, delta_median = median(pd_vals) - median(hc_vals)
+      ))
+    }
+    
+    wt <- wilcox.test(pd_vals, hc_vals)
+    tibble(
+      tissue = tissue,
+      t_cell_subtype = t_cell_subtype,
+      n_pd = length(pd_vals),
+      n_hc = length(hc_vals),
+      median_pd = median(pd_vals),
+      median_hc = median(hc_vals),
+      wilcox_p = wt$p.value,
+      delta_median = median(pd_vals) - median(hc_vals)
+    )
+  }) %>%
+  group_by(tissue) %>%
+  mutate(p_adj = p.adjust(wilcox_p, method = "BH")) %>%
+  ungroup()
+
+# ── Significance labels ──
+sig_labels <- subtype_tests_tissue %>%
+  filter(!is.na(p_adj), p_adj < 0.05) %>%
+  mutate(
+    p_label = case_when(
+      p_adj < 0.001 ~ formatC(p_adj, format = "e", digits = 1),
+      TRUE ~ formatC(p_adj, format = "f", digits = 3)
+    ),
+    sig_star = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE ~ ""
+    ),
+    display_label = paste0(sig_star, "  p = ", p_label)
+  )
+
+# ── Build plot data with consistent subtype ordering ──
+plot_data <- wang_data %>%
+  mutate(t_cell_subtype = reorder(t_cell_subtype, .data[[primary_pheno]], FUN = median))
+
+# Match factor levels for annotation layers
+sig_labels <- sig_labels %>%
+  mutate(t_cell_subtype = factor(t_cell_subtype, levels = levels(plot_data$t_cell_subtype)))
+
+kw_per_tissue_plot <- kw_per_tissue  # already has tissue column for faceting
+
+# ── Plot ──
+p_subtype_scores_groups <- ggplot(plot_data, aes(x = .data[[primary_pheno]],
+                                                  y = t_cell_subtype,
+                                                  fill = condition)) +
+  ggridges::geom_density_ridges(alpha = 0.6, scale = 1.2, linewidth = 0.5,
+                                rel_min_height = 0.01) +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  # P-value labels for significant subtypes
+  geom_text(
+    data = sig_labels,
+    aes(x = 1.85, y = t_cell_subtype, label = display_label),
+    inherit.aes = FALSE,
+    hjust = 0, size = 2.5, fontface = "italic", color = "grey30"
+  ) +
+  # Kruskal-Wallis per tissue panel
+  geom_text(
+    data = kw_per_tissue_plot,
+    aes(x = 3, y = Inf, label = kw_label),
+    inherit.aes = FALSE,
+    hjust = 1, vjust = 1.5, size = 2.5, fontface = "italic", color = "grey30"
+  ) +
+  facet_grid(. ~ tissue) +
+  scale_fill_manual(values = c("darkgrey", "darkred")) +
+  theme_minimal(base_size = 12) +
+  labs(
+    x = "CDR3 Risk Score",
+    y = NULL,
+    fill = "Condition",
+    title = "CDR3 risk score distributions shift in PD across T cell subtypes",
+    subtitle = "PD vs. HC Wilcoxon tests per subtype within each tissue (BH-adjusted, significant shown)"
+  ) +
+  coord_cartesian(xlim = c(-2, 2.8), clip = "off") +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 9, color = "grey40"),
+    plot.margin = margin(5.5, 50, 5.5, 5.5),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(face = "bold", size = 11)
+  )
+
+ggsave(
+  filename = glue("{sc_figures_dir}/cdr3_riskscore_by_subtype_groups_by_tissue.png"),
+  plot = p_subtype_scores_groups,
+  width = 12, height = 8, dpi = 300
+)
+
 ```
+
 
 
 ## Summary Heatmap: Mean CDR3 Risk Score by Subtype x Condition
 
 ```{r summary-heatmap}
-# primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
+heatmap_data <- scored_cells %>%
+  filter(t_cell_subtype != "Gamma delta T cells") %>% 
+    group_by(study, t_cell_subtype, tissue, condition) %>%
+    summarize(
+        mean_score = mean(.data[[primary_pheno]]),
+        n_cells = n(),
+        .groups = "drop"
+    )
 
-# heatmap_data <- scored_cells %>%
-#     group_by(study, t_cell_subtype, condition) %>%
-#     summarize(
-#         mean_score = mean(.data[[primary_pheno]]),
-#         n_cells = n(),
-#         .groups = "drop"
-#     )
+p_heatmap <- heatmap_data %>%
+    filter(study == "Wang_2021") %>%
+    filter(condition != "Alzheimer") %>%
+    filter(t_cell_subtype != "Gamma delta T cells") %>% 
+    mutate(
+        t_cell_subtype = factor(
+            t_cell_subtype,
+            levels = scored_cells %>%
+                filter(condition != "Alzheimer", study == "Wang_2021") %>%
+                group_by(t_cell_subtype) %>%
+                summarize(median_score = median(.data[[primary_pheno]]), .groups = "drop") %>%
+                arrange(median_score) %>%
+                pull(t_cell_subtype)
+        )
+    ) %>%
+    ggplot(aes(x = condition, y = t_cell_subtype, fill = mean_score)) +
+    geom_tile() +
+    geom_text(aes(label = n_cells), size = 2.5) +
+    facet_wrap( ~ tissue) +
+    scale_fill_scico(palette = "vik", midpoint = 0) +
+    theme_bw() +
+    labs(
+        x = "Condition", y = "T Cell Subtype",
+        fill = "Mean CDR3\nRisk Score",
+        title = "CDR3 Risk Score Heatmap"
+    )
 
-# p_heatmap <- heatmap_data %>%
-#     ggplot(aes(x = condition, y = t_cell_subtype, fill = mean_score)) +
-#     geom_tile() +
-#     geom_text(aes(label = n_cells), size = 2.5) +
-#     facet_wrap(~study, scales = "free_y") +
-#     scale_fill_scico(palette = "vik", midpoint = 0) +
-#     theme_bw() +
-#     labs(
-#         x = "Condition", y = "T Cell Subtype",
-#         fill = "Mean CDR3\nRisk Score",
-#         title = "CDR3 Risk Score Heatmap"
-#     )
+ggsave(
+    filename = glue("{sc_figures_dir}/cdr3_riskscore_heatmap.png"),
+    plot = p_heatmap,
+    width = 6, height = 7, dpi = 300
+)
+p_heatmap
 
-# ggsave(
-#     filename = glue("{sc_figures_dir}/cdr3_riskscore_heatmap.png"),
-#     plot = p_heatmap,
-#     width = 12, height = 10, dpi = 300
-# )
-# p_heatmap
 ```
+
+
+## Closely examining the gamma delta T cell subtype
+
+```{r}
+wang_meta <- read.delim(glue("{wang_dir}/metadata.txt"), stringsAsFactors = FALSE) %>%
+    as_tibble() %>%
+    janitor::clean_names()
+
+message(glue("Wang et al. 2021: {nrow(wang_meta)} cells"))
+wang_count_mat <- readRDS(glue("{wang_dir}/counts.rds"))
+
+# Match metadata to count matrix columns
+common_cells <- intersect(colnames(wang_count_mat), wang_meta$cell)
+wang_meta <- wang_meta %>%
+    filter(cell %in% common_cells) %>%
+    mutate(cell = factor(cell, levels = common_cells)) %>%
+    arrange(cell) %>%
+    mutate(cell = as.character(cell))
+wang_count_mat <- wang_count_mat[, common_cells]
+
+message(glue("Matched cells: {length(common_cells)}"))
+
+# Blood only for marker sanity check
+wang_blood_meta <- wang_meta %>%
+    filter(grepl("Blood", sample_type))
+wang_blood_counts <- wang_count_mat[, wang_blood_meta$cell]
+
+message(glue("Blood cells: {ncol(wang_blood_counts)}"))
+wang_blood_meta %>% count(cell_type2, sort = TRUE) %>% print(n = 30)
+
+# Canonical/commonly used gamma-delta T-cell markers
+gd_markers <- c("TRDC", "TRGC1", "TRGC2", "TRDV2", "TRGV9", "TRGV10", "TRGC3")
+gd_markers_found <- intersect(gd_markers, rownames(wang_blood_counts))
+gd_markers_missing <- setdiff(gd_markers, gd_markers_found)
+
+message(glue("Markers found: {length(gd_markers_found)} / {length(gd_markers)}"))
+if (length(gd_markers_missing) > 0) {
+    message(glue("Missing markers: {paste(gd_markers_missing, collapse = ', ')}"))
+}
+
+if (length(gd_markers_found) == 0) {
+    stop("None of the requested gamma-delta markers were found in wang_blood_counts.")
+}
+
+# Log-normalize counts to counts-per-10k
+lib_size <- Matrix::colSums(wang_blood_counts)
+norm_counts <- Matrix::t(Matrix::t(wang_blood_counts) / lib_size * 1e4)
+log_norm_counts <- log1p(norm_counts)
+
+# Build marker summary by cell subtype
+marker_long <- purrr::map_dfr(gd_markers_found, function(g) {
+    vals <- as.numeric(log_norm_counts[g, ])
+    tibble(
+        marker = g,
+        cell = colnames(log_norm_counts),
+        expr = vals
+    )
+}) %>%
+    left_join(
+        wang_blood_meta %>% select(cell, cell_type2),
+        by = "cell"
+    ) %>%
+    group_by(cell_type2, marker) %>%
+    summarize(
+        avg_expr = mean(expr, na.rm = TRUE),
+        pct_expr = mean(expr > 0, na.rm = TRUE) * 100,
+        .groups = "drop"
+    )
+
+subtype_order <- marker_long %>%
+    filter(marker == "TRDC") %>%
+    arrange(desc(avg_expr)) %>%
+    pull(cell_type2)
+
+p_gd_markers <- marker_long %>%
+    mutate(
+        cell_type2 = factor(cell_type2, levels = subtype_order),
+        marker = factor(marker, levels = gd_markers_found)
+    ) %>%
+    ggplot(aes(x = marker, y = cell_type2)) +
+    geom_point(aes(size = pct_expr, color = avg_expr)) +
+    scale_color_scico(palette = "vik", midpoint = 0) +
+    scale_size_continuous(range = c(1, 8), limits = c(0, 100)) +
+    theme_bw() +
+    labs(
+        x = "Gamma-delta marker",
+        y = "Wang blood cell subtype",
+        color = "Avg log1p(CP10k)",
+        size = "% cells > 0",
+        title = "Gamma-delta T-cell marker expression across Wang blood subtypes"
+    ) +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(face = "bold")
+    )
+
+ggsave(
+    filename = glue("{sc_figures_dir}/wang_blood_gamma_delta_marker_check.png"),
+    plot = p_gd_markers,
+    width = 8,
+    height = 7,
+    dpi = 300
+)
+# p_gd_markers
+# it looks like these cells do express Gamma / Delta TCR receptors 
+
+```
+
+
+## Wang-focused mechanistic follow-up analyses
+
+```{r wang-followup-setup}
+primary_pheno <- "cdr3_p2_strat_filtered_cv1k"
+
+wang_meta <- read.delim(glue("{wang_dir}/metadata.txt"), stringsAsFactors = FALSE) %>%
+    as_tibble() %>%
+    janitor::clean_names()
+wang_count_mat <- readRDS(glue("{wang_dir}/counts.rds"))
+scored_cells <- readRDS(glue("{sc_results_dir}/scored_cdr3b_singlecell.rds"))
+scored_cells %>% glimpse()
+
+# Harmonize Wang metadata and align with count matrix columns
+common_cells <- intersect(colnames(wang_count_mat), wang_meta$cell)
+wang_meta <- wang_meta %>%
+    filter(cell %in% common_cells) %>%
+    mutate(
+        condition = strex::str_before_first(sample_type, "\\("),
+        condition = gsub("MCI", "PD", condition),
+        condition = gsub("Parkinson", "PD", condition),
+        condition = case_when(
+            grepl("PD|parkinson|case", condition, ignore.case = TRUE) ~ "PD",
+            grepl("HC|healthy|control|ctrl", condition, ignore.case = TRUE) ~ "HC",
+            TRUE ~ condition
+        ),
+        tissue = case_when(
+            grepl("CSF", sample_type) ~ "CSF",
+            grepl("Blood", sample_type) ~ "Blood",
+            TRUE ~ "Unknown"
+        ),
+        donor_id = sample,
+        t_cell_subtype = cell_type2,
+        cdr3b_aa = beta_cdr3_aa,
+        study = "Wang_2021",
+        compartment = tissue
+    ) %>%
+    arrange(match(cell, common_cells))
+
+wang_count_mat <- wang_count_mat[, wang_meta$cell]
+stopifnot(all(colnames(wang_count_mat) == wang_meta$cell))
+
+wang_seurat <- CreateSeuratObject(
+    counts = wang_count_mat,
+    meta.data = wang_meta %>% column_to_rownames("cell")
+)
+
+# Attach CDR3 score primarily by cell barcode, then fallback by donor+CDR3
+wang_scores <- scored_cells %>%
+    filter(study == "Wang_2021") %>%
+    mutate(cell = paste0(donor_id, "-", cell))
+
+meta_tbl <- wang_seurat@meta.data %>%
+    rownames_to_column("cell") %>%
+    left_join(
+        wang_scores %>% select(cell, all_of(primary_pheno)),
+        by = "cell"
+    )
+
+missing_score <- is.na(meta_tbl[[primary_pheno]])
+if (any(missing_score)) {
+    fallback_tbl <- wang_scores %>%
+        select(donor_id, cdr3b_aa, all_of(primary_pheno)) %>%
+        distinct()
+    meta_tbl <- meta_tbl %>%
+        left_join(fallback_tbl, by = c("donor_id", "cdr3b_aa"), suffix = c("", "_fallback")) %>%
+        mutate(
+            !!primary_pheno := if_else(
+                is.na(.data[[primary_pheno]]),
+                .data[[paste0(primary_pheno, "_fallback")]],
+                .data[[primary_pheno]]
+            )
+        ) %>%
+        select(-all_of(paste0(primary_pheno, "_fallback")))
+}
+
+wang_seurat <- AddMetaData(
+    object = wang_seurat,
+    metadata = meta_tbl %>% column_to_rownames("cell")
+)
+
+wang_followup <- wang_seurat@meta.data %>%
+    rownames_to_column("cell") %>%
+    filter(tissue == "Blood", condition %in% c("PD", "HC")) %>%
+    filter(!is.na(.data[[primary_pheno]])) %>%
+    group_by(donor_id, clonotype) %>%
+    mutate(clone_size = n()) %>%
+    ungroup()
+
+message(glue("Follow-up cells retained: {nrow(wang_followup)}"))
+message(glue("Missing CDR3 score fraction: {round(mean(is.na(meta_tbl[[primary_pheno]])), 4)}"))
+wang_followup %>% count(t_cell_subtype, sort = TRUE) %>% print(n = 30)
+
+saveRDS(wang_followup, glue("{sc_results_dir}/wang_followup_blood_meta.rds"))
+```
+
+```{r wang-analysis-4-donor-coupling}
+subtype_map <- list(
+    cytotoxic_cd4 = "Cytotoxic CD4+ T cells",
+    central_memory_cd8 = "Central memory CD8+ T cells"
+)
+
+missing_subtypes <- setdiff(unlist(subtype_map), unique(wang_followup$t_cell_subtype))
+if (length(missing_subtypes) > 0) {
+    stop(glue("Missing required subtypes: {paste(missing_subtypes, collapse = ', ')}"))
+}
+
+donor_pair <- wang_followup %>%
+    filter(t_cell_subtype %in% unlist(subtype_map)) %>%
+    mutate(subtype_key = case_when(
+        t_cell_subtype == subtype_map$cytotoxic_cd4 ~ "cytotoxic_cd4",
+        t_cell_subtype == subtype_map$central_memory_cd8 ~ "central_memory_cd8",
+        TRUE ~ "other"
+    )) %>%
+    filter(subtype_key != "other") %>%
+    group_by(condition, donor_id, subtype_key) %>%
+    summarize(mean_score = mean(.data[[primary_pheno]], na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = subtype_key, values_from = mean_score) %>%
+    drop_na(cytotoxic_cd4, central_memory_cd8)
+
+cor_stats <- donor_pair %>%
+    group_by(condition) %>%
+    summarize(
+        n_donors = n(),
+        spearman_rho = cor(cytotoxic_cd4, central_memory_cd8, method = "spearman"),
+        spearman_p = suppressWarnings(cor.test(cytotoxic_cd4, central_memory_cd8, method = "spearman")$p.value),
+        pearson_r = cor(cytotoxic_cd4, central_memory_cd8, method = "pearson"),
+        pearson_p = suppressWarnings(cor.test(cytotoxic_cd4, central_memory_cd8, method = "pearson")$p.value),
+        .groups = "drop"
+    )
+
+p_donor_coupling <- donor_pair %>%
+    ggplot(aes(x = central_memory_cd8, y = cytotoxic_cd4, color = condition, label = donor_id)) +
+    geom_point(size = 3, alpha = 0.9) +
+    ggrepel::geom_text_repel(size = 3, max.overlaps = 50) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 0.7) +
+    theme_bw() +
+    labs(
+        x = "Mean CDR3 score (Central memory CD8)",
+        y = "Mean CDR3 score (Cytotoxic CD4)",
+        title = "Within-donor coupling of key Wang blood populations"
+    )
+
+ggsave(
+    filename = glue("{sc_figures_dir}/wang_donor_coupling_cytotoxicCD4_vs_cmCD8.png"),
+    plot = p_donor_coupling, width = 7, height = 6, dpi = 300
+)
+
+write_csv(cor_stats, glue("{sc_results_dir}/wang_donor_coupling_stats.csv"))
+saveRDS(donor_pair, glue("{sc_results_dir}/wang_donor_coupling_pairs.rds"))
+
+cor_stats %>% print()
+p_donor_coupling
+```
+
+```{r wang-analysis-1-clone-size}
+clone_size_df <- wang_followup %>%
+    filter(t_cell_subtype %in% c("Cytotoxic CD4+ T cells", "Central memory CD8+ T cells")) %>%
+    mutate(
+        clone_bin = case_when(
+            clone_size == 1 ~ "singleton",
+            clone_size >= 2 & clone_size <= 4 ~ "small_2_4",
+            clone_size >= 5 & clone_size <= 19 ~ "medium_5_19",
+            clone_size >= 20 ~ "large_20plus",
+            TRUE ~ "other"
+        ),
+        clone_bin = factor(clone_bin, levels = c("singleton", "small_2_4", "medium_5_19", "large_20plus"))
+    ) %>%
+    filter(!is.na(clone_bin))
+
+clone_models <- clone_size_df %>%
+    group_split(t_cell_subtype) %>%
+    set_names(unique(clone_size_df$t_cell_subtype)) %>%
+    purrr::map(~ lm(reformulate(c("log1p(clone_size)", "condition", "log1p(clone_size):condition"), response = primary_pheno), data = .x))
+
+clone_model_stats <- purrr::imap_dfr(
+    clone_models, ~ broom::tidy(.x, conf.int = TRUE) %>% mutate(t_cell_subtype = .y))
+clone_counts <- clone_size_df %>% dplyr::count(t_cell_subtype, condition, clone_bin)
+
+p_clone_bins <- clone_size_df %>%
+    ggplot(aes(x = clone_bin, y = .data[[primary_pheno]], fill = condition)) +
+    geom_violin(scale = "width", alpha = 0.6, trim = FALSE) +
+    geom_boxplot(width = 0.2, outlier.size = 0.2, position = position_dodge(width = 0.9)) +
+    facet_wrap(~ t_cell_subtype, scales = "free_y") +
+    theme_bw() +
+    labs(
+        x = "Clone size bin",
+        y = "CDR3 risk score",
+        title = "CDR3 score stratified by clone size in key blood subtypes"
+    )
+
+ggsave(
+    filename = glue("{sc_figures_dir}/wang_clone_size_stratified_cdr3_score.png"),
+    plot = p_clone_bins, width = 10, height = 6, dpi = 300
+)
+
+write_csv(clone_model_stats, glue("{sc_results_dir}/wang_clone_size_lm_stats.csv"))
+write_csv(clone_counts, glue("{sc_results_dir}/wang_clone_size_bin_counts.csv"))
+saveRDS(clone_size_df, glue("{sc_results_dir}/wang_clone_size_input_df.rds"))
+
+clone_model_stats %>% print(n = 50)
+p_clone_bins
+```
+
+```{r wang-analysis-3-transitioning-retained}
+cd8_transition_df <- wang_followup %>%
+    filter(grepl("CD8", t_cell_subtype)) %>%
+    mutate(
+        cd8_state = case_when(
+            grepl("Central memory", t_cell_subtype, ignore.case = TRUE) ~ "central_memory",
+            grepl("Transition", t_cell_subtype, ignore.case = TRUE) ~ "transitional",
+            grepl("Terminal|Effector", t_cell_subtype, ignore.case = TRUE) ~ "terminal_effector",
+            TRUE ~ NA_character_
+        )
+    ) %>%
+    filter(!is.na(cd8_state), !is.na(clonotype), clonotype != "")
+
+clonotype_labels <- cd8_transition_df %>%
+    group_by(condition, donor_id, clonotype) %>%
+    summarize(
+        has_central = any(cd8_state == "central_memory"),
+        has_downstream = any(cd8_state %in% c("transitional", "terminal_effector")),
+        .groups = "drop"
+    ) %>%
+    filter(has_central) %>%
+    mutate(transition_status = if_else(has_downstream, "transitioning", "retained"))
+
+clonotype_scores <- cd8_transition_df %>%
+    inner_join(clonotype_labels, by = c("condition", "donor_id", "clonotype")) %>%
+    group_by(condition, donor_id, clonotype, transition_status) %>%
+    summarize(mean_score = mean(.data[[primary_pheno]], na.rm = TRUE), .groups = "drop")
+
+transition_tests <- clonotype_scores %>%
+    group_by(condition) %>%
+    summarize(
+        n_transitioning = sum(transition_status == "transitioning"),
+        n_retained = sum(transition_status == "retained"),
+        p_value = tryCatch(
+            wilcox.test(mean_score ~ transition_status)$p.value,
+            error = function(e) NA_real_
+        ),
+        delta_median = median(mean_score[transition_status == "transitioning"], na.rm = TRUE) -
+            median(mean_score[transition_status == "retained"], na.rm = TRUE),
+        .groups = "drop"
+    ) %>%
+    mutate(p_adj = p.adjust(p_value, method = "BH"))
+
+p_transition <- clonotype_scores %>%
+    ggplot(aes(x = transition_status, y = mean_score, fill = transition_status)) +
+    geom_violin(trim = FALSE, alpha = 0.6) +
+    geom_boxplot(width = 0.2, outlier.size = 0.4) +
+    facet_wrap(~ condition) +
+    theme_bw() +
+    labs(
+        x = "CD8 clonotype class",
+        y = "Mean CDR3 risk score",
+        title = "Transitioning vs retained central-memory CD8 clonotypes"
+    ) +
+    theme(legend.position = "none")
+
+ggsave(
+    filename = glue("{sc_figures_dir}/wang_cd8_transitioning_vs_retained_cdr3_score.png"),
+    plot = p_transition, width = 8, height = 5, dpi = 300
+)
+
+write_csv(transition_tests, glue("{sc_results_dir}/wang_cd8_transitioning_vs_retained_stats.csv"))
+saveRDS(clonotype_labels, glue("{sc_results_dir}/wang_cd8_transitioning_labels.rds"))
+saveRDS(clonotype_scores, glue("{sc_results_dir}/wang_cd8_transitioning_scores.rds"))
+
+transition_tests %>% print()
+p_transition
+```
+
+```{r wang-analysis-2-trajectory}
+trajectory_df <- wang_followup %>%
+    filter(grepl("CD8", t_cell_subtype)) %>%
+    mutate(
+        cd8_state = case_when(
+            grepl("Central memory", t_cell_subtype, ignore.case = TRUE) ~ "central_memory",
+            grepl("Transition", t_cell_subtype, ignore.case = TRUE) ~ "transitional",
+            grepl("Terminal|Effector", t_cell_subtype, ignore.case = TRUE) ~ "terminal_effector",
+            TRUE ~ NA_character_
+        ),
+        pseudo_stage = case_when(
+            cd8_state == "central_memory" ~ 1,
+            cd8_state == "transitional" ~ 2,
+            cd8_state == "terminal_effector" ~ 3,
+            TRUE ~ NA_real_
+        )
+    ) %>%
+    filter(!is.na(pseudo_stage))
+
+trajectory_model <- lm(
+    reformulate(c("pseudo_stage", "condition", "pseudo_stage:condition"), response = primary_pheno),
+    data = trajectory_df
+)
+
+trajectory_stats <- broom::tidy(trajectory_model, conf.int = TRUE)
+
+p_trajectory <- trajectory_df %>%
+    ggplot(aes(x = pseudo_stage, y = .data[[primary_pheno]], color = condition)) +
+    geom_jitter(width = 0.08, alpha = 0.1, size = 0.5) +
+    geom_smooth(method = "lm", se = TRUE, linewidth = 0.8) +
+    scale_x_continuous(
+        breaks = c(1, 2, 3),
+        labels = c("Central memory", "Transitional", "Terminal/effector")
+    ) +
+    theme_bw() +
+    labs(
+        x = "CD8 trajectory proxy stage",
+        y = "CDR3 risk score",
+        title = "CDR3 score trend across CD8 differentiation trajectory"
+    )
+
+ggsave(
+    filename = glue("{sc_figures_dir}/wang_cd8_trajectory_cdr3_score_trend.png"),
+    plot = p_trajectory, width = 9, height = 5, dpi = 300
+)
+
+write_csv(trajectory_stats, glue("{sc_results_dir}/wang_cd8_trajectory_lm_stats.csv"))
+saveRDS(trajectory_df, glue("{sc_results_dir}/wang_cd8_trajectory_input_df.rds"))
+
+trajectory_stats %>% print(n = 20)
+p_trajectory
+```
+
+```{r wang-analysis-5-de}
+# ────────────────────────────────────────────────────────────────────────────
+# Primary DE: MAST hurdle model with donor random intercept.
+#   ~ score_group + (1 | donor_id)   method = "glmer"
+#
+# Partitioning rules:
+#   - Drop score==0 cells (CDR3 has no match in any significant HLA-risk tag;
+#     "uninformative", not "low").
+#   - Median-split the remaining non-zero score distribution, per subtype.
+#     Every non-zero cell contributes to high or low — no middle is thrown
+#     away, no clone collapse.
+#   - All features kept (TCR V/J/C genes retained — they're informative about
+#     cell-type composition, not just artifacts).
+#
+# Pseudobulk edgeR is kept below as a sensitivity analysis, not primary.
+# ────────────────────────────────────────────────────────────────────────────
+
+suppressPackageStartupMessages({
+    library(MAST); library(SummarizedExperiment); library(edgeR)
+})
+
+de_subtypes <- c("Cytotoxic CD4+ T cells", "Central memory CD8+ T cells")
+
+# --- 1. Partition: drop score==0, median-split within subtype ---
+de_input <- wang_followup %>%
+    filter(condition == "PD") %>%
+    filter(t_cell_subtype %in% de_subtypes) %>%
+    filter(.data[[primary_pheno]] != 0) %>%
+    group_by(t_cell_subtype) %>%
+    mutate(
+        .med = median(.data[[primary_pheno]]),
+        score_group = if_else(.data[[primary_pheno]] > .med, "high", "low")
+    ) %>%
+    ungroup() %>%
+    select(-.med)
+
+message("Cells per (subtype, score_group) after zero-drop + median split:")
+de_input %>% dplyr::count(t_cell_subtype, score_group) %>% print()
+
+message("Donor × score_group cell counts (no clone collapse):")
+de_input %>% dplyr::count(t_cell_subtype, donor_id, score_group) %>%
+    tidyr::pivot_wider(names_from = score_group, values_from = n, values_fill = 0) %>%
+    arrange(t_cell_subtype, donor_id) %>% print(n = 50)
+
+# --- 2. MAST glmer with donor random intercept (PRIMARY) ---
+# FindMarkers does not expose random-effect formula syntax; call MAST::zlm directly.
+# Recipe: zlm(~ score_group + (1|donor_id), method='glmer', ebayes=FALSE,
+#             strictConvergence=FALSE). Uses lme4 under the hood.
+run_mast_glmer <- function(df_sub, seurat_obj,
+                           min_pct = 0.05, n_cores = 8,
+                           checkpoint_dir = sc_results_dir) {
+    subtype_name <- df_sub$t_cell_subtype[1]
+    subtype_slug <- gsub("[^A-Za-z0-9]+", "_", subtype_name)
+    lrt_path <- glue("{checkpoint_dir}/_mast_glmer_lrt__{subtype_slug}.rds")
+    pct_path <- glue("{checkpoint_dir}/_mast_glmer_pct__{subtype_slug}.rds")
+
+    if (file.exists(lrt_path) && file.exists(pct_path)) {
+        message(glue("[{subtype_name}] resuming from checkpoint: {basename(lrt_path)}"))
+        lrt <- readRDS(lrt_path)
+        pct_info <- readRDS(pct_path)
+    } else {
+        cells_use <- df_sub$cell
+        obj_sub <- subset(seurat_obj, cells = cells_use)
+        obj_sub$score_group <- factor(
+            df_sub$score_group[match(colnames(obj_sub), df_sub$cell)],
+            levels = c("low", "high")
+        )
+        obj_sub$donor_id <- factor(df_sub$donor_id[match(colnames(obj_sub), df_sub$cell)])
+        obj_sub <- NormalizeData(obj_sub, verbose = FALSE)
+
+        norm_mat <- GetAssayData(obj_sub, layer = "data")
+        det_low  <- Matrix::rowMeans(norm_mat[, obj_sub$score_group == "low"]  > 0)
+        det_high <- Matrix::rowMeans(norm_mat[, obj_sub$score_group == "high"] > 0)
+        keep_genes <- names(det_low)[pmax(det_low, det_high) >= min_pct]
+        obj_sub <- subset(obj_sub, features = keep_genes)
+
+        message(glue("[{subtype_name}] cells: high={sum(obj_sub$score_group=='high')} low={sum(obj_sub$score_group=='low')}; genes after {min_pct*100}% filter: {length(keep_genes)}; donors: {nlevels(obj_sub$donor_id)}"))
+
+        expr_mat <- as.matrix(GetAssayData(obj_sub, layer = "data"))
+        cdat <- data.frame(
+            wellKey     = colnames(obj_sub),
+            score_group = obj_sub$score_group,
+            donor_id    = obj_sub$donor_id,
+            row.names   = colnames(obj_sub)
+        )
+        fdat <- data.frame(primerid = rownames(obj_sub), row.names = rownames(obj_sub))
+        sca <- MAST::FromMatrix(
+            exprsArray   = expr_mat,
+            cData        = cdat,
+            fData        = fdat,
+            check_sanity = FALSE
+        )
+
+        options(mc.cores = n_cores)
+        tic(glue("MAST glmer fit {subtype_name}"))
+        zlm_fit <- MAST::zlm(
+            formula           = ~ score_group + (1 | donor_id),
+            sca               = sca,
+            method            = "glmer",
+            ebayes            = FALSE,
+            strictConvergence = FALSE,
+            parallel          = TRUE
+        )
+        toc()
+
+        tic(glue("MAST LRT {subtype_name}"))
+        lrt <- MAST::summary(zlm_fit, doLRT = "score_grouphigh")$datatable
+        toc()
+
+        pct_info <- list(
+            genes    = rownames(obj_sub),
+            det_low  = det_low[rownames(obj_sub)],
+            det_high = det_high[rownames(obj_sub)]
+        )
+        saveRDS(lrt,      lrt_path)
+        saveRDS(pct_info, pct_path)
+        message(glue("[{subtype_name}] checkpoint saved: {basename(lrt_path)}"))
+    }
+
+    # Extract from the summary table (use dplyr::rename explicitly — S4Vectors masks it)
+    p_tbl <- lrt[contrast == "score_grouphigh" & component == "H",
+                 .(primerid, `Pr(>Chisq)`)] %>%
+        as_tibble() %>%
+        dplyr::rename(gene = primerid, p_val = `Pr(>Chisq)`)
+
+    fc_tbl <- lrt[contrast == "score_grouphigh" & component == "logFC",
+                  .(primerid, coef, ci.hi, ci.lo)] %>%
+        as_tibble() %>%
+        dplyr::rename(gene        = primerid,
+                      avg_log2FC  = coef,
+                      logFC_ci_hi = ci.hi,
+                      logFC_ci_lo = ci.lo) %>%
+        mutate(
+            avg_log2FC  = avg_log2FC  / log(2),
+            logFC_ci_hi = logFC_ci_hi / log(2),
+            logFC_ci_lo = logFC_ci_lo / log(2)
+        )
+
+    pct_tbl <- tibble(
+        gene  = pct_info$genes,
+        pct.1 = pct_info$det_high,   # "high" is ident.1
+        pct.2 = pct_info$det_low
+    )
+
+    out <- p_tbl %>%
+        left_join(fc_tbl,  by = "gene") %>%
+        left_join(pct_tbl, by = "gene") %>%
+        mutate(
+            p_val_adj      = p.adjust(p_val, method = "BH"),
+            t_cell_subtype = subtype_name
+        )
+
+    n_na <- sum(is.na(out$p_val))
+    message(glue("[{subtype_name}] MAST glmer: {nrow(out)} genes tested; {n_na} failed convergence (p=NA)."))
+    out
+}
+
+mast_glmer_results <- de_input %>%
+    group_split(t_cell_subtype) %>%
+    purrr::map_dfr(~ run_mast_glmer(.x, seurat_obj = wang_seurat))
+
+# --- 3. Primary volcano from MAST glmer ---
+de_results <- mast_glmer_results %>%
+    mutate(
+        p_val_adj_plot = pmax(p_val_adj, .Machine$double.xmin, na.rm = TRUE),
+        neglog10_padj  = -log10(p_val_adj_plot),
+        sig            = !is.na(p_val_adj) & p_val_adj < 0.05,
+        method         = "MAST_glmer_donor_RE"
+    )
+
+de_labels <- de_results %>%
+    filter(sig, is.finite(avg_log2FC), is.finite(neglog10_padj)) %>%
+    group_by(t_cell_subtype) %>%
+    group_modify(~ bind_rows(
+        .x %>% filter(avg_log2FC > 0) %>% arrange(p_val_adj, desc(avg_log2FC)) %>% slice_head(n = 15),
+        .x %>% filter(avg_log2FC < 0) %>% arrange(p_val_adj, avg_log2FC)       %>% slice_head(n = 15)
+    ) %>% distinct(gene, .keep_all = TRUE)) %>%
+    ungroup()
+
+p_de_volcano <- de_results %>%
+    filter(!is.na(p_val_adj)) %>%
+    ggplot(aes(x = avg_log2FC, y = neglog10_padj, color = sig)) +
+    geom_point(alpha = 0.6, size = 1) +
+    ggrepel::geom_text_repel(
+        data = de_labels, aes(label = gene),
+        size = 2.6, max.overlaps = Inf, box.padding = 0.3, point.padding = 0.1,
+        min.segment.length = 0, show.legend = FALSE
+    ) +
+    facet_wrap(~ t_cell_subtype, scales = "free_y") +
+    theme_bw() +
+    labs(
+        x = "log2FC (high CDR3 score vs low; MAST glmer, (1|donor_id))",
+        y = "-log10(FDR)",
+        title = "PD blood DE by CDR3-score median split — MAST with donor random intercept"
+    ) +
+    scale_color_manual(values = c("FALSE" = "grey70", "TRUE" = "darkred")) +
+    theme(legend.position = "none")
+
+ggsave(
+    filename = glue("{sc_figures_dir}/wang_pd_de_high_vs_low_cdr3score_volcano.png"),
+    plot = p_de_volcano, width = 10, height = 5, dpi = 300
+)
+
+write_csv(de_results, glue("{sc_results_dir}/wang_pd_de_high_vs_low_cdr3score_MAST_glmer.csv"))
+saveRDS(de_input, glue("{sc_results_dir}/wang_pd_de_input_groups.rds"))
+
+cat("\n=== MAST glmer: top 15 per subtype (primary) ===\n")
+de_results %>%
+    filter(!is.na(p_val_adj)) %>%
+    arrange(p_val_adj) %>%
+    group_by(t_cell_subtype) %>%
+    slice_head(n = 15) %>%
+    print(n = 30)
+
+# ────────────────────────────────────────────────────────────────────────────
+# Pseudobulk edgeR — SENSITIVITY ANALYSIS ONLY. Not primary.
+# Kept for method cross-check. Reuses the same de_input (no clone collapse,
+# no TCR filter). Drops donors that don't appear in both groups for this
+# paired-donor design (a necessity for edgeR's blocking factor — not for MAST).
+# ────────────────────────────────────────────────────────────────────────────
+counts_mat <- GetAssayData(wang_seurat, assay = "RNA", layer = "counts")
+
+pseudobulk_de <- function(df_sub, min_cells = 10) {
+    subtype_name <- df_sub$t_cell_subtype[1]
+    df_sub <- df_sub %>% mutate(pb_sample = paste(donor_id, score_group, sep = "__"))
+    sample_key <- df_sub %>% distinct(pb_sample, donor_id, score_group)
+    cell_counts <- df_sub %>% dplyr::count(pb_sample)
+    keep_samples <- cell_counts %>% filter(n >= min_cells) %>% pull(pb_sample)
+    if (length(keep_samples) < 4) {
+        warning(glue("{subtype_name}: only {length(keep_samples)} pseudobulk samples with >={min_cells} cells; skipping edgeR."))
+        return(tibble())
+    }
+    sample_key <- sample_key %>% filter(pb_sample %in% keep_samples)
+    if (dplyr::n_distinct(sample_key$score_group) < 2) {
+        warning(glue("{subtype_name}: only one group passes cell-count threshold; skipping edgeR."))
+        return(tibble())
+    }
+    cells_per_sample <- split(df_sub$cell[df_sub$pb_sample %in% keep_samples],
+                              df_sub$pb_sample[df_sub$pb_sample %in% keep_samples])
+    pb_counts <- sapply(cells_per_sample[keep_samples], function(cc) {
+        Matrix::rowSums(counts_mat[, cc, drop = FALSE])
+    })
+    storage.mode(pb_counts) <- "integer"
+    meta <- sample_key[match(colnames(pb_counts), sample_key$pb_sample), ]
+    meta$score_group <- factor(meta$score_group, levels = c("low", "high"))
+    meta$donor_id    <- factor(meta$donor_id)
+
+    keep_donors <- meta %>% as_tibble() %>%
+        group_by(donor_id) %>% filter(dplyr::n_distinct(score_group) == 2) %>%
+        pull(donor_id) %>% as.character() %>% unique()
+    if (length(keep_donors) < 2) {
+        warning(glue("{subtype_name}: <2 donors in both groups; skipping edgeR."))
+        return(tibble())
+    }
+    keep_cols <- meta$donor_id %in% keep_donors
+    pb_counts <- pb_counts[, keep_cols]
+    meta      <- droplevels(meta[keep_cols, ])
+
+    y <- DGEList(counts = pb_counts, samples = meta)
+    keep_genes <- filterByExpr(y, group = meta$score_group)
+    y <- y[keep_genes, , keep.lib.sizes = FALSE]
+    y <- calcNormFactors(y)
+    design <- model.matrix(~ donor_id + score_group, data = meta)
+    y <- estimateDisp(y, design)
+    fit <- glmQLFit(y, design)
+    qlf <- glmQLFTest(fit, coef = "score_grouphigh")
+    topTags(qlf, n = Inf, sort.by = "none")$table %>%
+        as_tibble(rownames = "gene") %>%
+        mutate(t_cell_subtype = subtype_name,
+               n_donors       = length(keep_donors),
+               n_samples      = ncol(pb_counts))
+}
+
+pb_results <- de_input %>%
+    group_split(t_cell_subtype) %>%
+    purrr::map_dfr(pseudobulk_de)
+
+pb_out <- pb_results %>%
+    dplyr::rename(p_val = PValue, p_val_adj = FDR, avg_log2FC = logFC) %>%
+    mutate(method = "pseudobulk_edgeR_sensitivity")
+
+write_csv(pb_out, glue("{sc_results_dir}/wang_pd_de_high_vs_low_cdr3score_pseudobulk_edgeR_sensitivity.csv"))
+
+cat("\n=== Pseudobulk edgeR: top 15 per subtype (SENSITIVITY) ===\n")
+pb_out %>% arrange(p_val_adj) %>% group_by(t_cell_subtype) %>% slice_head(n = 15) %>% print(n = 30)
+
+p_de_volcano
+```
+
 
 
 ## Session Info

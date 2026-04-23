@@ -1,0 +1,195 @@
+---
+title: "ClusTCR Stats EDA (Minimal Load)"
+editor: source
+author: "Joe Boktor"
+date: '2026-04-14'
+eval: false
+format:
+  html:
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    fig-align: right
+    fig-height: 8
+    fig-width: 14
+---
+
+# ClusTCR Stats EDA (Minimal)
+
+This notebook only loads the core data needed to build the merged clusTCR dataset:
+- clusTCR input TCRs
+- CDR3 risk scores
+- OLGA/SONIA generation probabilities
+- clusTCR output + summary
+
+```{r setup, include=FALSE}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(glue)
+
+home_dir <- "/resnick/groups/MazmanianLab/jboktor"
+pdmbs_dir <- paste0(home_dir, "/PDMBS")
+wkdir <- paste0(pdmbs_dir, "/pdairr")
+
+clustcr_dir <- glue("{wkdir}/data/interim/clusTCR")
+tcr_cdr3_riskscore_complied <- glue("{wkdir}/data/interim/cdr3_qtl/scoring_cdr3-risk-scores_complied")
+dint <- glue("{wkdir}/data/interim")
+
+risk_score_rds <- Sys.glob(glue("{tcr_cdr3_riskscore_complied}/risk_scores_padj05_*.rds")) %>%
+  sort() %>%
+  tail(1)
+stopifnot(length(risk_score_rds) == 1, file.exists(risk_score_rds))
+
+logreg_lrt_rds <- Sys.glob(glue("{clustcr_dir}/results/logistic_regression_binary_anova_lrt_pval_df_*.rds")) %>%
+  sort() %>%
+  tail(1)
+stopifnot(length(logreg_lrt_rds) == 1, file.exists(logreg_lrt_rds))
+
+logreg_fullstats_rds <- Sys.glob(glue("{clustcr_dir}/results/logistic_regression_binary_full_model_stats_df_*.rds")) %>%
+  sort() %>%
+  tail(1)
+stopifnot(length(logreg_fullstats_rds) == 1, file.exists(logreg_fullstats_rds))
+
+stopifnot(file.exists(glue("{clustcr_dir}/input/amppd_tcrb_2025-08-04.tsv")))
+stopifnot(file.exists(glue("{clustcr_dir}/results/clusTCR_output_vgene_restricted_31cpus.csv")))
+stopifnot(file.exists(glue("{clustcr_dir}/results/clusTCR_summary_vgene_restricted_31cpus.csv")))
+stopifnot(file.exists(glue("{dint}/olga_sonnia/results/tcrb_case_results/tcrb_case_results.csv")))
+stopifnot(file.exists(glue("{dint}/olga_sonnia/results/tcrb_ctrl_results/tcrb_ctrl_results.csv")))
+
+```
+
+## Load and join TCR-level annotations
+
+```{r load-tcr-risk-genprob}
+clustcr_cdr3b_df <- readr::read_tsv(
+  glue("{clustcr_dir}/input/amppd_tcrb_2025-08-04.tsv")
+) %>%
+  dplyr::rename(case_control_other_latest = condition)
+
+cdr3_risk_score_df <- readRDS(
+  risk_score_rds
+) %>%
+  distinct() %>%
+  dplyr::rename(CDR3b_aa = CDR3aa)
+
+genprob_case <- read_csv(
+  glue("{dint}/olga_sonnia/results/tcrb_case_results/tcrb_case_results.csv")
+) %>%
+  mutate(case_control_other_latest = "Case") %>%
+  dplyr::rename(CDR3b_aa = amino_acid, TRBV = v_gene, TRBJ = j_gene)
+
+genprob_ctrl <- read_csv(
+  glue("{dint}/olga_sonnia/results/tcrb_ctrl_results/tcrb_ctrl_results.csv")
+) %>%
+  mutate(case_control_other_latest = "Control") %>%
+  dplyr::rename(CDR3b_aa = amino_acid, TRBV = v_gene, TRBJ = j_gene)
+
+genprob <- bind_rows(genprob_case, genprob_ctrl)
+
+tcrb_df <- clustcr_cdr3b_df %>%
+  left_join(cdr3_risk_score_df, by = "CDR3b_aa") %>%
+  left_join(genprob, by = c("CDR3b_aa", "TRBV", "TRBJ", "case_control_other_latest"))
+
+tcrb_df %>% glimpse()
+
+```
+
+## Load clusTCR outputs and build merged dataset
+
+```{r build-compiled-clustcr-results}
+clustcr_output <- read_csv(
+  glue("{clustcr_dir}/results/clusTCR_output_vgene_restricted_31cpus.csv"),
+  col_select = -1
+)
+clustcr_output %>% glimpse()
+
+clustcr_summary <- read_csv(
+  glue("{clustcr_dir}/results/clusTCR_summary_vgene_restricted_31cpus.csv")
+) %>%
+  dplyr::rename(cluster = ...1)
+
+clustcr_summary$cluster <- unique(clustcr_output$cluster)
+clustcr_summary %>% glimpse()
+
+clustcr_results_df <- clustcr_output %>%
+  left_join(clustcr_summary, by = "cluster") %>%
+  left_join(
+    tcrb_df,
+    by = c("junction_aa" = "CDR3b_aa", "v_call" = "TRBV"),
+    relationship = "many-to-many"
+  ) %>%
+  group_by(cluster) %>%
+  mutate(
+    unique_donors_per_clust = n_distinct(participant_id),
+    unique_samples_per_clust = n_distinct(sample_id)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    motif_length = motif %>%
+      gsub("\\[.*?\\]", "X", .) %>%
+      gsub("\\.", "", .) %>%
+      gsub("[^A-Z]", "", .) %>%
+      nchar(),
+    cluster_id = glue("{motif}_{v_call}")
+  )
+
+clustcr_results_df %>% glimpse()
+```
+
+## Load logistic / ANOVA-LRT results and pair to clusters
+
+```{r load-logreg-lrt-and-pair}
+# ANOVA-LRT p-values from binary logistic cluster models
+anova_lrt_pval_df <- readRDS(
+  logreg_lrt_rds
+) %>%
+  dplyr::rename(anova_lrt_pval = p_value)
+
+# Full model coefficient/stat summaries (includes cluster_id)
+logreg_full_model_stats_df <- readRDS(
+  logreg_fullstats_rds
+)
+
+# Cluster-level table paired with both logistic result objects
+cluster_level_w_logreg <- clustcr_results_df %>%
+  dplyr::select(
+    cluster_id, cluster, motif, v_call, motif_length,
+    unique_donors_per_clust, unique_samples_per_clust
+  ) %>%
+  distinct() %>%
+  left_join(anova_lrt_pval_df, by = "cluster_id") %>%
+  left_join(logreg_full_model_stats_df, by = "cluster_id")
+
+cluster_level_w_logreg %>% glimpse()
+```
+
+## Save EDA-ready dataset
+
+```{r save-eda-dataset}
+saveRDS(
+  clustcr_results_df,
+  glue("{clustcr_dir}/results/compiled_clustcr_results_df_EDA_{Sys.Date()}.rds")
+)
+
+saveRDS(
+  cluster_level_w_logreg,
+  glue("{clustcr_dir}/results/compiled_clustcr_cluster_level_w_logreg_EDA_{Sys.Date()}.rds")
+)
+```
+
+
+```{r}
+clustcr_results_df <- readRDS(
+  glue("{clustcr_dir}/results/compiled_clustcr_results_df_EDA_{Sys.Date()}.rds")
+)
+
+cluster_level_w_logreg <- readRDS(
+  glue("{clustcr_dir}/results/compiled_clustcr_cluster_level_w_logreg_EDA_{Sys.Date()}.rds")
+)
+
+clustcr_results_df %>% glimpse()
+cluster_level_w_logreg %>% glimpse()
+
+```

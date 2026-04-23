@@ -100,6 +100,7 @@ clustcr_results_df_filtered %>% glimpse()
 clustcr_results_df_filtered$cluster_id %>% unique() %>% length()
 ```
 
+
 Executing Chi-squared test for PD enriched/depeleted clusters
 
 ```{r}
@@ -1473,6 +1474,7 @@ sid_count_summary_per_cluster_wide %>% colnames() %>% head()
 full_df <- sid_count_summary_per_cluster_wide %>% 
   left_join(model_meta_df)
 
+
 # Saving the full dataframe
 saveRDS(
   full_df,
@@ -1609,13 +1611,420 @@ submitJobs(jobs,
 ```
 
 
-INSERTING A NEW BLOCK
+## Binary clusTCR logreg with longitudinal metadata averages (PD-only + study-adjusted)
+
+Setup run layout and conventions
 
 ```{r}
+target_metadata_classes <- c("Cognition", "Motor Severity")
+target_case_group <- "Case"
 
-metadata_categories_df$metadata_class %>% table
+logreg_metaavg_root <- glue("{clustcr_dir}/results/logistic_regression_binary_metaavg")
+logreg_metaavg_dirs <- list(
+  metadata = glue("{logreg_metaavg_root}/metadata"),
+  input = glue("{logreg_metaavg_root}/input"),
+  pairwise = glue("{logreg_metaavg_root}/pairwise"),
+  summaries = glue("{logreg_metaavg_root}/summaries"),
+  manifests = glue("{logreg_metaavg_root}/manifests")
+)
 
+purrr::walk(logreg_metaavg_dirs, ~ dir.create(.x, showWarnings = FALSE, recursive = TRUE))
 
+model_spec_tag <- "pdonly_study_mhc_seqdepth_age_sex_metaavg"
+run_id <- glue("{model_spec_tag}_{Sys.Date()}")
+
+safe_file_token <- function(x) {
+  x %>% gsub("[^A-Za-z0-9._-]", "_", .)
+}
+
+logreg_metaavg_dirs
+run_id
+```
+
+Build participant-level averaged metadata table (numeric only, selected classes)
+
+```{r}
+metadata_long <- readRDS(
+  glue("{wkdir}/data/interim/metadata/compiled_metadata_v4_release_2025-07-21.rds")
+) %>%
+  dplyr::filter(case_control_other_latest != "Other")
+
+metadata_categories_df <- readRDS(
+  glue("{wkdir}/data/interim/metadata/metadata_categories_dataframe_2025-07-21.rds")
+)
+
+candidate_metadata <- metadata_categories_df %>%
+  dplyr::filter(metadata_class %in% target_metadata_classes) %>%
+  dplyr::pull(metadata) %>%
+  unique()
+
+numeric_candidate_metadata <- candidate_metadata %>%
+  intersect(colnames(metadata_long))
+
+numeric_candidate_metadata <- numeric_candidate_metadata[
+  purrr::map_lgl(metadata_long[, numeric_candidate_metadata, drop = FALSE], is.numeric)
+]
+
+metadata_pd_only <- metadata_long %>%
+  dplyr::filter(case_control_other_latest == target_case_group)
+
+model_meta_fixed_df <- metadata_pd_only %>%
+  dplyr::group_by(
+    participant_id, age_at_baseline, sex, study,
+    MHC_all_PC1, MHC_all_PC2, MHC_all_PC3
+  ) %>%
+  dplyr::summarise(
+    est_tcell_reads_abis_pid = sum(est_tcell_reads_abis, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::distinct()
+
+model_meta_avg_df <- metadata_pd_only %>%
+  dplyr::group_by(participant_id) %>%
+  dplyr::summarise(
+    dplyr::across(
+      all_of(numeric_candidate_metadata),
+      ~ mean(.x, na.rm = TRUE),
+      .names = "avg__{.col}"
+    ),
+    .groups = "drop"
+  )
+
+model_meta_avg_df <- model_meta_fixed_df %>%
+  dplyr::left_join(model_meta_avg_df, by = "participant_id") %>%
+  glimpse()
+
+metaavg_terms <- grep("^avg__", colnames(model_meta_avg_df), value = TRUE)
+metaavg_terms <- metaavg_terms[
+  purrr::map_lgl(metaavg_terms, ~ {
+    x <- model_meta_avg_df[[.x]]
+    sum(!is.na(x)) >= 20 && dplyr::n_distinct(x, na.rm = TRUE) > 1
+  })
+]
+
+meta_manifest <- tibble::tibble(
+  run_id = run_id,
+  target_case_group = target_case_group,
+  target_metadata_classes = paste(target_metadata_classes, collapse = ";"),
+  n_candidate_metadata = length(candidate_metadata),
+  n_numeric_metadata = length(numeric_candidate_metadata),
+  n_metaavg_terms_used = length(metaavg_terms),
+  n_participants = nrow(model_meta_avg_df)
+)
+
+saveRDS(
+  model_meta_avg_df,
+  glue("{logreg_metaavg_dirs$metadata}/metadata_for_logreg_metaavg_{run_id}.rds")
+)
+readr::write_csv(
+  meta_manifest,
+  glue("{logreg_metaavg_dirs$manifests}/metadata_manifest_{run_id}.csv")
+)
+```
+
+Build unweighted binary cluster membership model input (PD-only)
+
+```{r}
+clustcr_results_df <- readRDS(
+  glue("{clustcr_dir}/results/compiled_clustcr_results_df_2025-08-24.rds")
+)
+
+sid_count_summary_per_cluster <- clustcr_results_df %>%
+  dplyr::filter(unique_donors_per_clust >= 10) %>%
+  dplyr::filter(motif_length >= 8) %>%
+  dplyr::filter(case_control_other_latest == target_case_group) %>%
+  dplyr::select(cluster_id, participant_id) %>%
+  dplyr::distinct()
+
+sid_count_summary_per_cluster_wide <- sid_count_summary_per_cluster %>%
+  dplyr::mutate(value = 1L) %>%
+  tidyr::pivot_wider(
+    names_from = cluster_id,
+    values_from = value,
+    values_fill = 0L
+  )
+
+model_input_binary_metaavg <- sid_count_summary_per_cluster_wide %>%
+  dplyr::left_join(model_meta_avg_df, by = "participant_id") %>%
+  glimpse()
+
+cluster_cols <- setdiff(colnames(sid_count_summary_per_cluster_wide), "participant_id")
+
+model_input_path <- glue(
+  "{logreg_metaavg_dirs$input}/logreg_binary_input_pdonly_metaavg_{run_id}.rds"
+)
+saveRDS(model_input_binary_metaavg, model_input_path)
+
+input_manifest <- tibble::tibble(
+  run_id = run_id,
+  n_participants = nrow(model_input_binary_metaavg),
+  n_clusters = length(cluster_cols),
+  n_metaavg_terms = length(metaavg_terms),
+  input_rds = model_input_path
+)
+readr::write_csv(
+  input_manifest,
+  glue("{logreg_metaavg_dirs$manifests}/input_manifest_{run_id}.csv")
+)
+
+```
+
+Define pairwise null/full logistic modeling function
+
+```{r}
+run_binary_cluster_logreg_metaavg <- function(job_df, input_rds, run_tag, model_spec_tag, out_dir) {
+  require(glue)
+  require(dplyr)
+  require(broom)
+
+  full_df <- readRDS(input_rds)
+  required_covars <- c(
+    "study",
+    "MHC_all_PC1", "MHC_all_PC2", "MHC_all_PC3",
+    "est_tcell_reads_abis_pid", "age_at_baseline", "sex"
+  )
+
+  for (i in seq_len(nrow(job_df))) {
+    cid <- job_df$cluster_id[i]
+    meta_term <- job_df$meta_term[i]
+    outpath <- job_df$output_path[i]
+
+    if (file.exists(outpath)) {
+      next
+    }
+
+    result_obj <- tryCatch({
+      if (!cid %in% colnames(full_df)) {
+        stop(glue("Missing cluster column: {cid}"))
+      }
+      if (!meta_term %in% colnames(full_df)) {
+        stop(glue("Missing metadata term column: {meta_term}"))
+      }
+
+      model_df <- full_df %>%
+        dplyr::select(
+          participant_id,
+          outcome = all_of(cid),
+          all_of(required_covars),
+          meta_value = all_of(meta_term)
+        ) %>%
+        dplyr::filter(!is.na(meta_value)) %>%
+        dplyr::filter(
+          !is.na(study),
+          !is.na(MHC_all_PC1), !is.na(MHC_all_PC2), !is.na(MHC_all_PC3),
+          !is.na(est_tcell_reads_abis_pid), !is.na(age_at_baseline), !is.na(sex)
+        )
+
+      if (nrow(model_df) < 30) {
+        stop("Insufficient rows after filtering (<30)")
+      }
+      if (dplyr::n_distinct(model_df$outcome, na.rm = TRUE) < 2) {
+        stop("Outcome has no variance")
+      }
+      if (dplyr::n_distinct(model_df$meta_value, na.rm = TRUE) < 2) {
+        stop("Metadata term has no variance")
+      }
+
+      null_model <- glm(
+        outcome ~ study + MHC_all_PC1 + MHC_all_PC2 + MHC_all_PC3 +
+          est_tcell_reads_abis_pid + age_at_baseline + sex,
+        data = model_df,
+        family = binomial(link = "logit")
+      )
+      full_model <- glm(
+        outcome ~ study + MHC_all_PC1 + MHC_all_PC2 + MHC_all_PC3 +
+          est_tcell_reads_abis_pid + age_at_baseline + sex + meta_value,
+        data = model_df,
+        family = binomial(link = "logit")
+      )
+
+      model_comp <- anova(full_model, null_model, test = "LRT")
+      lrt_res <- broom::tidy(model_comp)
+      logreg_anova_df <- lrt_res[2, ] %>%
+        dplyr::mutate(
+          cluster_id = cid,
+          meta_term = meta_term,
+          run_id = run_tag,
+          model_spec_tag = model_spec_tag
+        )
+
+      list(
+        status = "ok",
+        cluster_id = cid,
+        meta_term = meta_term,
+        run_id = run_tag,
+        model_spec_tag = model_spec_tag,
+        n_obs = nrow(model_df),
+        logit_null = broom::tidy(null_model),
+        logit_full = broom::tidy(full_model),
+        comparison_res = model_comp,
+        logit_anova_df = logreg_anova_df,
+        full_model_glance = broom::glance(full_model),
+        null_model_glance = broom::glance(null_model)
+      )
+    }, error = function(e) {
+      list(
+        status = "error",
+        cluster_id = cid,
+        meta_term = meta_term,
+        run_id = run_tag,
+        model_spec_tag = model_spec_tag,
+        error_message = as.character(e$message)
+      )
+    })
+
+    saveRDS(result_obj, outpath)
+  }
+}
+
+```
+
+Submit pairwise models in Slurm-parallel with rerun-safe tracking
+
+```{r}
+cluster_keep <- model_input_binary_metaavg %>%
+  dplyr::summarise(dplyr::across(all_of(cluster_cols), ~ sum(.x == 1, na.rm = TRUE))) %>%
+  tidyr::pivot_longer(dplyr::everything(), names_to = "cluster_id", values_to = "n_pos") %>%
+  dplyr::filter(n_pos >= 5) %>%
+  dplyr::pull(cluster_id)
+
+existing_files <- list.files(
+  logreg_metaavg_dirs$pairwise,
+  pattern = glue("__{run_id}\\.rds$"),
+  full.names = FALSE
+)
+existing_key <- tibble::tibble(output_file = existing_files)
+
+pairwise_df <- tidyr::crossing(
+  cluster_id = cluster_keep,
+  meta_term = metaavg_terms
+) %>%
+  dplyr::mutate(
+    output_file = glue(
+      "{safe_file_token(cluster_id)}__{safe_file_token(meta_term)}__{run_id}.rds"
+    ),
+    output_path = glue("{logreg_metaavg_dirs$pairwise}/{output_file}")
+  )
+
+pairwise_pending <- pairwise_df %>%
+  dplyr::anti_join(existing_key, by = "output_file")
+
+readr::write_csv(
+  pairwise_df %>%
+    dplyr::mutate(already_ran = output_file %in% existing_key$output_file) %>%
+    dplyr::select(cluster_id, meta_term, output_file, already_ran),
+  glue("{logreg_metaavg_dirs$manifests}/pairwise_manifest_{run_id}.csv")
+)
+
+if (nrow(pairwise_pending) > 0) {
+  chunk_size <- 25
+  pairwise_chunks <- split(
+    pairwise_pending,
+    ceiling(seq_len(nrow(pairwise_pending)) / chunk_size)
+  )
+
+  breg <- breg_setup(
+    cluster_name = "clusTCR_logreg_binary_metaavg",
+    log_dir = glue("{wkdir}/.cluster_runs/"),
+    template_path = glue("{wkdir}/batchtools_templates/batchtools.slurm.tmpl")
+  )
+
+  jobs <- batchMap(
+    fun = run_binary_cluster_logreg_metaavg,
+    args = list(
+      job_df = pairwise_chunks,
+      input_rds = rep(model_input_path, length(pairwise_chunks)),
+      run_tag = rep(run_id, length(pairwise_chunks)),
+      model_spec_tag = rep(model_spec_tag, length(pairwise_chunks)),
+      out_dir = rep(logreg_metaavg_dirs$pairwise, length(pairwise_chunks))
+    ),
+    reg = breg
+  )
+
+  submitJobs(
+    jobs,
+    resources = list(
+      walltime = "3:00:00",
+      memory = "5GB",
+      ncpus = 1,
+      max.concurrent.jobs = 9999
+    )
+  )
+} else {
+  message("No pending pairwise jobs; all outputs already exist.")
+}
+```
+
+Aggregate pairwise results and save run summaries
+
+```{r}
+pairwise_paths <- list.files(
+  logreg_metaavg_dirs$pairwise,
+  pattern = glue("__{run_id}\\.rds$"),
+  full.names = TRUE
+)
+
+pairwise_res <- purrr::map(pairwise_paths, ~ tryCatch(readRDS(.x), error = function(e) NULL))
+pairwise_res <- pairwise_res[!purrr::map_lgl(pairwise_res, is.null)]
+
+summary_df <- purrr::map_dfr(pairwise_res, function(x) {
+  if (identical(x$status, "ok")) {
+    lrt_p <- x$logit_anova_df$p.value %>% as.numeric()
+    full_meta <- x$logit_full %>% dplyr::filter(term == "meta_value")
+    tibble::tibble(
+      cluster_id = x$cluster_id,
+      meta_term = x$meta_term,
+      fit_ok = TRUE,
+      p_value = lrt_p,
+      meta_estimate = full_meta$estimate %>% as.numeric(),
+      meta_term_p_value = full_meta$p.value %>% as.numeric(),
+      n_obs = x$n_obs,
+      delta_aic = x$null_model_glance$AIC - x$full_model_glance$AIC,
+      delta_bic = x$null_model_glance$BIC - x$full_model_glance$BIC
+    )
+  } else {
+    tibble::tibble(
+      cluster_id = x$cluster_id,
+      meta_term = x$meta_term,
+      fit_ok = FALSE,
+      p_value = NA_real_,
+      meta_estimate = NA_real_,
+      meta_term_p_value = NA_real_,
+      n_obs = NA_real_,
+      delta_aic = NA_real_,
+      delta_bic = NA_real_,
+      error_message = x$error_message
+    )
+  }
+}) %>%
+  dplyr::mutate(
+    run_id = run_id,
+    model_spec_tag = model_spec_tag,
+    p_value_adj_bh = p.adjust(p_value, method = "BH")
+  ) %>%
+  dplyr::arrange(p_value)
+
+run_manifest <- tibble::tibble(
+  run_id = run_id,
+  model_spec_tag = model_spec_tag,
+  total_pairs_planned = nrow(pairwise_df),
+  total_pairs_completed = nrow(summary_df),
+  n_success = sum(summary_df$fit_ok, na.rm = TRUE),
+  n_failed = sum(!summary_df$fit_ok, na.rm = TRUE)
+)
+
+saveRDS(
+  summary_df,
+  glue("{logreg_metaavg_dirs$summaries}/pairwise_logreg_summary_{run_id}.rds")
+)
+readr::write_csv(
+  summary_df,
+  glue("{logreg_metaavg_dirs$summaries}/pairwise_logreg_summary_{run_id}.csv")
+)
+readr::write_csv(
+  run_manifest,
+  glue("{logreg_metaavg_dirs$manifests}/run_manifest_{run_id}.csv")
+)
 ```
 
 
