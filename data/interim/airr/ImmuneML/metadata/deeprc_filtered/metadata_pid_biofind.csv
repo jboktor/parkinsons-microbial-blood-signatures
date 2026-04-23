@@ -1,0 +1,100 @@
+filename,participant_id,study,case_control_other_latest,age_at_baseline,sex,ethnicity,race,subject_id,ID,clonal_volume,clonal_volume_binned,age_at_baseline_binned
+BF-1001.tsv,BF-1001,BioFIND,Control,55,Male,Not Hispanic or Latino,White,BF-1001,BF-1001,2236,2,2
+BF-1002.tsv,BF-1002,BioFIND,Case,66,Female,Not Hispanic or Latino,White,BF-1002,BF-1002,1610,2,3
+BF-1009.tsv,BF-1009,BioFIND,Control,73,Male,Not Hispanic or Latino,White,BF-1009,BF-1009,1203,2,5
+BF-1012.tsv,BF-1012,BioFIND,Control,65,Female,Not Hispanic or Latino,White,BF-1012,BF-1012,1113,1,3
+BF-1016.tsv,BF-1016,BioFIND,Case,71,Female,Not Hispanic or Latino,White,BF-1016,BF-1016,1364,2,4
+BF-1019.tsv,BF-1019,BioFIND,Control,65,Male,Hispanic or Latino,Black or African American,BF-1019,BF-1019,1260,2,3
+BF-1020.tsv,BF-1020,BioFIND,Control,65,Female,Not Hispanic or Latino,Black or African American,BF-1020,BF-1020,1109,1,3
+BF-1025.tsv,BF-1025,BioFIND,Control,62,Female,Not Hispanic or Latino,White,BF-1025,BF-1025,1819,2,2
+BF-1028.tsv,BF-1028,BioFIND,Control,56,Male,Hispanic or Latino,White,BF-1028,BF-1028,1479,2,2
+BF-1029.tsv,BF-1029,BioFIND,Control,61,Female,Not Hispanic or Latino,White,BF-1029,BF-1029,1453,2,2
+BF-1038.tsv,BF-1038,BioFIND,Case,57,Male,Not Hispanic or Latino,White,BF-1038,BF-1038,1007,1,2
+BF-1041.tsv,BF-1041,BioFIND,Control,63,Female,Not Hispanic or Latino,White,BF-1041,BF-1041,2239,2,3
+BF-1043.tsv,BF-1043,BioFIND,Case,76,Female,Not Hispanic or Latino,White,BF-1043,BF-1043,1367,2,5
+BF-1044.tsv,BF-1044,BioFIND,Case,77,Male,Not Hispanic or Latino,White,BF-1044,BF-1044,2377,3,5
+BF-1046.tsv,BF-1046,BioFIND,Case,65,Female,Not Hispanic or Latino,White,BF-1046,BF-1046,1842,2,3
+BF-1048.tsv,BF-1048,BioFIND,Case,64,Male,Not Hispanic or Latino,White,BF-1048,BF-1048,1459,2,3
+BF-1049.tsv,BF-1049,BioFIND,Control,82,Female,Not Hispanic or Latino,Native Hawaiian or Other Pacific Islander,BF-1049,BF-1049,1754,2,5
+BF-1051.tsv,BF-1051,BioFIND,Case,65,Male,Not Hispanic or Latino,White,BF-1051,BF-1051,1469,2,3
+BF-1052.tsv,BF-1052,BioFIND,Case,66,Male,Not Hispanic or Latino,White,BF-1052,BF-1052,1235,2,3
+BF-1058.tsv,BF-1058,BioFIND,Control,70,Female,Not Hispanic or Latino,White,BF-1058,BF-1058,1374,2,4
+BF-1059.tsv,BF-1059,BioFIND,Case,63,Male,Not Hispanic or Latino,White,BF-1059,BF-1059,1811,2,3
+BF-1060.tsv,BF-1060,BioFIND,Case,73,Female,Not Hispanic or Latino,White,BF-1060,BF-1060,1058,1,5
+BF-1062.tsv,BF-1062,BioFIND,Case,65,Female,Not Hispanic or Latino,White,BF-1062,BF-1062,1071,1,3
+BF-1066.tsv,BF-1066,BioFIND,Control,62,Male,Not Hispanic or Latino,White,BF-1066,BF-1066,1940,2,2
+BF-1071.tsv,BF-1071,BioFIND,Control,61,Female,Not Hispanic or Latino,Multiracial,BF-1071,BF-1071,1688,2,2
+BF-1075.tsv,BF-1075,BioFIND,Control,55,Female,Not Hispanic or Latino,White,BF-1075,BF-1075,2143,2,2
+BF-1076.tsv,BF-1076,BioFIND,Control,67,Female,Not Hispanic or Latino,White,BF-1076,BF-1076,1129,1,3
+BF-1078.tsv,BF-1078,BioFIND,Case,67,Female,Hispanic or Latino,NA,BF-1078,BF-1078,1939,2,3
+BF-1079.tsv,BF-1079,BioFIND,Case,60,Male,Not Hispanic or Latino,White,BF-1079,BF-1079,1194,2,2
+BF-1081.tsv,BF-1081,BioFIND,Case,66,Female,Not Hispanic or Latino,White,BF-1081,BF-1081,1775,2,3
+BF-1082.tsv,BF-1082,BioFIND,Control,53,Female,Not Hispanic or Latino,White,BF-1082,BF-1082,2127,2,1
+BF-1083.tsv,BF-1083,BioFIND,Case,71,Male,Not Hispanic or Latino,White,BF-1083,BF-1083,1110,1,4
+BF-1084.tsv,BF-1084,BioFIND,Case,61,Male,Not Hispanic or Latino,White,BF-1084,BF-1084,1251,2,2
+BF-1085.tsv,BF-1085,BioFIND,Case,66,Male,Not Hispanic or Latino,White,BF-1085,BF-1085,1202,2,3
+BF-1088.tsv,BF-1088,BioFIND,Case,66,Female,Not Hispanic or Latino,White,BF-1088,BF-1088,1141,1,3
+BF-1090.tsv,BF-1090,BioFIND,Control,64,Female,Not Hispanic or Latino,White,BF-1090,BF-1090,1496,2,3
+BF-1093.tsv,BF-1093,BioFIND,Case,69,Male,Not Hispanic or Latino,White,BF-1093,BF-1093,1250,2,4
+BF-1094.tsv,BF-1094,BioFIND,Control,61,Female,Not Hispanic or Latino,White,BF-1094,BF-1094,1883,2,2
+BF-1095.tsv,BF-1095,BioFIND,Case,68,Female,Not Hispanic or Latino,White,BF-1095,BF-1095,1835,2,4
+BF-1096.tsv,BF-1096,BioFIND,Case,71,Female,Not Hispanic or Latino,White,BF-1096,BF-1096,3060,3,4
+BF-1102.tsv,BF-1102,BioFIND,Case,69,Male,Not Hispanic or Latino,White,BF-1102,BF-1102,1876,2,4
+BF-1103.tsv,BF-1103,BioFIND,Case,75,Female,Not Hispanic or Latino,White,BF-1103,BF-1103,1110,1,5
+BF-1108.tsv,BF-1108,BioFIND,Case,74,Female,Hispanic or Latino,NA,BF-1108,BF-1108,1437,2,5
+BF-1109.tsv,BF-1109,BioFIND,Case,73,Female,Not Hispanic or Latino,White,BF-1109,BF-1109,1150,1,5
+BF-1110.tsv,BF-1110,BioFIND,Case,73,Female,Not Hispanic or Latino,White,BF-1110,BF-1110,1012,1,5
+BF-1111.tsv,BF-1111,BioFIND,Case,79,Female,Not Hispanic or Latino,White,BF-1111,BF-1111,1314,2,5
+BF-1112.tsv,BF-1112,BioFIND,Control,69,Female,Not Hispanic or Latino,White,BF-1112,BF-1112,1905,2,4
+BF-1121.tsv,BF-1121,BioFIND,Case,72,Female,Not Hispanic or Latino,White,BF-1121,BF-1121,2274,2,4
+BF-1123.tsv,BF-1123,BioFIND,Case,74,Male,Not Hispanic or Latino,White,BF-1123,BF-1123,1061,1,5
+BF-1127.tsv,BF-1127,BioFIND,Case,65,Male,Not Hispanic or Latino,White,BF-1127,BF-1127,1124,1,3
+BF-1128.tsv,BF-1128,BioFIND,Control,58,Female,Not Hispanic or Latino,White,BF-1128,BF-1128,1283,2,2
+BF-1129.tsv,BF-1129,BioFIND,Case,57,Male,Not Hispanic or Latino,White,BF-1129,BF-1129,1320,2,2
+BF-1131.tsv,BF-1131,BioFIND,Control,56,Male,Not Hispanic or Latino,White,BF-1131,BF-1131,1136,1,2
+BF-1134.tsv,BF-1134,BioFIND,Case,62,Male,Not Hispanic or Latino,White,BF-1134,BF-1134,1368,2,2
+BF-1135.tsv,BF-1135,BioFIND,Control,58,Male,Not Hispanic or Latino,White,BF-1135,BF-1135,2165,2,2
+BF-1136.tsv,BF-1136,BioFIND,Case,55,Female,Not Hispanic or Latino,White,BF-1136,BF-1136,1376,2,2
+BF-1137.tsv,BF-1137,BioFIND,Control,68,Female,Not Hispanic or Latino,White,BF-1137,BF-1137,2190,2,4
+BF-1142.tsv,BF-1142,BioFIND,Case,72,Male,Not Hispanic or Latino,White,BF-1142,BF-1142,1349,2,4
+BF-1145.tsv,BF-1145,BioFIND,Control,74,Female,Not Hispanic or Latino,White,BF-1145,BF-1145,2081,2,5
+BF-1147.tsv,BF-1147,BioFIND,Control,60,Female,Not Hispanic or Latino,White,BF-1147,BF-1147,1110,1,2
+BF-1149.tsv,BF-1149,BioFIND,Control,62,Male,Not Hispanic or Latino,White,BF-1149,BF-1149,1216,2,2
+BF-1151.tsv,BF-1151,BioFIND,Case,70,Male,Not Hispanic or Latino,White,BF-1151,BF-1151,4661,4,4
+BF-1154.tsv,BF-1154,BioFIND,Case,64,Male,Not Hispanic or Latino,Multiracial,BF-1154,BF-1154,1077,1,3
+BF-1155.tsv,BF-1155,BioFIND,Case,78,Male,Not Hispanic or Latino,White,BF-1155,BF-1155,1145,1,5
+BF-1158.tsv,BF-1158,BioFIND,Control,56,Male,Hispanic or Latino,Multiracial,BF-1158,BF-1158,1225,2,2
+BF-1159.tsv,BF-1159,BioFIND,Control,73,Male,Not Hispanic or Latino,Black or African American,BF-1159,BF-1159,1594,2,5
+BF-1161.tsv,BF-1161,BioFIND,Case,81,Male,Not Hispanic or Latino,White,BF-1161,BF-1161,1157,1,5
+BF-1163.tsv,BF-1163,BioFIND,Case,82,Male,Not Hispanic or Latino,White,BF-1163,BF-1163,1895,2,5
+BF-1165.tsv,BF-1165,BioFIND,Control,68,Male,Hispanic or Latino,NA,BF-1165,BF-1165,1451,2,4
+BF-1167.tsv,BF-1167,BioFIND,Case,74,Male,Not Hispanic or Latino,White,BF-1167,BF-1167,1488,2,5
+BF-1168.tsv,BF-1168,BioFIND,Control,76,Male,Not Hispanic or Latino,White,BF-1168,BF-1168,1587,2,5
+BF-1171.tsv,BF-1171,BioFIND,Control,79,Male,Not Hispanic or Latino,White,BF-1171,BF-1171,1349,2,5
+BF-1174.tsv,BF-1174,BioFIND,Control,56,Male,Not Hispanic or Latino,White,BF-1174,BF-1174,1884,2,2
+BF-1178.tsv,BF-1178,BioFIND,Control,58,Female,Not Hispanic or Latino,White,BF-1178,BF-1178,1125,1,2
+BF-1179.tsv,BF-1179,BioFIND,Case,65,Male,Not Hispanic or Latino,White,BF-1179,BF-1179,1038,1,3
+BF-1191.tsv,BF-1191,BioFIND,Case,72,Male,Not Hispanic or Latino,White,BF-1191,BF-1191,2075,2,4
+BF-1195.tsv,BF-1195,BioFIND,Control,58,Male,Not Hispanic or Latino,White,BF-1195,BF-1195,1099,1,2
+BF-1196.tsv,BF-1196,BioFIND,Control,58,Male,Not Hispanic or Latino,White,BF-1196,BF-1196,1032,1,2
+BF-1199.tsv,BF-1199,BioFIND,Control,61,Male,Not Hispanic or Latino,White,BF-1199,BF-1199,1427,2,2
+BF-1205.tsv,BF-1205,BioFIND,Case,79,Male,Not Hispanic or Latino,White,BF-1205,BF-1205,2011,2,5
+BF-1206.tsv,BF-1206,BioFIND,Case,56,Female,Not Hispanic or Latino,White,BF-1206,BF-1206,1183,2,2
+BF-1216.tsv,BF-1216,BioFIND,Case,69,Male,Not Hispanic or Latino,White,BF-1216,BF-1216,1132,1,4
+BF-1223.tsv,BF-1223,BioFIND,Control,65,Female,Not Hispanic or Latino,White,BF-1223,BF-1223,1038,1,3
+BF-1224.tsv,BF-1224,BioFIND,Control,59,Female,Not Hispanic or Latino,White,BF-1224,BF-1224,1332,2,2
+BF-1226.tsv,BF-1226,BioFIND,Control,70,Male,Not Hispanic or Latino,White,BF-1226,BF-1226,1267,2,4
+BF-1228.tsv,BF-1228,BioFIND,Control,81,Female,Not Hispanic or Latino,White,BF-1228,BF-1228,1199,2,5
+BF-1229.tsv,BF-1229,BioFIND,Case,66,Female,Not Hispanic or Latino,White,BF-1229,BF-1229,1009,1,3
+BF-1238.tsv,BF-1238,BioFIND,Case,61,Female,Not Hispanic or Latino,White,BF-1238,BF-1238,2253,2,2
+BF-1239.tsv,BF-1239,BioFIND,Control,67,Female,Not Hispanic or Latino,White,BF-1239,BF-1239,1594,2,3
+BF-1240.tsv,BF-1240,BioFIND,Case,73,Male,Not Hispanic or Latino,White,BF-1240,BF-1240,1396,2,5
+BF-1241.tsv,BF-1241,BioFIND,Case,80,Male,Not Hispanic or Latino,White,BF-1241,BF-1241,1059,1,5
+BF-1242.tsv,BF-1242,BioFIND,Case,57,Female,Hispanic or Latino,Other,BF-1242,BF-1242,1589,2,2
+BF-1244.tsv,BF-1244,BioFIND,Control,60,Male,Not Hispanic or Latino,White,BF-1244,BF-1244,1000,1,2
+BF-1245.tsv,BF-1245,BioFIND,Control,70,Male,Not Hispanic or Latino,White,BF-1245,BF-1245,1923,2,4
+BF-1252.tsv,BF-1252,BioFIND,Control,70,Female,Not Hispanic or Latino,White,BF-1252,BF-1252,1676,2,4
+BF-1255.tsv,BF-1255,BioFIND,Case,73,Male,Not Hispanic or Latino,White,BF-1255,BF-1255,1381,2,5
+BF-1256.tsv,BF-1256,BioFIND,Control,61,Male,Not Hispanic or Latino,White,BF-1256,BF-1256,1144,1,2
+BF-1257.tsv,BF-1257,BioFIND,Control,57,Male,Not Hispanic or Latino,White,BF-1257,BF-1257,1993,2,2
+BF-1260.tsv,BF-1260,BioFIND,Control,73,Male,Not Hispanic or Latino,White,BF-1260,BF-1260,1134,1,5

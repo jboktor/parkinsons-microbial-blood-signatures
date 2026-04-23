@@ -1,0 +1,30 @@
+definitions:
+  datasets:
+    apply_dataset:
+      format: AIRR
+      params:
+        path: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires
+        metadata_file: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/metadata/deeprc_filtered/metadata_pid_hbs.csv
+        is_repertoire: true
+        import_productive: true
+        import_with_stop_codon: false
+        import_out_of_frame: false
+        import_illegal_characters: false
+        import_empty_nt_sequences: true
+        import_empty_aa_sequences: false
+        region_type: IMGT_CDR3
+
+instructions:
+  apply_S2S_ppmi_to_hbs_seed2:
+    type: MLApplication
+    dataset: apply_dataset
+    config_path: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/results/deeprc_v2/deeprc_v2_S2S_ppmi_seed2/deeprc_v2_S2S_ppmi/optimal_case_control_other_latest/zip/ml_settings_case_control_other_latest.zip
+    number_of_processes: 4
+    metrics:
+      - accuracy
+      - balanced_accuracy
+      - auc
+      - precision
+      - recall
+      - f1_micro
+      - confusion_matrix

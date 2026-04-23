@@ -1,0 +1,95 @@
+definitions:
+  datasets:
+    train_dataset:
+      format: AIRR
+      params:
+        path: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/data_input/participant_repertoires
+        metadata_file: /central/groups/MazmanianLab/jboktor/PDMBS/pdairr/data/interim/airr/ImmuneML/metadata/deeprc_filtered/metadata_pid_pdbp.csv
+        is_repertoire: true
+        import_productive: true
+        import_with_stop_codon: false
+        import_out_of_frame: false
+        import_illegal_characters: false
+        import_empty_nt_sequences: true
+        import_empty_aa_sequences: false
+        region_type: IMGT_CDR3
+
+  encodings:
+    deeprc_enc: DeepRC
+
+  ml_methods:
+    deeprc_model:
+      DeepRC:
+        validation_part: 0.2
+        kernel_size: 7
+        n_kernels: 32
+        n_additional_convs: 1
+        n_attention_network_layers: 2
+        n_attention_network_units: 64
+        n_output_network_units: 32
+        learning_rate: 5.0e-5
+        n_updates: 200000
+        evaluate_at: 5000
+        sample_n_sequences: 1000
+        add_positional_information: true
+        consider_seq_counts: true
+        sequence_counts_scaling_fn: log
+        sequence_reduction_fraction: 0.1
+        reduction_mb_size: 100
+        training_batch_size: 16
+        n_workers: 4
+        n_torch_threads: 4
+        l2_weight_decay: 0.001
+        l1_weight_decay: 1.0e-5
+        keep_dataset_in_ram: true
+        pytorch_device_name: cuda:0
+
+  reports:
+    roc_summary: ROCCurveSummary
+    pr_curve: PrecisionRecallCurveSummary
+    ml_settings: MLSettingsPerformance
+    conf_matrix: ConfusionMatrix
+    perf_by_depth:
+      PerformancePerLabel:
+        alternative_label: clonal_volume_binned
+        metric: balanced_accuracy
+    perf_by_sex:
+      PerformancePerLabel:
+        alternative_label: sex
+        metric: balanced_accuracy
+    perf_by_age:
+      PerformancePerLabel:
+        alternative_label: age_at_baseline_binned
+        metric: balanced_accuracy
+
+instructions:
+  deeprc_v2_S2S_pdbp:
+    type: TrainMLModel
+    dataset: train_dataset
+    labels:
+      - case_control_other_latest:
+          positive_class: Case
+    settings:
+      - encoding: deeprc_enc
+        ml_method: deeprc_model
+    assessment:
+      split_strategy: stratified_k_fold
+      split_count: 5
+      reports:
+        models:
+          - conf_matrix
+          - perf_by_depth
+    selection:
+      split_strategy: stratified_k_fold
+      split_count: 5
+    strategy: GridSearch
+    optimization_metric: balanced_accuracy
+    metrics: [auc, balanced_accuracy, precision, recall, f1_micro]
+    reports:
+      - roc_summary
+      - pr_curve
+      - ml_settings
+      - perf_by_sex
+      - perf_by_age
+    refit_optimal_model: true
+    number_of_processes: 4
